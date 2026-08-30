@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Second Solution Studio"
+description = "A cinematic equation-to-animation studio for exploring, animating, and exporting mathematical graph visualizations with a high-performance WebGL canvas."
+version = "1.0.0"
+id = "artifacts/math-animation-engine"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21154
+
+[services.development]
+run = "pnpm --filter @workspace/math-animation-engine run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/math-animation-engine", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/math-animation-engine/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21154"
+BASE_PATH = "/"

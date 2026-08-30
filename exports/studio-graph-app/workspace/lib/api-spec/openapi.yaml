@@ -1,0 +1,125 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: validation
+    description: Mathematical expression validation
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /validate:
+    post:
+      operationId: validateEquation
+      tags: [validation]
+      summary: Validate a mathematical equation
+      description: Parses and classifies a mathematical expression without browser scraping.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EquationValidationInput"
+      responses:
+        "200":
+          description: Structured validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EquationValidationResult"
+        "400":
+          description: Malformed request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    EquationValidationInput:
+      type: object
+      properties:
+        equation:
+          type: string
+          minLength: 1
+        mode:
+          type: string
+          enum: [auto, function, parametric, implicit, implicit3d, polar, vector, piecewise, points]
+      required:
+        - equation
+        - mode
+    EquationValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        mode:
+          type: string
+          enum: [function, parametric, implicit, implicit3d, polar, vector, piecewise, points]
+        animatable:
+          type: boolean
+        hasTimeVariable:
+          type: boolean
+        supports2dFallback:
+          type: boolean
+        verificationStatus:
+          type: string
+          enum: [invalid, static, animatable]
+        verificationMessage:
+          type: string
+        normalized:
+          type: ["string", "null"]
+        error:
+          type: ["string", "null"]
+        suggestions:
+          type: array
+          items:
+            type: string
+        variables:
+          type: array
+          items:
+            type: string
+      required:
+        - valid
+        - mode
+        - animatable
+        - hasTimeVariable
+        - supports2dFallback
+        - verificationStatus
+        - verificationMessage
+        - normalized
+        - error
+        - suggestions
+        - variables
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+

@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "eVaIqqCsQ9qgLmt5JVYPY"
+uri = "file://exports/studio-graph-app.zip"
+type = "unspecified"
+title = "studio-graph-app.zip"
+description = "Production-ready Second Solution Studio source bundle for Google Cloud Shell, including frontend, backend, Web Workers, WebGL shaders, assets, built output, dynamic-port server, README, Dockerfile, and Cloud Build configuration."
+logical_id = "c3747b1b-23b1-4da2-bc16-92ad826ac355"
+content_hash = "sha256:677b086c64942f548d7031516211f03dda7951781dff77213c5ab52b2a3781c1"
+size = 7466304
+mtime_ms = 1788117781114
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:29b02aed-e9ae-4a0e-be53-0327ea278298/c3747b1b-23b1-4da2-bc16-92ad826ac355/8fae01c8-b29f-4284-90a9-cd66a23a7ca5"
+storage_version_token = "1788117791229859"
+content_type = "application/octet-stream"

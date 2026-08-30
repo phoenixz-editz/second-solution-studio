@@ -1,0 +1,79 @@
+Update the existing project with the following UI/UX and functionality improvements. Do NOT rewrite the whole project — only modify and extend the current code cleanly.
+
+-----------------------------
+1. Dynamic Status Indicator Fix
+-----------------------------
+- When equation validation is successful AND animation starts rendering:
+  → Automatically update status text to: "Validated & Rendered"
+  → Apply a green success style (neon glow effect)
+- Remove any stuck "Needs a second look" state after success
+- Ensure status updates are tied to actual render start event
+
+-----------------------------
+2. Overlay Auto-Hide Behavior
+-----------------------------
+- The center overlay ("Scene paused at the cue") must:
+  → Be hidden during active animation playback
+  → Only appear when:
+     - animation is paused
+     - or animation ends
+- Add smooth fade transition using CSS (opacity + transition)
+- Ensure overlay does NOT block graph visibility during animation
+
+-----------------------------
+3. Add Manual Points Mode (NEW FEATURE)
+-----------------------------
+Add a new input mode like Desmos:
+
+Modes:
+- Function mode (y = f(x))
+- Parametric mode (x(t), y(t))
+- Points mode (NEW)
+
+UI:
+- Add mode selector dropdown
+- When "Points" is selected:
+   → Show textarea input for points
+   → Hide equation input
+
+Points Input Format:
+(1,2)
+(2,4)
+(3,9)
+
+-----------------------------
+4. Points Parsing Logic
+-----------------------------
+- Parse textarea input into array of {x, y}
+- Ignore invalid lines safely
+- Validate minimum 2 points
+
+-----------------------------
+5. Points Animation System
+-----------------------------
+- Animate points progressively (like drawing)
+- Use progress-based slicing:
+   visiblePoints = points.slice(0, progress * totalPoints)
+- Render using Three.js:
+   → Line (connected mode)
+   → Optional: particle points mode
+
+-----------------------------
+6. Parametric Fix (IMPORTANT)
+-----------------------------
+- Ensure input like:
+   sin(3*t), sin(4*t)
+  is correctly interpreted as:
+   x = sin(3*t)
+   y = sin(4*t)
+
+- Animate using increasing t range:
+   t from min → max * progress
+
+-----------------------------
+7. Keep Everything Compatible
+-----------------------------
+- Do not break existing animation system
+- Do not remove Three.js rendering
+- Keep UI modern and responsive
+Also upgrades more things that you truly want to be upgrade first 

@@ -1,0 +1,18 @@
+{
+  "name": "studio-graph-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Second Solution Studio — animated 2D and 3D mathematics visualization.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "serve": "node server.js",
+    "build": "npm run build:workspace",
+    "build:workspace": "cd workspace && corepack pnpm install --frozen-lockfile && PORT=3000 BASE_PATH=/ corepack pnpm --filter @workspace/math-animation-engine run build && corepack pnpm --filter @workspace/api-server run build && cd .. && rm -rf dist backend/dist && cp -a workspace/artifacts/math-animation-engine/dist dist && cp -a workspace/artifacts/api-server/dist backend/dist",
+    "typecheck": "cd workspace && corepack pnpm typecheck",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
