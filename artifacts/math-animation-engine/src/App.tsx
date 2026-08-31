@@ -32,6 +32,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ClerkProvider, SignIn, SignUp } from '@clerk/react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { LandingPage } from '@/components/landing-page';
+import { DeveloperAccessForm } from '@/components/developer-access-form';
+import { DeveloperTextEditor } from '@/components/developer-text-editor';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
@@ -542,6 +544,10 @@ const presets: Array<{ equation: string; label: string; mode: StudioMode; symbol
   { equation: '[2 * cos(t)^3, 2 * sin(t)^3, 1.4 * sin(3 * t)]', label: '3D Rose Surface', mode: 'parametric3d', symbol: '✿' },
   { equation: 'x^2 + y^2 + z^2 + 2*x*y*z = 1', label: '3D Heart Solid', mode: 'implicit3d', symbol: '♥' },
   { equation: 'z = x^2 - y^2', label: 'Hyperbolic Paraboloid', mode: 'implicit3d', symbol: '⌁' },
+  { equation: 'x^2 / 4 - y^2 / 9 - z^2 / 16 = 1', label: 'Hyperbola Surface', mode: 'implicit3d', symbol: '∞' },
+  { equation: '[1.6 * sin(t)^3, 1.3 * cos(t) - 0.5 * cos(2*t) - 0.2 * cos(3*t) - 0.1 * cos(4*t), 0.6 * sin(2*t)]', label: '3D Heart Curve', mode: 'parametric3d', symbol: '♥' },
+  { equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1', label: 'Quadric Surface', mode: 'implicit3d', symbol: '◉' },
+  { equation: 'z = x^2 - y^2', label: 'Saddle Points', mode: 'implicit3d', symbol: '⌁' },
 ];
 
 const modeDetails: Record<StudioMode, { title: string; helper: string; placeholder: string }> = {
@@ -2106,6 +2112,7 @@ function GraphCanvas({
 }
 
 function MainStudio() {
+  const studioRootRef = useRef<HTMLDivElement>(null);
   const launchParams = useMemo(
     () => new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search),
     [],
@@ -2194,6 +2201,7 @@ function MainStudio() {
   const audioLastProgressRef = useRef(-1);
   const audioLastYRef = useRef<number | null>(null);
   const audioLastDirectionRef = useRef(0);
+  const audioLastToneTimeRef = useRef(0);
   const audioLastBeatTimeRef = useRef(0);
   const audioLastBeatIndexRef = useRef(-1);
   const allowUnloadRef = useRef(false);
@@ -2395,8 +2403,8 @@ function MainStudio() {
       return null;
     }
   }, [audioEnabled]);
-  const audioYValue = useCallback((currentProgress: number) => {
-    if (!audioEvaluator) return 0;
+  const audioPosition = useCallback((currentProgress: number) => {
+    if (!audioEvaluator) return { height: 0, slope: 0 };
     const phase = currentProgress * Math.PI * 2 * speed;
     const x = activeRange.xMin + currentProgress * (activeRange.xMax - activeRange.xMin);
     const parameter = activeRange.tMin + currentProgress * (activeRange.tMax - activeRange.tMin);
@@ -2414,27 +2422,55 @@ function MainStudio() {
       b: speed,
     };
     try {
-      if (audioEvaluator.kind === 'function') return Number(audioEvaluator.expression.evaluate(scope)) || 0;
-      if (audioEvaluator.kind === 'parametric') return Number(audioEvaluator.y.evaluate(scope)) || 0;
+      if (audioEvaluator.kind === 'function') {
+        return { height: Number(audioEvaluator.expression.evaluate(scope)) || 0, slope: 0 };
+      }
+      if (audioEvaluator.kind === 'parametric') {
+        const y = Number(audioEvaluator.y.evaluate(scope)) || 0;
+        const z = audioEvaluator.z ? Number(audioEvaluator.z.evaluate(scope)) || 0 : Number.NaN;
+        return { height: Number.isFinite(z) ? z : y, slope: 0 };
+      }
       if (audioEvaluator.kind === 'polar') {
         const radius = Number(audioEvaluator.expression.evaluate(scope)) || 0;
-        return radius * Math.sin(parameter);
+        return { height: radius * Math.sin(parameter), slope: 0 };
       }
-      if (audioEvaluator.kind === 'vector') return Number(audioEvaluator.y.evaluate(scope)) || 0;
+      if (audioEvaluator.kind === 'vector') {
+        return { height: Number(audioEvaluator.y.evaluate(scope)) || 0, slope: 0 };
+      }
       if (audioEvaluator.kind === 'points') {
         const points = evaluatePointSet(audioEvaluator.points, phase, speed);
-        return points[Math.min(points.length - 1, Math.floor(currentProgress * points.length))]?.y ?? 0;
+        return {
+          height: points[Math.min(points.length - 1, Math.floor(currentProgress * points.length))]?.y ?? 0,
+          slope: 0,
+        };
+      }
+      if (audioEvaluator.kind === 'implicit' && resolvedMode === 'implicit3d') {
+        const theta = parameter;
+        const xCoordinate = Math.cos(theta) * 2.4;
+        const yCoordinate = Math.sin(theta) * 2.4;
+        let bestZ = 0;
+        let bestAbs = Number.POSITIVE_INFINITY;
+        for (let step = 0; step <= 36; step += 1) {
+          const zCoordinate = -3.4 + (step / 36) * 6.8;
+          const value = Number(audioEvaluator.expression.evaluate({ ...scope, x: xCoordinate, y: yCoordinate, z: zCoordinate }));
+          if (Number.isFinite(value) && Math.abs(value) < bestAbs) {
+            bestAbs = Math.abs(value);
+            bestZ = zCoordinate;
+          }
+        }
+        return { height: bestZ, slope: 0 };
       }
     } catch {
-      return 0;
+      return { height: 0, slope: 0 };
     }
-    return 0;
-  }, [activeRange, audioEvaluator, speed]);
+    return { height: 0, slope: 0 };
+  }, [activeRange, audioEvaluator, resolvedMode, speed]);
 
   useEffect(() => {
     audioLastProgressRef.current = -1;
     audioLastYRef.current = null;
     audioLastDirectionRef.current = 0;
+    audioLastToneTimeRef.current = 0;
     audioLastBeatTimeRef.current = 0;
     audioLastBeatIndexRef.current = -1;
   }, [audioEnabled, renderEquation, resolvedMode]);
@@ -2444,10 +2480,16 @@ function MainStudio() {
     const engine = audioEngineRef.current;
     const currentProgress = progressRef.current;
     if (currentProgress === audioLastProgressRef.current) return;
-    const y = audioYValue(currentProgress);
-    if (!Number.isFinite(y)) return;
+    const position = audioPosition(currentProgress);
+    const height = position.height;
+    if (!Number.isFinite(height)) return;
     const previousY = audioLastYRef.current;
-    const direction = previousY === null ? 0 : Math.sign(y - previousY);
+    const previousProgress = audioLastProgressRef.current;
+    const progressDelta = previousProgress >= 0 ? Math.max(0.001, currentProgress - previousProgress) : 0;
+    const slope = previousY === null || progressDelta === 0
+      ? 0
+      : Math.max(-12, Math.min(12, (height - previousY) / progressDelta));
+    const direction = previousY === null ? 0 : Math.sign(height - previousY);
     const now = engine.context.currentTime;
     const minInterval = Math.max(0.075, 0.18 / Math.max(0.25, speed));
     const previousDirection = audioLastDirectionRef.current;
@@ -2456,26 +2498,31 @@ function MainStudio() {
       && direction !== previousDirection;
     const beatIndex = Math.floor(Math.max(0, Math.min(1, currentProgress)) * 16);
     const fixedBeat = beatIndex > audioLastBeatIndexRef.current;
-    if (now - audioLastBeatTimeRef.current > minInterval) {
-      const normalizedY = Math.max(0, Math.min(1, (y + 4) / 8));
-      // Put the pitch cue and beat on the same audio-clock timestamp so the
-      // visual extrema and the rhythmic accent stay locked together.
+    if (now - audioLastToneTimeRef.current > minInterval) {
+      const normalizedHeight = Math.max(0, Math.min(1, (height + 4) / 8));
+      const normalizedSlope = Math.max(-1, Math.min(1, slope / 6));
+      const frequency = AUDIO_MIN_HZ
+        + normalizedHeight * (AUDIO_MAX_HZ - AUDIO_MIN_HZ) * 0.78
+        + (normalizedSlope + 1) * 0.11 * (AUDIO_MAX_HZ - AUDIO_MIN_HZ);
+      // Keep the tone and beat on the same audio-clock timestamp so the
+      // tracer's height and motion stay locked to the rhythmic accent.
       const scheduledAt = now + 0.012;
-       try {
-         scheduleAudioTone(engine, AUDIO_MIN_HZ + normalizedY * (AUDIO_MAX_HZ - AUDIO_MIN_HZ), 0.085, 0.12, scheduledAt);
-         if (changedDirection || fixedBeat) {
-           scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72, scheduledAt);
-           audioLastBeatTimeRef.current = now;
-         }
-       } catch {
-         // Web Audio is progressive enhancement and must not interrupt rendering.
+      try {
+        scheduleAudioTone(engine, frequency, 0.085, 0.12, scheduledAt);
+        audioLastToneTimeRef.current = now;
+        if ((changedDirection || fixedBeat) && now - audioLastBeatTimeRef.current > minInterval) {
+          scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72, scheduledAt);
+          audioLastBeatTimeRef.current = now;
+        }
+      } catch {
+        // Web Audio is progressive enhancement and must not interrupt rendering.
       }
     }
     if (direction !== 0) audioLastDirectionRef.current = direction;
     audioLastBeatIndexRef.current = beatIndex;
-    audioLastYRef.current = y;
+    audioLastYRef.current = height;
     audioLastProgressRef.current = currentProgress;
-  }, [audioEnabled, audioYValue, playing, progress, speed]);
+  }, [audioEnabled, audioPosition, playing, progress, speed]);
 
   useEffect(() => {
     if (!audioEnabled || typeof window === 'undefined') return;
@@ -3061,7 +3108,7 @@ function MainStudio() {
   };
 
   return (
-      <div className={`studio-app theme-${theme}`} style={{ '--page-zoom': pageZoom } as CSSProperties}>
+      <div ref={studioRootRef} className={`studio-app theme-${theme}`} style={{ '--page-zoom': pageZoom } as CSSProperties}>
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark"><AppIcon /></div>
@@ -3523,6 +3570,7 @@ function MainStudio() {
          <span className="footer-tagline">Visualize Mathematics Like Never Before</span>
          <span className="mono">LOCAL-FIRST · CPU ADAPTIVE</span>
        </footer>
+      <DeveloperTextEditor rootRef={studioRootRef} />
     </div>
   );
 }
@@ -3542,7 +3590,7 @@ function LandingRoute() {
         setLocation(`/studio?mode=${encodeURIComponent(example.mode)}&equation=${encodeURIComponent(example.equation)}`);
       }}
       />
-      {authMode && <AuthModalRoute mode={authMode} onClose={() => setAuthMode(null)} onModeChange={setAuthMode} />}
+      {authMode && <AuthModalRoute mode={authMode} onClose={() => setAuthMode(null)} onModeChange={setAuthMode} onDeveloperUnlock={() => { setAuthMode(null); setLocation('/studio'); }} />}
     </>
   );
 }
@@ -3551,10 +3599,12 @@ function AuthModalRoute({
   mode,
   onModeChange,
   onClose,
+  onDeveloperUnlock,
 }: {
   mode: 'sign-in' | 'sign-up';
   onModeChange: (mode: 'sign-in' | 'sign-up') => void;
   onClose: () => void;
+  onDeveloperUnlock: () => void;
 }) {
   return (
     <div className="auth-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -3567,6 +3617,7 @@ function AuthModalRoute({
           <button type="button" role="tab" aria-selected={mode === 'sign-in'} className={mode === 'sign-in' ? 'active' : ''} onClick={() => onModeChange('sign-in')}>Login</button>
           <button type="button" role="tab" aria-selected={mode === 'sign-up'} className={mode === 'sign-up' ? 'active' : ''} onClick={() => onModeChange('sign-up')}>Sign up</button>
         </div>
+        <DeveloperAccessForm onUnlock={onDeveloperUnlock} />
         <div className="auth-component-wrap">
           {mode === 'sign-in' ? <SignIn routing="hash" appearance={clerkAppearance} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/studio`} /> : <SignUp routing="hash" appearance={clerkAppearance} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/studio`} />}
         </div>

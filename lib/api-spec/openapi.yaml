@@ -14,6 +14,8 @@ tags:
     description: Mathematical expression validation
   - name: feedback
     description: Landing page suggestions and bug reports
+  - name: studio-content
+    description: Developer-managed shared Studio text
 paths:
   /healthz:
     get:
@@ -70,6 +72,63 @@ paths:
                   $ref: "#/components/schemas/Feedback"
         "503":
           description: Feedback storage is temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /studio-content:
+    get:
+      operationId: listStudioContent
+      tags: [studio-content]
+      summary: List shared Studio text overrides
+      description: Returns developer-managed text overrides used by the Studio.
+      responses:
+        "200":
+          description: Shared Studio text overrides
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StudioContent"
+        "503":
+          description: Studio content storage is temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: updateStudioContent
+      tags: [studio-content]
+      summary: Update shared Studio text
+      description: Updates one shared Studio text node using developer credentials.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StudioContentUpdate"
+      responses:
+        "200":
+          description: Updated shared Studio text
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StudioContent"
+        "400":
+          description: Malformed request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Developer credentials are invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Studio content storage is temporarily unavailable
           content:
             application/json:
               schema:
@@ -215,4 +274,39 @@ components:
         - name
         - category
         - content
+    StudioContent:
+      type: object
+      properties:
+        key:
+          type: string
+        text:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - key
+        - text
+        - updatedAt
+    StudioContentUpdate:
+      type: object
+      properties:
+        key:
+          type: string
+          minLength: 1
+          maxLength: 500
+        text:
+          type: string
+          maxLength: 2000
+        developerEmail:
+          type: string
+          minLength: 1
+        developerPassword:
+          type: string
+          minLength: 1
+      required:
+        - key
+        - text
+        - developerEmail
+        - developerPassword
 

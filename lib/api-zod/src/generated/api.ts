@@ -59,6 +59,44 @@ export const ListFeedbackResponse = zod.array(ListFeedbackResponseItem)
 
 
 /**
+ * Returns developer-managed text overrides used by the Studio.
+ * @summary List shared Studio text overrides
+ */
+export const ListStudioContentResponseItem = zod.object({
+  "key": zod.string(),
+  "text": zod.string(),
+  "updatedAt": zod.coerce.date()
+})
+export const ListStudioContentResponse = zod.array(ListStudioContentResponseItem)
+
+
+/**
+ * Updates one shared Studio text node using developer credentials.
+ * @summary Update shared Studio text
+ */
+export const updateStudioContentBodyKeyMax = 500;
+
+export const updateStudioContentBodyTextMax = 2000;
+
+
+
+
+
+export const UpdateStudioContentBody = zod.object({
+  "key": zod.string().min(1).max(updateStudioContentBodyKeyMax),
+  "text": zod.string().max(updateStudioContentBodyTextMax),
+  "developerEmail": zod.string().min(1),
+  "developerPassword": zod.string().min(1)
+})
+
+export const UpdateStudioContentResponse = zod.object({
+  "key": zod.string(),
+  "text": zod.string(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
  * Stores a named suggestion or bug report.
  * @summary Submit community feedback
  */

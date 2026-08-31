@@ -2,3 +2,4 @@
 - [Optional headless validation](headless-validation.md) — browser verification is opt-in and must fall back to safe local AST parsing.
 - [Validation contract changes](validation-contract.md) — update OpenAPI and regenerate bindings before changing shared validation behavior.
 - [OpenAPI integer compatibility](openapi-integer-compatibility.md) — use number/int32 for generated IDs with this workspace’s Zod 3 setup.
+- [API codegen compatibility](api-codegen-compatibility.md) — keep OpenAPI formats aligned with helpers available in the workspace’s generated Zod version.

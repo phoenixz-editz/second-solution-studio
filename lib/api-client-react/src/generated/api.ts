@@ -25,7 +25,9 @@ import type {
   ErrorResponse,
   Feedback,
   FeedbackInput,
-  HealthStatus
+  HealthStatus,
+  StudioContent,
+  StudioContentUpdate
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -283,12 +285,162 @@ export function useListFeedback<TData = Awaited<ReturnType<typeof listFeedback>>
 
 
 
+export const getListStudioContentUrl = () => {
+
+
+
+
+  return `/api/studio-content`
+}
+
+/**
+ * Returns developer-managed text overrides used by the Studio.
+ * @summary List shared Studio text overrides
+ */
+export const listStudioContent = async ( options?: Parameters<typeof customFetch>[1]): Promise<StudioContent[]> => {
+
+  return customFetch<StudioContent[]>(getListStudioContentUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListStudioContentQueryKey = () => {
+    return [
+    `/api/studio-content`
+    ] as const;
+    }
+
+
+export const getListStudioContentQueryOptions = <TData = Awaited<ReturnType<typeof listStudioContent>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listStudioContent>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListStudioContentQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listStudioContent>>> = ({ signal }) => listStudioContent({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listStudioContent>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListStudioContentQueryResult = NonNullable<Awaited<ReturnType<typeof listStudioContent>>>
+export type ListStudioContentQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary List shared Studio text overrides
+ */
+
+export function useListStudioContent<TData = Awaited<ReturnType<typeof listStudioContent>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listStudioContent>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListStudioContentQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getUpdateStudioContentUrl = () => {
+
+
+
+
+  return `/api/studio-content`
+}
+
+/**
+ * Updates one shared Studio text node using developer credentials.
+ * @summary Update shared Studio text
+ */
+export const updateStudioContent = async (studioContentUpdate: StudioContentUpdate, options?: Parameters<typeof customFetch>[1]): Promise<StudioContent> => {
+
+  return customFetch<StudioContent>(getUpdateStudioContentUrl(),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(studioContentUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateStudioContentMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateStudioContent>>, TError,{data: BodyType<StudioContentUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateStudioContent>>, TError,{data: BodyType<StudioContentUpdate>}, TContext> => {
+
+const mutationKey = ['updateStudioContent'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateStudioContent>>, {data: BodyType<StudioContentUpdate>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  updateStudioContent(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateStudioContentMutationResult = NonNullable<Awaited<ReturnType<typeof updateStudioContent>>>
+    export type UpdateStudioContentMutationBody = BodyType<StudioContentUpdate>
+    export type UpdateStudioContentMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Update shared Studio text
+ */
+export const useUpdateStudioContent = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateStudioContent>>, TError,{data: BodyType<StudioContentUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateStudioContent>>,
+        TError,
+        {data: BodyType<StudioContentUpdate>},
+        TContext
+      > => {
+      return useMutation(getUpdateStudioContentMutationOptions(options));
+    }
+
 export const getCreateFeedbackUrl = () => {
 
 
 
 
-  return `/api/feedback`
+  return `/api/studio-content`
 }
 
 /**

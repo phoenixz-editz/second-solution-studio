@@ -17,3 +17,5 @@ export * from './feedbackCategory';
 export * from './feedbackInput';
 export * from './feedbackInputCategory';
 export * from './healthStatus';
+export * from './studioContent';
+export * from './studioContentUpdate';

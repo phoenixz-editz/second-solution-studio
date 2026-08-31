@@ -111,3 +111,23 @@ export interface FeedbackInput {
   content: string;
 }
 
+export interface StudioContent {
+  key: string;
+  text: string;
+  updatedAt: string;
+}
+
+export interface StudioContentUpdate {
+  /**
+     * @minLength 1
+     * @maxLength 500
+     */
+  key: string;
+  /** @maxLength 2000 */
+  text: string;
+  /** @minLength 1 */
+  developerEmail: string;
+  /** @minLength 1 */
+  developerPassword: string;
+}
+

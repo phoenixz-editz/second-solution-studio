@@ -8,8 +8,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   Aperture,
   ArrowRight,
+  ArrowUpRight,
   Bug,
+  BookOpen,
   CheckCircle2,
+  Clock3,
   Github,
   Instagram,
   Lightbulb,
@@ -28,6 +31,17 @@ type LandingExample = {
   accent: string;
 };
 
+type BlogInsight = {
+  title: string;
+  category: string;
+  readTime: string;
+  excerpt: string;
+  body: string;
+  equation: string;
+  mode: StudioMode;
+  accent: string;
+};
+
 type LandingPageProps = {
   onStart: (example?: LandingExample) => void;
   onAuth: (mode: 'sign-in' | 'sign-up') => void;
@@ -38,6 +52,39 @@ const examples: LandingExample[] = [
   { title: 'Orbiting point set', equation: '(0, 0)\n(3*cos(t), 3*sin(t))\n(4*cos(t + 0.8), 4*sin(t + 0.8))', mode: 'points', accent: '#72d8ff' },
   { title: 'Circle contour', equation: 'x^2 + y^2 = 4', mode: 'implicit', accent: '#ff8b6d' },
   { title: 'Polar bloom', equation: '4 * cos(3 * theta)', mode: 'polar', accent: '#d6a8ff' },
+];
+
+const insights: BlogInsight[] = [
+  {
+    title: 'How Fourier Transforms Make Music Visible',
+    category: 'Sound & signals',
+    readTime: '6 min read',
+    excerpt: 'See how a song becomes a moving landscape of frequencies, harmonics, and rhythm.',
+    body: 'Fourier transforms translate a time signal into the frequencies that compose it. In the studio, that idea becomes tangible: watch a waveform move while its harmonic structure reveals the hidden geometry inside a sound.',
+    equation: 'sin(x + t) + 0.35 * sin(3*x - t)',
+    mode: 'function',
+    accent: '#c7f36b',
+  },
+  {
+    title: 'Exploring 3D Quadric Surfaces in Real-Time',
+    category: '3D geometry',
+    readTime: '8 min read',
+    excerpt: 'Rotate spheres, saddles, and hyperboloids while the equation stays in view.',
+    body: 'Quadric surfaces are the three-dimensional relatives of conics. A small change in a sign or coefficient can turn an ellipsoid into a saddle or a hyperboloid, making them ideal for interactive exploration.',
+    equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1',
+    mode: 'implicit3d',
+    accent: '#72d8ff',
+  },
+  {
+    title: 'The Beauty of Polar Coordinates and Parametric Curves',
+    category: 'Curves & motion',
+    readTime: '5 min read',
+    excerpt: 'Discover why radius and angle can describe patterns that Cartesian graphs hide.',
+    body: 'Polar and parametric coordinates let a curve carry its own motion. Trace a looping radius or a time-driven point and the relationship between shape, rotation, and parameter becomes immediately visible.',
+    equation: '4 * cos(3 * theta)',
+    mode: 'polar',
+    accent: '#d6a8ff',
+  },
 ];
 
 const flowSteps = [
@@ -219,8 +266,131 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
   );
 }
 
+function LiveHeroPreview() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context || typeof window === 'undefined') return;
+
+    let frame = 0;
+    const startedAt = performance.now();
+    const resize = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(bounds.width * dpr));
+      canvas.height = Math.max(1, Math.floor(bounds.height * dpr));
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    const draw = (now: number) => {
+      const bounds = canvas.getBoundingClientRect();
+      const width = Math.max(1, bounds.width);
+      const height = Math.max(1, bounds.height);
+      const time = (now - startedAt) / 1000;
+      const split = width * 0.62;
+      const waveCenterY = height * 0.55;
+      const waveScaleY = height * 0.27;
+      const waveScaleX = split / (Math.PI * 4.4);
+
+      context.clearRect(0, 0, width, height);
+      context.strokeStyle = 'rgba(238,244,241,.12)';
+      context.lineWidth = 1;
+      for (let column = 1; column < 5; column += 1) {
+        const x = (split * column) / 5;
+        context.beginPath();
+        context.moveTo(x, 22);
+        context.lineTo(x, height - 20);
+        context.stroke();
+      }
+      context.beginPath();
+      context.moveTo(20, waveCenterY);
+      context.lineTo(split - 12, waveCenterY);
+      context.moveTo(split * 0.5, 22);
+      context.lineTo(split * 0.5, height - 20);
+      context.stroke();
+
+      context.save();
+      context.strokeStyle = '#c7f36b';
+      context.shadowColor = '#c7f36b';
+      context.shadowBlur = 14;
+      context.lineWidth = 2.8;
+      context.beginPath();
+      for (let index = 0; index <= 220; index += 1) {
+        const xValue = -Math.PI * 2.2 + (index / 220) * Math.PI * 4.4;
+        const x = split * 0.5 + xValue * waveScaleX;
+        const y = waveCenterY - Math.sin(xValue + time * 1.4) * waveScaleY;
+        if (index === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      }
+      context.stroke();
+      const tracerXValue = ((time * 1.4 + Math.PI * 2.2) % (Math.PI * 4.4)) - Math.PI * 2.2;
+      context.fillStyle = '#c7f36b';
+      context.beginPath();
+      context.arc(
+        split * 0.5 + tracerXValue * waveScaleX,
+        waveCenterY - Math.sin(tracerXValue + time * 1.4) * waveScaleY,
+        5,
+        0,
+        Math.PI * 2,
+      );
+      context.fill();
+      context.restore();
+
+      const polarCenterX = width * 0.81;
+      const polarCenterY = height * 0.56;
+      const polarScale = Math.min(width * 0.095, height * 0.21);
+      context.save();
+      context.strokeStyle = '#72d8ff';
+      context.shadowColor = '#72d8ff';
+      context.shadowBlur = 14;
+      context.lineWidth = 2.2;
+      context.beginPath();
+      for (let index = 0; index <= 260; index += 1) {
+        const theta = (index / 260) * Math.PI * 2;
+        const radius = 4 * Math.cos(3 * theta);
+        const x = polarCenterX + radius * Math.cos(theta) * polarScale;
+        const y = polarCenterY - radius * Math.sin(theta) * polarScale;
+        if (index === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      }
+      context.closePath();
+      context.stroke();
+      const tracerTheta = (time * 1.1) % (Math.PI * 2);
+      const tracerRadius = 4 * Math.cos(3 * tracerTheta);
+      context.fillStyle = '#72d8ff';
+      context.beginPath();
+      context.arc(
+        polarCenterX + tracerRadius * Math.cos(tracerTheta) * polarScale,
+        polarCenterY - tracerRadius * Math.sin(tracerTheta) * polarScale,
+        4,
+        0,
+        Math.PI * 2,
+      );
+      context.fill();
+      context.restore();
+
+      frame = window.requestAnimationFrame(draw);
+    };
+
+    resize();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    observer?.observe(canvas);
+    window.addEventListener('resize', resize);
+    frame = window.requestAnimationFrame(draw);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="hero-plot hero-plot-canvas" aria-label="Live plots of y equals sine of x plus t and r equals 4 cosine of 3 theta" />;
+}
+
 export function LandingPage({ onStart, onAuth }: LandingPageProps) {
   const [activeFlow, setActiveFlow] = useState(0);
+  const [activeInsight, setActiveInsight] = useState(0);
   const [bugReport, setBugReport] = useState('');
   const [suggestion, setSuggestion] = useState('');
   const [feedbackName, setFeedbackName] = useState('');
@@ -293,6 +463,7 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
           <a href="#features">Features</a>
           <a href="#workflow">Workflow</a>
           <a href="#examples">Examples</a>
+          <a href="#insights">Insights</a>
           <a href="#support">Support</a>
         </nav>
         <div className="landing-auth-actions">
@@ -330,18 +501,7 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
             <div className="hero-visual-glow" />
             <div className="hero-equation hero-equation-main">y = sin(x + t)</div>
             <div className="hero-equation hero-equation-secondary">r = 4 cos(3θ)</div>
-            <svg className="hero-plot" viewBox="0 0 560 360" role="img" aria-label="Glowing wave plot">
-              <defs>
-                <linearGradient id="heroWave" x1="0" x2="1">
-                  <stop offset="0" stopColor="#c7f36b" stopOpacity=".15" />
-                  <stop offset=".5" stopColor="#c7f36b" />
-                  <stop offset="1" stopColor="#72d8ff" stopOpacity=".75" />
-                </linearGradient>
-              </defs>
-              <path d="M0 195 C45 90 75 90 120 195 S195 300 240 195 S315 90 360 195 S435 300 480 195 S525 90 560 195" fill="none" stroke="url(#heroWave)" strokeWidth="4" />
-              <path d="M0 195H560M280 0V360" stroke="#dfe6e6" strokeOpacity=".15" />
-              <circle cx="360" cy="195" r="7" fill="#c7f36b" />
-            </svg>
+            <LiveHeroPreview />
             <div className="hero-frame-label mono">FRAME 148 / 240 · LIVE</div>
           </div>
         </section>
@@ -400,6 +560,32 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
                 <span className="example-preview"><LiveExamplePreview example={example} /></span>
                 <span className="example-card-copy"><strong>{example.title}</strong><span className="mono">{example.equation}</span><small>{example.mode} · Open in studio <ArrowRight className="icon" /></small></span>
               </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="landing-section insights-section" id="insights">
+          <div className="landing-section-heading">
+            <div><span className="landing-eyebrow">Math insights</span><h2>Learn the idea, then make it move.</h2></div>
+            <p>Short, visual lessons that turn familiar equations into experiments you can remix.</p>
+          </div>
+          <div className="insight-grid">
+            {insights.map((insight, index) => (
+              <article className={`insight-card ${activeInsight === index ? 'active' : ''}`} key={insight.title} style={{ '--insight-accent': insight.accent } as CSSProperties}>
+                <button className="insight-select" type="button" onClick={() => setActiveInsight(index)} aria-expanded={activeInsight === index}>
+                  <span className="insight-card-top"><BookOpen className="icon" /><span>{insight.category}</span><span className="insight-read-time"><Clock3 className="icon" />{insight.readTime}</span></span>
+                  <strong>{insight.title}</strong>
+                  <span>{insight.excerpt}</span>
+                </button>
+                {activeInsight === index && (
+                  <div className="insight-expanded">
+                    <p>{insight.body}</p>
+                    <button className="insight-cta" type="button" onClick={() => startStudio(insight)}>
+                      Explore in Studio <ArrowUpRight className="icon" />
+                    </button>
+                  </div>
+                )}
+              </article>
             ))}
           </div>
         </section>

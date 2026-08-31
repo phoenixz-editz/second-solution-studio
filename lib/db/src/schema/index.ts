@@ -18,3 +18,4 @@
 //   export type Post = typeof postsTable.$inferSelect;
 
 export * from "./feedback";
+export * from "./studio-content";
