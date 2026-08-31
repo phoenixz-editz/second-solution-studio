@@ -61,7 +61,7 @@ const insights: BlogInsight[] = [
     category: 'Sound & signals',
     readTime: '6 min read',
     excerpt: 'See how a song becomes a moving landscape of frequencies, harmonics, and rhythm.',
-    body: 'Fourier transforms translate a time signal into the frequencies that compose it. In the studio, that idea becomes tangible: watch a waveform move while its harmonic structure reveals the hidden geometry inside a sound.',
+    body: 'A microphone records music as a changing signal in time, but our ears also recognize its frequency structure: a fundamental pitch surrounded by harmonics. A Fourier transform decomposes that signal into sine-wave oscillators, showing how much energy lives at each frequency. The tallest peaks reveal notes and overtones; a moving spectrum shows rhythm as energy sweeping through bands. In practice, windowing a short slice of audio balances time precision against frequency precision. Animate the waveform and its spectrum together, and a recording becomes a living map of oscillators, resonance, and timbre.',
     equation: 'sin(x + t) + 0.35 * sin(3*x - t)',
     mode: 'function',
     accent: '#c7f36b',
@@ -71,20 +71,40 @@ const insights: BlogInsight[] = [
     category: '3D geometry',
     readTime: '8 min read',
     excerpt: 'Rotate spheres, saddles, and hyperboloids while the equation stays in view.',
-    body: 'Quadric surfaces are the three-dimensional relatives of conics. A small change in a sign or coefficient can turn an ellipsoid into a saddle or a hyperboloid, making them ideal for interactive exploration.',
+    body: 'Quadric surfaces are the three-dimensional relatives of conic sections, defined by a second-degree equation in x, y, and z. Positive terms on every squared variable produce a closed ellipsoid; changing one sign opens a hyperboloid of one or two sheets. A zero coefficient can create a paraboloid, where slices reveal parabolas and ellipses at once. The coefficients control scale along each axis, so normalization matters when rendering. Rotating the mesh in real time makes the algebra legible: topology, cross-sections, and curvature become visible rather than abstract.',
     equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1',
     mode: 'implicit3d',
     accent: '#72d8ff',
   },
   {
-    title: 'The Beauty of Polar Coordinates and Parametric Curves',
+    title: 'The Beauty of Polar Coordinates and Parametric Motion',
     category: 'Curves & motion',
     readTime: '5 min read',
     excerpt: 'Discover why radius and angle can describe patterns that Cartesian graphs hide.',
-    body: 'Polar and parametric coordinates let a curve carry its own motion. Trace a looping radius or a time-driven point and the relationship between shape, rotation, and parameter becomes immediately visible.',
+    body: 'Cartesian coordinates ask for y as a function of x, but polar coordinates let distance from the origin depend directly on angle. That small shift makes spirals, circles, and rose curves natural: r = a cos(nθ) creates petals whose symmetry is encoded in n. Parametric curves go further by letting x(t) and y(t) move independently, which is why Lissajous figures can show phase relationships so clearly. Animate θ or t and the trace becomes a lesson in periodicity, symmetry, and how a parameter controls both position and speed.',
     equation: '4 * cos(3 * theta)',
     mode: 'polar',
     accent: '#d6a8ff',
+  },
+  {
+    title: 'Vector Fields and Fluid Flow Animations',
+    category: 'Fields & motion',
+    readTime: '7 min read',
+    excerpt: 'Read direction, divergence, and curl as particles travel through a field.',
+    body: 'A vector field assigns a direction and magnitude to every point in a plane, like a tiny arrow describing wind or water flow. Streamlines follow those arrows and reveal the field’s global structure. Divergence measures whether nearby trajectories spread apart or converge, while curl measures local rotation around a point. A particle animation makes both ideas intuitive: expanding paths suggest a source, compressing paths suggest a sink, and looping paths expose circulation. Sampling the field carefully keeps arrows readable while preserving the continuous motion between them.',
+    equation: '[cos(y), sin(x)]',
+    mode: 'vector',
+    accent: '#72d8ff',
+  },
+  {
+    title: 'Calculus in Motion: Visualizing Derivatives & Integrals',
+    category: 'Calculus',
+    readTime: '6 min read',
+    excerpt: 'Watch a tangent estimate slope while accumulated area builds beneath a curve.',
+    body: 'The derivative is the instantaneous slope of a curve, so a moving tangent line turns a limit into something you can see. As the sample point travels, the tangent rotates according to local change rather than height. An integral tells a complementary story: thin rectangles accumulate signed area beneath the graph, with their total approaching the exact area as width shrinks. Showing the tangent and the growing Riemann sum together connects rate of change with accumulation, two views of the same function that the Fundamental Theorem of Calculus unifies.',
+    equation: 'x^2 / 4',
+    mode: 'function',
+    accent: '#ff8b6d',
   },
 ];
 
@@ -729,6 +749,79 @@ function LiveHeroPreview() {
   return <canvas ref={canvasRef} className="hero-plot hero-plot-canvas" aria-label="Live plots of y equals sine of x plus t and r equals 4 cosine of 3 theta" />;
 }
 
+function LandingBubbleBackground() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context || typeof window === 'undefined') return;
+
+    const bubbles = [
+      { x: 0.12, y: 0.18, radius: 0.2, color: [199, 243, 107], speed: 0.34, phase: 0.2 },
+      { x: 0.78, y: 0.12, radius: 0.24, color: [114, 216, 255], speed: 0.27, phase: 1.8 },
+      { x: 0.56, y: 0.46, radius: 0.18, color: [214, 168, 255], speed: 0.42, phase: 3.2 },
+      { x: 0.2, y: 0.72, radius: 0.27, color: [255, 139, 109], speed: 0.22, phase: 4.4 },
+      { x: 0.9, y: 0.8, radius: 0.2, color: [140, 231, 207], speed: 0.3, phase: 5.5 },
+    ];
+    let frame = 0;
+    let width = 1;
+    let height = 1;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    const resize = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = Math.max(1, bounds.width);
+      height = Math.max(1, bounds.height);
+      canvas.width = Math.max(1, Math.floor(width * dpr));
+      canvas.height = Math.max(1, Math.floor(height * dpr));
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    const draw = (now: number) => {
+      const time = reducedMotion ? 0 : now / 1000;
+      context.clearRect(0, 0, width, height);
+      context.globalCompositeOperation = 'screen';
+      bubbles.forEach((bubble) => {
+        const driftX = Math.sin(time * bubble.speed + bubble.phase) * width * 0.045;
+        const driftY = Math.cos(time * bubble.speed * 0.8 + bubble.phase) * height * 0.06;
+        const x = width * bubble.x + driftX;
+        const y = height * bubble.y + driftY;
+        const radius = Math.min(width, height) * bubble.radius;
+        const gradient = context.createRadialGradient(x, y, 0, x, y, radius);
+        const [red, green, blue] = bubble.color;
+        gradient.addColorStop(0, `rgba(${red},${green},${blue},.22)`);
+        gradient.addColorStop(0.42, `rgba(${red},${green},${blue},.09)`);
+        gradient.addColorStop(1, `rgba(${red},${green},${blue},0)`);
+        context.fillStyle = gradient;
+        context.beginPath();
+        context.arc(x, y, radius, 0, Math.PI * 2);
+        context.fill();
+      });
+      context.globalCompositeOperation = 'source-over';
+      if (!reducedMotion) frame = window.requestAnimationFrame(draw);
+    };
+
+    resize();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    observer?.observe(canvas);
+    window.addEventListener('resize', resize);
+    frame = window.requestAnimationFrame(draw);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+    };
+  }, []);
+
+  return (
+    <div className="landing-bubble-background" aria-hidden="true">
+      <canvas ref={canvasRef} />
+      <div className="landing-bubble-wash" />
+    </div>
+  );
+}
+
 export function LandingPage({ onStart, onAuth }: LandingPageProps) {
   const [activeFlow, setActiveFlow] = useState(0);
   const [activeInsight, setActiveInsight] = useState(0);
@@ -851,6 +944,8 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
           </div>
         </section>
 
+        <LandingBubbleBackground />
+
         <section className="landing-section" id="features">
           <div className="landing-section-heading">
             <div><span className="landing-eyebrow">The toolkit</span><h2>Everything you need to see a pattern clearly.</h2></div>
@@ -862,8 +957,6 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
               ['02', 'Adaptive framing', 'Automatic bounds and smooth camera transitions keep every trace legible.'],
               ['03', 'Layered scenes', 'Compare equations with individual colors, visibility toggles, and synchronized timing.'],
               ['04', 'Export-ready motion', 'Watermarked PNG and WebM capture with filename and frame-rate controls.'],
-              ['05', 'Session memory', 'Your active scene, controls, layers, and frame are restored after a reload.'],
-              ['06', 'Friendly recovery', 'Clear validator feedback, safe fallbacks, and troubleshooting when a render stalls.'],
             ].map(([number, title, copy]) => (
               <article className="feature-card" key={number}>
                 <span className="feature-number mono">{number}</span>

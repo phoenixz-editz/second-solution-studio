@@ -16,6 +16,7 @@ type TextEdit = {
 
 type DeveloperTextEditorProps = {
   rootRef: RefObject<HTMLDivElement | null>;
+  isDeveloper: boolean;
 };
 
 function textNodeKey(node: Node, root: Node) {
@@ -73,14 +74,7 @@ function textRect(node: Node) {
   return { top: rect.bottom + 8, left: Math.max(12, Math.min(window.innerWidth - 372, rect.left)) };
 }
 
-export function DeveloperTextEditor({ rootRef }: DeveloperTextEditorProps) {
-  const isDeveloper = useMemo(() => {
-    try {
-      return window.localStorage.getItem('second-solution-developer') === 'true';
-    } catch {
-      return false;
-    }
-  }, []);
+export function DeveloperTextEditor({ rootRef, isDeveloper }: DeveloperTextEditorProps) {
   const queryClient = useQueryClient();
   const contentQuery = useListStudioContent({
     query: {

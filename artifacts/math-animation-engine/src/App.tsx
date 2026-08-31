@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import {
   Activity,
   Aperture,
@@ -54,6 +54,22 @@ import {
 import { clearStoredSession, loadEncryptedJson, saveEncryptedJson } from '@/lib/session-storage';
 
 const queryClient = new QueryClient();
+type DeveloperSessionContextValue = {
+  isDeveloper: boolean;
+  grantDeveloperSession: () => void;
+  resetDeveloperSession: () => void;
+};
+
+const DeveloperSessionContext = createContext<DeveloperSessionContextValue>({
+  isDeveloper: false,
+  grantDeveloperSession: () => undefined,
+  resetDeveloperSession: () => undefined,
+});
+
+function useDeveloperSession() {
+  return useContext(DeveloperSessionContext);
+}
+
 type ScreenPoint = [number, number];
 type ContourSegment = { start: ScreenPoint; end: ScreenPoint };
 type ContourPolyline = ScreenPoint[];
@@ -2123,6 +2139,7 @@ function GraphCanvas({
 }
 
 function MainStudio() {
+  const { isDeveloper } = useDeveloperSession();
   const studioRootRef = useRef<HTMLDivElement>(null);
   const launchParams = useMemo(
     () => new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search),
@@ -3162,6 +3179,7 @@ function MainStudio() {
             <span className="zoom-value mono">{Math.round(pageZoom * 100)}%</span>
             <button className="icon-btn" type="button" onClick={() => zoomPage(0.1)} data-testid="button-page-zoom-in" aria-label="Zoom page in"><Plus className="icon" /></button>
           </div>
+          <button className="icon-btn studio-help-btn" type="button" onClick={() => setShowGuide(true)} data-testid="button-open-help" aria-label="Open help and keyboard shortcuts" title="Help and shortcuts">?</button>
           <button className="icon-btn" type="button" onClick={() => setTopNotice('Inspector controls are live on the right')} data-testid="button-settings" aria-label="Open studio settings"><Settings2 className="icon" /></button>
         </div>
         <span className="creator-credit creator-credit-studio">Made by SOHAIB KHAN</span>
@@ -3424,9 +3442,10 @@ function MainStudio() {
         </section>
 
         {showGuide && (
-          <aside className="guide-drawer" aria-label="Math mode guide and troubleshooting">
+          <div className="guide-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowGuide(false); }}>
+          <aside className="guide-drawer" role="dialog" aria-modal="true" aria-labelledby="studio-guide-title" aria-label="Math mode guide and troubleshooting">
             <div className="guide-drawer-header">
-              <div><span className="landing-eyebrow">Studio guide</span><h2>Make the render make sense.</h2></div>
+              <div><span className="landing-eyebrow">Studio guide</span><h2 id="studio-guide-title">Make the render make sense.</h2></div>
               <button className="icon-btn" type="button" onClick={() => setShowGuide(false)} aria-label="Close guide">×</button>
             </div>
             <div className="guide-drawer-content">
@@ -3441,13 +3460,26 @@ function MainStudio() {
                 </div>
               </section>
               <section className="guide-block">
-                <h3>If rendering freezes</h3>
+                <h3>Keyboard shortcuts</h3>
+                <ul className="guide-shortcuts">
+                  <li><kbd>Space</kbd><span>Play or pause the current scene</span></li>
+                  <li><kbd>R</kbd><span>Reset the animation to its first frame</span></li>
+                  <li><kbd>E</kbd><span>Open export controls</span></li>
+                  <li><kbd>G</kbd><span>Open Graph Maker</span></li>
+                </ul>
+              </section>
+              <section className="guide-block">
+                <h3>Graph control tips</h3>
                 <ol>
-                  <li>Pause and reset the scene with the circular-arrow control.</li>
-                  <li>Try Auto Range or reset the viewport to origin.</li>
-                  <li>Reduce point density by simplifying the expression or switch off Motion trail.</li>
+                  <li>Use Auto Range first, then tune the viewport manually when comparing scenes.</li>
+                  <li>Drag the graph to pan and use the graph zoom controls for detail.</li>
+                  <li>Motion trail adds history; disable it when exploring dense point sets.</li>
                   <li>If WebGL is unavailable, the CPU canvas remains the source of truth.</li>
                 </ol>
+              </section>
+              <section className="guide-block">
+                <h3>Quick setup</h3>
+                <p className="guide-copy">Choose a preset or type an equation, select the matching mode, confirm the local validator accepts it, then press play. Add layers when you want to compare several expressions in one scene.</p>
               </section>
               <section className="guide-reset-card">
                 <div><strong>Hard Reset Session</strong><span>Clear encrypted local scene data and reopen the studio.</span></div>
@@ -3455,6 +3487,7 @@ function MainStudio() {
               </section>
             </div>
           </aside>
+          </div>
         )}
 
         <aside className="right-panel">
@@ -3583,19 +3616,21 @@ function MainStudio() {
          <span className="footer-tagline">Visualize Mathematics Like Never Before</span>
          <span className="mono">LOCAL-FIRST · CPU ADAPTIVE</span>
        </footer>
-      <DeveloperTextEditor rootRef={studioRootRef} />
+      <DeveloperTextEditor rootRef={studioRootRef} isDeveloper={isDeveloper} />
     </div>
   );
 }
 
 function LandingRoute() {
   const [, setLocation] = useLocation();
+  const { grantDeveloperSession, resetDeveloperSession } = useDeveloperSession();
   const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up' | null>(null);
   return (
     <>
       <LandingPage
         onAuth={(nextMode) => setAuthMode(nextMode)}
       onStart={(example) => {
+        resetDeveloperSession();
         if (!example) {
           setLocation('/studio');
           return;
@@ -3603,7 +3638,7 @@ function LandingRoute() {
         setLocation(`/studio?mode=${encodeURIComponent(example.mode)}&equation=${encodeURIComponent(example.equation)}`);
       }}
       />
-      {authMode && <AuthModalRoute mode={authMode} onClose={() => setAuthMode(null)} onModeChange={setAuthMode} onDeveloperUnlock={() => { setAuthMode(null); setLocation('/studio'); }} />}
+      {authMode && <AuthModalRoute mode={authMode} onClose={() => setAuthMode(null)} onModeChange={setAuthMode} onDeveloperUnlock={() => { grantDeveloperSession(); setAuthMode(null); setLocation('/studio'); }} />}
     </>
   );
 }
@@ -3681,6 +3716,14 @@ function stripBase(path: string) {
 
 function ClerkApp() {
   const [, setLocation] = useLocation();
+  const [isDeveloper, setIsDeveloper] = useState(false);
+  const [location] = useLocation();
+
+  useEffect(() => {
+    const route = stripBase(location).split('?')[0];
+    if (route !== '/studio') setIsDeveloper(false);
+  }, [location]);
+
   return (
     <ClerkProvider
       publishableKey={clerkPubKey}
@@ -3691,12 +3734,14 @@ function ClerkApp() {
       routerPush={(to) => setLocation(stripBase(to))}
       routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
     >
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <RoutedErrorBoundary><Router /></RoutedErrorBoundary>
-          <Toaster />
-        </TooltipProvider>
-      </QueryClientProvider>
+      <DeveloperSessionContext.Provider value={{ isDeveloper, grantDeveloperSession: () => setIsDeveloper(true), resetDeveloperSession: () => setIsDeveloper(false) }}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <RoutedErrorBoundary><Router /></RoutedErrorBoundary>
+            <Toaster />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </DeveloperSessionContext.Provider>
     </ClerkProvider>
   );
 }

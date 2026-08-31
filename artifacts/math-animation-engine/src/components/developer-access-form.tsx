@@ -37,11 +37,6 @@ export function DeveloperAccessSequence({ active, onUnlock }: DeveloperAccessSeq
         animationFrameRef.current = window.requestAnimationFrame(animate);
         return;
       }
-      try {
-        window.localStorage.setItem('second-solution-developer', 'true');
-      } catch {
-        // The unlocked session still works when storage is unavailable.
-      }
       document.body.classList.remove('developer-loading');
       onUnlock();
     };
