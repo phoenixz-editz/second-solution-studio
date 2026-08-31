@@ -1,10 +1,9 @@
 import {
-  buildGraphEvaluator,
-  detectSmartMode,
-  normalizeForPreview,
-  type ResolvedStudioMode,
+  validateEquationLocally,
+  type LocalValidationResult,
 } from '@/lib/math-parser';
 import type { StudioMode } from '@/hooks/use-equation-validator';
+import { z } from 'zod';
 
 type ValidationRequest = {
   id: number;
@@ -14,22 +13,31 @@ type ValidationRequest = {
 
 type ValidationResponse = {
   id: number;
-  valid: boolean;
-  resolvedMode: ResolvedStudioMode;
-  normalized: string;
+  result: LocalValidationResult;
 };
 
 self.onmessage = (event: MessageEvent<ValidationRequest>) => {
   const { id, equation, mode } = event.data;
-  const normalized = normalizeForPreview(equation);
-  const resolvedMode = mode === 'auto' ? detectSmartMode(normalized) : mode;
-  const valid = Boolean(normalized && buildGraphEvaluator(normalized, resolvedMode));
 
   const response: ValidationResponse = {
     id,
-    valid,
-    resolvedMode,
-    normalized,
+    result: validateEquationLocally(equation, mode),
   };
-  self.postMessage(response);
+  const validated = z.object({
+    id: z.number(),
+    result: z.object({
+      valid: z.boolean(),
+      mode: z.string(),
+      animatable: z.boolean(),
+      hasTimeVariable: z.boolean(),
+      supports2dFallback: z.boolean(),
+      verificationStatus: z.enum(['static', 'dynamic', 'invalid']),
+      verificationMessage: z.string(),
+      normalized: z.string(),
+      error: z.string().nullable(),
+      suggestions: z.array(z.string()),
+      variables: z.array(z.string()),
+    }),
+  }).parse(response);
+  self.postMessage(validated);
 };

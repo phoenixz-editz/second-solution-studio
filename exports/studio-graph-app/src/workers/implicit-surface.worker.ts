@@ -1,4 +1,4 @@
-import { all, create } from 'mathjs';
+import { buildGraphEvaluator } from '@/lib/math-parser';
 
 type GenerateRequest = {
   type: 'generate';
@@ -17,32 +17,31 @@ type CancelRequest = {
 
 type WorkerRequest = GenerateRequest | CancelRequest;
 
-const math = create(all, {});
 let activeRequestId = 0;
 
-function normalizeEquation(input: string) {
-  return input
-    .replace(/\\left|\\right/g, '')
-    .replace(/\\cdot|\\times/g, '*')
-    .replace(/\\pi/g, 'pi')
-    .replace(/\\sin/g, 'sin')
-    .replace(/\\cos/g, 'cos')
-    .replace(/\\tan/g, 'tan')
-    .trim();
-}
-
 function compileImplicitEquation(source: string) {
-  const input = normalizeEquation(source);
-  const equality = input.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
-  const expression = equality
-    ? `(${equality[1]}) - (${equality[2]})`
-    : `(${input})`;
-  return math.compile(expression);
+  const evaluator = buildGraphEvaluator(source, 'implicit3d');
+  if (!evaluator || evaluator.kind !== 'implicit') {
+    throw new Error('The 3D expression could not be compiled locally.');
+  }
+  return evaluator.expression;
 }
 
 function safeEvaluate(expression: { evaluate: (scope: Record<string, number>) => unknown }, x: number, y: number, z: number, phase: number, speed: number) {
   try {
-    const value = Number(expression.evaluate({ x, y, z, t: phase, a: phase, b: speed }));
+    const value = Number(expression.evaluate({
+      x,
+      y,
+      z,
+      t: phase,
+      u: phase,
+      theta: phase,
+      v: speed,
+      r: speed,
+      phi: speed,
+      a: phase,
+      b: speed,
+    }));
     return Number.isFinite(value) ? value : Number.NaN;
   } catch {
     return Number.NaN;

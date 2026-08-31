@@ -9,11 +9,11 @@ Production-ready export of the Second Solution Studio mathematics visualization 
 - `src/workers/` — implicit 3D surface extraction and math validation workers.
 - `src/engines/` — engine documentation and extension location for 2D/3D renderers.
 - `src/styles/` — style organization notes; the active stylesheet remains `src/index.css`.
-- `backend/src/` — complete Express validation API source.
-- `backend/dist/` — bundled API server used by the Cloud Shell launcher.
+- `backend/src/` — compatibility Express validation API source.
+- `backend/dist/` — bundled compatibility API server used by the Cloud Shell launcher.
 - `dist/` — built frontend used by `npm start`.
 - `workspace/` — original pnpm workspace, shared API bindings, schemas, lockfile, and artifact configurations for rebuilding from source.
-- `server.js` — dynamic-port static host with `/api/*` reverse proxy.
+- `server.js` — dynamic-port static host with an optional `/api/*` compatibility proxy.
 
 ## Run immediately
 
@@ -69,4 +69,5 @@ For a managed deployment, the included `Dockerfile` and `cloudbuild.yaml` build 
 ## Notes
 
 - The app uses WebGL as progressive enhancement. Browsers without a usable WebGL context receive a projected 2D surface fallback.
+- Equation validation runs locally in the browser and validation worker; the bundled API remains only as a compatibility endpoint for older clients.
 - The application source does not contain API keys, passwords, or other credentials.

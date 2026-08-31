@@ -20,6 +20,8 @@ import {
   Trash2,
   Undo2,
   Upload,
+  Volume2,
+  VolumeX,
   Waves,
   X,
 } from 'lucide-react';
@@ -75,6 +77,8 @@ const IMPLICIT_3D_DRAFT_GRID_RESOLUTION = 24;
 const IMPLICIT_3D_FINAL_GRID_RESOLUTION = 64;
 const IMPLICIT_3D_WORLD_EXTENT = 3.4;
 const BRAND_WATERMARK = 'Second Solution Studio';
+const AUDIO_MIN_HZ = 200;
+const AUDIO_MAX_HZ = 1200;
 type ImplicitSurfaceWorkerResult = {
   type: 'result';
   id: number;
@@ -95,6 +99,83 @@ type ImplicitSurfaceWorkerRequest = {
   resolution: number;
   extent: number;
 };
+
+type AudioEngine = {
+  context: AudioContext;
+  master: GainNode;
+  destination: MediaStreamAudioDestinationNode;
+};
+
+function getAudioContextConstructor() {
+  return window.AudioContext
+    ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+}
+
+function scheduleAudioTone(engine: AudioEngine, frequency: number, duration = 0.085, volume = 0.12) {
+  const now = engine.context.currentTime;
+  const oscillator = engine.context.createOscillator();
+  const envelope = engine.context.createGain();
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(Math.max(AUDIO_MIN_HZ, Math.min(AUDIO_MAX_HZ, frequency)), now);
+  envelope.gain.setValueAtTime(0.0001, now);
+  envelope.gain.exponentialRampToValueAtTime(volume, now + 0.012);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  oscillator.connect(envelope);
+  envelope.connect(engine.master);
+  oscillator.start(now);
+  oscillator.stop(now + duration + 0.02);
+}
+
+function scheduleAudioBeat(engine: AudioEngine, strength = 1) {
+  const now = engine.context.currentTime;
+  const oscillator = engine.context.createOscillator();
+  const envelope = engine.context.createGain();
+  oscillator.type = 'triangle';
+  oscillator.frequency.setValueAtTime(135, now);
+  oscillator.frequency.exponentialRampToValueAtTime(55, now + 0.12);
+  envelope.gain.setValueAtTime(0.0001, now);
+  envelope.gain.exponentialRampToValueAtTime(0.22 * strength, now + 0.006);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+  oscillator.connect(envelope);
+  envelope.connect(engine.master);
+  oscillator.start(now);
+  oscillator.stop(now + 0.16);
+}
+
+function canvasHasNonEmptyPixels(canvas: HTMLCanvasElement) {
+  try {
+    const context2d = canvas.getContext('2d');
+    if (context2d) {
+      const width = Math.max(1, Math.min(canvas.width, 320));
+      const height = Math.max(1, Math.min(canvas.height, 180));
+      const pixels = context2d.getImageData(0, 0, width, height).data;
+      for (let index = 0; index < pixels.length; index += 4) {
+        if (pixels[index + 3] > 0 && (pixels[index] > 42 || pixels[index + 1] > 42 || pixels[index + 2] > 42)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    const webgl = canvas.getContext('webgl2') ?? canvas.getContext('webgl');
+    if (!webgl) return false;
+    const pixel = new Uint8Array(4);
+    const samplePoints: Array<[number, number]> = [];
+    for (let row = 0; row < 5; row += 1) {
+      for (let column = 0; column < 5; column += 1) {
+        samplePoints.push([
+          Math.floor((column / 4) * Math.max(0, canvas.width - 1)),
+          Math.floor((row / 4) * Math.max(0, canvas.height - 1)),
+        ]);
+      }
+    }
+    return samplePoints.some(([x, y]) => {
+      webgl.readPixels(x, y, 1, 1, webgl.RGBA, webgl.UNSIGNED_BYTE, pixel);
+      return pixel[3] > 0 && (pixel[0] > 42 || pixel[1] > 42 || pixel[2] > 42);
+    });
+  } catch {
+    return false;
+  }
+}
 
 function easeInOutCubic(value: number) {
   const progress = Math.max(0, Math.min(1, value));
@@ -494,6 +575,7 @@ function GraphCanvas({
   const implicitContourCacheRef = useRef(new Map<string, ContourPolyline[]>());
   const runtimeWarningRef = useRef(false);
   const renderHealthFramesRef = useRef(0);
+  const pixelVerificationFramesRef = useRef(0);
   const healthReportedRef = useRef(false);
   const frameCacheRef = useRef(new Map<number, CachedFrame>());
   const frameCacheBuildRef = useRef(0);
@@ -1171,7 +1253,7 @@ function GraphCanvas({
       canvas.width = width;
       canvas.height = height;
     }
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const w = bounds.width;
@@ -1838,21 +1920,50 @@ function GraphCanvas({
       ctx.arc(originX + marker[0] * scale, originY - marker[1] * scale, 3.5, 0, Math.PI * 2);
       ctx.fill();
     }
+    let hasNonEmptyPixels = pixelVerificationFramesRef.current > 0;
+    if (!healthReportedRef.current) {
+      try {
+        const sampleWidth = Math.max(1, Math.min(canvas.width, 320));
+        const sampleHeight = Math.max(1, Math.min(canvas.height, 180));
+        const pixels = ctx.getImageData(0, 0, sampleWidth, sampleHeight).data;
+        for (let index = 0; index < pixels.length; index += 4) {
+          if (pixels[index + 3] > 0 && (pixels[index] > 42 || pixels[index + 1] > 42 || pixels[index + 2] > 42)) {
+            hasNonEmptyPixels = true;
+            break;
+          }
+        }
+        if (!hasNonEmptyPixels && mode === 'implicit3d' && webglCanvasRef.current) {
+          const webgl = webglCanvasRef.current.getContext('webgl2') ?? webglCanvasRef.current.getContext('webgl');
+          if (webgl) {
+            const pixel = new Uint8Array(4);
+            webgl.readPixels(0, 0, 1, 1, webgl.RGBA, webgl.UNSIGNED_BYTE, pixel);
+            hasNonEmptyPixels = pixel[3] > 0;
+          }
+        }
+      } catch {
+        hasNonEmptyPixels = false;
+      }
+    }
+    pixelVerificationFramesRef.current = hasNonEmptyPixels
+      ? pixelVerificationFramesRef.current + 1
+      : 0;
     if (mode === 'implicit3d' && evaluator?.kind === 'implicit') {
       // The WebGL surface owns the 3D draw path; the transparent 2D layer
       // must not mark a valid volumetric render as an empty XY slice.
       geometrySamples = threeSurfaceReadyRef.current ? 1 : 0;
     }
     if (evaluator && mode !== 'implicit3d') {
-      if (geometrySamples === 0) {
+      if (geometrySamples === 0 || pixelVerificationFramesRef.current === 0) {
         renderHealthFramesRef.current += 1;
         if (renderHealthFramesRef.current >= 4 && !healthReportedRef.current) {
           healthReportedRef.current = true;
-          onRenderStatus('error', 'Animation engine could not evaluate coordinates for this domain. Try Auto Range, reset the viewport, or simplify the expression.');
+          onRenderStatus('error', geometrySamples === 0
+            ? 'Animation engine could not evaluate coordinates for this domain. Try Auto Range, reset the viewport, or simplify the expression.'
+            : 'The canvas is blank after rendering. Try Auto Range, reset the viewport, or simplify the expression.');
         }
       } else {
         renderHealthFramesRef.current += 1;
-        if ((!animationExpected || renderHealthFramesRef.current >= 2) && !healthReportedRef.current) {
+        if ((!animationExpected || renderHealthFramesRef.current >= 2) && pixelVerificationFramesRef.current >= 2 && !healthReportedRef.current) {
           healthReportedRef.current = true;
           onRenderStart();
           onRenderStatus('ready');
@@ -1865,6 +1976,7 @@ function GraphCanvas({
   useEffect(() => {
     runtimeWarningRef.current = false;
     renderHealthFramesRef.current = 0;
+    pixelVerificationFramesRef.current = 0;
     healthReportedRef.current = false;
     implicitContourCacheRef.current.clear();
   }, [animationExpected, equation, mode]);
@@ -1926,6 +2038,7 @@ function MainStudio() {
   const [watermark, setWatermark] = useState('Second Solution Studio');
   const [filename, setFilename] = useState('');
   const [fps, setFps] = useState(60);
+  const [audioEnabled, setAudioEnabled] = useState(true);
   const [renderStarted, setRenderStarted] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [topNotice, setTopNotice] = useState('');
@@ -1959,6 +2072,11 @@ function MainStudio() {
   const captureActiveRef = useRef(false);
   const captureRafRef = useRef<number | null>(null);
   const captureStopTimerRef = useRef<number | null>(null);
+  const audioEngineRef = useRef<AudioEngine | null>(null);
+  const audioLastProgressRef = useRef(-1);
+  const audioLastYRef = useRef<number | null>(null);
+  const audioLastDirectionRef = useRef(0);
+  const audioLastBeatTimeRef = useRef(0);
   const allowUnloadRef = useRef(false);
   const canvasColumnRef = useRef<HTMLDivElement>(null);
   const equationInputRef = useRef<HTMLTextAreaElement>(null);
@@ -1972,9 +2090,8 @@ function MainStudio() {
   const renderEquation = parsedEquation;
   const localDetectedMode = useMemo(() => detectSmartMode(parsedEquation), [parsedEquation]);
   const resolvedMode: ResolvedStudioMode = mode === 'auto' ? (serverResult?.valid ? serverResult.mode : localDetectedMode) : mode;
-  const animationExpected = serverResult?.valid ? serverResult.animatable : /\bt\b/i.test(parsedEquation);
+  const animationExpected = serverResult?.valid ? serverResult.animatable : /\b(?:t|u|theta)\b/i.test(parsedEquation);
   const details = modeDetails[mode];
-
   useEffect(() => {
     let cancelled = false;
     const hasLaunchScene = launchParams.has('equation');
@@ -2116,6 +2233,100 @@ function MainStudio() {
       tMax: Math.max(manualTMax, manualTMin + 0.001),
     };
   }, [autoRange, manualTMax, manualTMin, manualXMax, manualXMin, smartRange]);
+  const audioEvaluator = useMemo(
+    () => parserBuildGraphEvaluator(renderEquation, resolvedMode),
+    [renderEquation, resolvedMode],
+  );
+  const ensureAudioEngine = useCallback(async () => {
+    if (audioEngineRef.current) {
+      if (audioEngineRef.current.context.state === 'suspended') {
+        await audioEngineRef.current.context.resume();
+      }
+      return audioEngineRef.current;
+    }
+    const AudioContextConstructor = getAudioContextConstructor();
+    if (!AudioContextConstructor) return null;
+    try {
+      const context = new AudioContextConstructor();
+      const master = context.createGain();
+      const destination = context.createMediaStreamDestination();
+      master.gain.value = audioEnabled ? 0.72 : 0;
+      master.connect(context.destination);
+      master.connect(destination);
+      await context.resume();
+      const engine = { context, master, destination };
+      audioEngineRef.current = engine;
+      return engine;
+    } catch {
+      return null;
+    }
+  }, [audioEnabled]);
+  const audioYValue = useCallback((currentProgress: number) => {
+    if (!audioEvaluator) return 0;
+    const phase = currentProgress * Math.PI * 2 * speed;
+    const x = activeRange.xMin + currentProgress * (activeRange.xMax - activeRange.xMin);
+    const parameter = activeRange.tMin + currentProgress * (activeRange.tMax - activeRange.tMin);
+    const scope = {
+      x,
+      y: 0,
+      z: 0,
+      t: parameter,
+      u: parameter,
+      theta: parameter,
+      v: phase,
+      r: phase,
+      phi: phase,
+      a: phase,
+      b: speed,
+    };
+    try {
+      if (audioEvaluator.kind === 'function') return Number(audioEvaluator.expression.evaluate(scope)) || 0;
+      if (audioEvaluator.kind === 'parametric') return Number(audioEvaluator.y.evaluate(scope)) || 0;
+      if (audioEvaluator.kind === 'polar') {
+        const radius = Number(audioEvaluator.expression.evaluate(scope)) || 0;
+        return radius * Math.sin(parameter);
+      }
+      if (audioEvaluator.kind === 'vector') return Number(audioEvaluator.y.evaluate(scope)) || 0;
+      if (audioEvaluator.kind === 'points') {
+        const points = evaluatePointSet(audioEvaluator.points, phase, speed);
+        return points[Math.min(points.length - 1, Math.floor(currentProgress * points.length))]?.y ?? 0;
+      }
+    } catch {
+      return 0;
+    }
+    return 0;
+  }, [activeRange, audioEvaluator, speed]);
+
+  useEffect(() => {
+    if (!audioEnabled || !playing || !audioEngineRef.current) return;
+    const engine = audioEngineRef.current;
+    const currentProgress = progressRef.current;
+    if (currentProgress === audioLastProgressRef.current) return;
+    const y = audioYValue(currentProgress);
+    if (!Number.isFinite(y)) return;
+    const previousY = audioLastYRef.current;
+    const direction = previousY === null ? 0 : Math.sign(y - previousY);
+    const now = engine.context.currentTime;
+    const minInterval = Math.max(0.075, 0.18 / Math.max(0.25, speed));
+    if (now - audioLastBeatTimeRef.current > minInterval) {
+      const normalizedY = Math.max(0, Math.min(1, (y + 4) / 8));
+      scheduleAudioTone(engine, AUDIO_MIN_HZ + normalizedY * (AUDIO_MAX_HZ - AUDIO_MIN_HZ));
+      const changedDirection = direction !== 0 && audioLastDirectionRef.current !== 0 && direction !== audioLastDirectionRef.current;
+      const fixedBeat = currentProgress > 0 && Math.floor(currentProgress * 16) !== Math.floor(audioLastProgressRef.current * 16);
+      if (changedDirection || fixedBeat) {
+        scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72);
+        audioLastBeatTimeRef.current = now;
+      }
+      audioLastDirectionRef.current = direction;
+    }
+    audioLastYRef.current = y;
+    audioLastProgressRef.current = currentProgress;
+  }, [audioEnabled, audioYValue, playing, progress, speed]);
+
+  useEffect(() => () => {
+    audioEngineRef.current?.context.close();
+    audioEngineRef.current = null;
+  }, []);
   const canvasEntries = useMemo(() => {
     const entries = layers
       .filter((layer) => layer.visible)
@@ -2301,12 +2512,25 @@ function MainStudio() {
     setTopNotice(`${nextTheme === 'light' ? 'Minimal Light' : nextTheme === 'neon' ? 'Neon Glow' : 'Dark'} theme`);
   };
   const togglePlayback = () => {
+    if (!playing || progress >= 1) void ensureAudioEngine();
     if (progress >= 1) {
       setProgress(0);
       setPlaying(true);
       return;
     }
     setPlaying((value) => !value);
+  };
+  const toggleAudio = () => {
+    const nextEnabled = !audioEnabled;
+    setAudioEnabled(nextEnabled);
+    const engine = audioEngineRef.current;
+    if (engine) {
+      engine.master.gain.setTargetAtTime(nextEnabled ? 0.72 : 0, engine.context.currentTime, 0.025);
+      if (nextEnabled && engine.context.state === 'suspended') void engine.context.resume();
+    } else if (nextEnabled) {
+      void ensureAudioEngine();
+    }
+    setTopNotice(nextEnabled ? 'Audio synthesis enabled' : 'Audio synthesis muted');
   };
   const zoomPage = (delta: number) => {
     setPageZoom((value) => clampPageZoom(value + delta));
@@ -2408,14 +2632,17 @@ function MainStudio() {
   };
 
   const downloadPng = () => {
-    if (!serverResult?.valid || renderHealth === 'error') {
-      setExportStatus('Fix the equation and complete render verification before exporting');
+    const canvases = [
+      ...Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.webgl-canvas') ?? []),
+      ...Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.graph-canvas') ?? []),
+    ];
+    const canvas = canvases[0];
+    if (!canvas) return;
+    if (!canvases.some(canvasHasNonEmptyPixels)) {
+      setExportStatus('Wait for the local canvas pixel check to complete');
       window.setTimeout(() => setExportStatus(''), 3000);
       return;
     }
-    const canvases = Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.graph-canvas') ?? []);
-    const canvas = canvases[0];
-    if (!canvas) return;
     const exportCanvas = document.createElement('canvas');
     exportCanvas.width = canvas.width;
     exportCanvas.height = canvas.height;
@@ -2441,17 +2668,23 @@ function MainStudio() {
   };
   downloadPngRef.current = downloadPng;
 
-  const captureWebm = () => {
-    if (!serverResult?.valid || renderHealth === 'error') {
-      setExportStatus('Fix the equation and complete render verification before exporting');
+  const captureWebm = async () => {
+    if (captureActiveRef.current) return;
+    const audioEngine = await ensureAudioEngine();
+    if (!audioEngine) {
+      setExportStatus('Audio capture is not supported in this browser');
       window.setTimeout(() => setExportStatus(''), 3000);
       return;
     }
-    if (captureActiveRef.current) return;
-    const sourceCanvas = canvasColumnRef.current?.querySelector<HTMLCanvasElement>('canvas.graph-canvas');
-    const webglCanvas = canvasColumnRef.current?.querySelector<HTMLCanvasElement>('canvas.webgl-canvas');
-    if (!sourceCanvas || !('MediaRecorder' in window) || !HTMLCanvasElement.prototype.captureStream) {
+    const sourceCanvases = Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.graph-canvas') ?? []);
+    const webglCanvases = Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.webgl-canvas') ?? []);
+    if (sourceCanvases.length === 0 || !('MediaRecorder' in window) || !HTMLCanvasElement.prototype.captureStream) {
       setExportStatus('HD video capture is not supported here');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    if (![...webglCanvases, ...sourceCanvases].some(canvasHasNonEmptyPixels)) {
+      setExportStatus('Wait for the local canvas pixel check to complete');
       window.setTimeout(() => setExportStatus(''), 3000);
       return;
     }
@@ -2485,8 +2718,8 @@ function MainStudio() {
     const paintCaptureFrame = () => {
       captureContext.fillStyle = '#171a24';
       captureContext.fillRect(0, 0, captureCanvas.width, captureCanvas.height);
-      if (webglCanvas) drawCaptureSource(webglCanvas);
-      drawCaptureSource(sourceCanvas);
+      webglCanvases.slice().reverse().forEach(drawCaptureSource);
+      sourceCanvases.slice().reverse().forEach(drawCaptureSource);
       captureContext.fillStyle = 'rgba(241, 236, 222, .78)';
       captureContext.font = '16px DM Mono, monospace';
       captureContext.textAlign = 'right';
@@ -2499,7 +2732,18 @@ function MainStudio() {
       captureContext.textAlign = 'start';
     };
     paintCaptureFrame();
-    const stream = captureCanvas.captureStream(exportFps);
+    const videoStream = captureCanvas.captureStream(exportFps);
+    const audioTrack = audioEngine.destination.stream.getAudioTracks()[0]?.clone();
+    if (!audioTrack) {
+      videoStream.getTracks().forEach((track) => track.stop());
+      setExportStatus('Audio capture is not supported in this browser');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    const stream = new MediaStream([
+      ...videoStream.getVideoTracks(),
+      audioTrack,
+    ]);
     const videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
     const mimeType = [
       'video/mp4;codecs=avc1.640028,mp4a.40.2',
@@ -2527,7 +2771,7 @@ function MainStudio() {
     const previousProgress = progressRef.current;
     const previousPlaying = playing;
     captureActiveRef.current = true;
-    setPlaying(false);
+    setPlaying(true);
     setExportStatus('Capturing live canvas at 60 FPS…');
     const chunks: Blob[] = [];
     recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
@@ -2583,22 +2827,8 @@ function MainStudio() {
   };
 
   const validatorState = validation.isPending
-    ? { label: 'Checking syntax', className: 'state-pending' }
-    : validation.isError
-      ? { label: 'Validator offline', className: 'state-error' }
-       : serverResult?.valid
-         ? renderHealth === 'error'
-           ? { label: 'Render verification failed', className: 'state-error' }
-           : progress >= 1 && renderHealth === 'ready'
-          ? { label: 'Animation Complete', className: 'state-valid rendered-status complete-status' }
-          : playing
-            ? { label: 'Drawing…', className: 'state-valid rendered-status' }
-            : renderStarted
-              ? { label: 'Validated & Rendered', className: 'state-valid rendered-status' }
-              : { label: 'Validated', className: 'state-valid' }
-         : serverResult
-           ? { label: serverResult.verificationMessage || 'Equation is invalid/wrong.', className: 'state-error' }
-          : { label: 'Waiting for input', className: 'state-pending' };
+    ? { label: 'Validating locally', className: 'state-pending' }
+    : { label: 'Validator active', className: serverResult?.valid === false ? 'state-error' : 'state-valid' };
   const autocompleteOptions = ['sin(', 'cos(', 'tan(', 'log(', 'sqrt('];
   const autocompleteSuggestions = autocompleteOptions.filter((item) => !equation.toLowerCase().includes(item.slice(0, -1))).slice(0, 5);
   const usingSafeFallback = Boolean(renderEquation.trim() && (validation.isError || (serverResult && !serverResult.valid)));
@@ -2626,7 +2856,10 @@ function MainStudio() {
         <div className="brand">
           <div className="brand-mark"><AppIcon /></div>
           <div>
-            <div className="brand-name">Second Solution Studio</div>
+            <div className="brand-title-row">
+              <div className="brand-name">Second Solution Studio</div>
+              <span className="version-badge">v1.0.1 - Live</span>
+            </div>
             <div className="brand-sub mono">studio / scene 01</div>
             <div className="tagline">Visualize Mathematics Like Never Before</div>
           </div>
@@ -2901,6 +3134,18 @@ function MainStudio() {
              <div className="transport-progress" role="progressbar" aria-label="Drawing progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}><span style={{ width: `${progress * 100}%` }} /></div>
              <span className="transport-percent mono">{Math.round(progress * 100)}%</span>
             <span className="transport-speed mono">{speed.toFixed(1)}×</span>
+            <button
+              className={`audio-toggle ${audioEnabled ? 'is-on' : ''}`}
+              type="button"
+              onClick={toggleAudio}
+              aria-pressed={audioEnabled}
+              aria-label={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
+              title={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
+              data-testid="button-audio-toggle"
+            >
+              {audioEnabled ? <Volume2 className="icon" /> : <VolumeX className="icon" />}
+              <span>{audioEnabled ? 'Audio ON' : 'Audio muted'}</span>
+            </button>
              <button className="transport-help" type="button" onClick={() => setShowGuide(true)} aria-label="Open math mode guide and troubleshooting" data-testid="button-open-guide">
                <CircleHelp className="icon" />
              </button>
@@ -3027,22 +3272,20 @@ function MainStudio() {
           </section>
 
           <section className="panel-section">
-            <div className="panel-heading"><h2>Server reading</h2><Activity className="icon muted" /></div>
+            <div className="panel-heading"><h2>Local validation</h2><Activity className="icon muted" /></div>
             {validation.isPending ? (
-              <div className="server-result"><div className="result-title"><span className="status-dot state-pending" /> Parsing equation</div><p className="result-copy">Checking structure and finding variables…</p></div>
-             ) : validation.isError ? (
-               <div className="server-result invalid" data-testid="status-server-error"><div className="result-title state-error"><span className="status-dot" /> Connection issue</div><p className="result-copy">The validation service did not answer. The local preview is still available.</p><div className="failure-recovery"><span>Nothing is lost locally.</span><button className="recovery-btn" type="button" onClick={recoverWithFallback}>Load safe fallback</button></div></div>
+              <div className="server-result"><div className="result-title"><span className="status-dot state-pending" /> Validating locally</div><p className="result-copy">Checking structure and finding variables in your browser…</p></div>
             ) : serverResult ? (
               <div className={`server-result ${serverResult.valid ? 'valid' : 'invalid'}`} data-testid="status-server-result">
                 <div className={`result-title ${serverResult.valid ? 'state-valid' : 'state-error'}`}><span className="status-dot" /> {serverResult.valid ? 'Expression accepted' : 'Expression needs edits'}</div>
-                 <p className="result-copy">{serverResult.valid ? `Detected as ${modeDetails[serverResult.mode].title}. ${serverResult.verificationMessage}` : serverResult.verificationMessage}</p>
-                 {serverResult.valid && <div className="verification-badges"><span>{serverResult.animatable ? 'Dynamic coordinates' : 'Static plot'}</span><span>{serverResult.supports2dFallback ? '2D fallback ready' : 'No 2D fallback'}</span></div>}
+                <p className="result-copy">{serverResult.valid ? `Detected as ${modeDetails[serverResult.mode].title}. ${serverResult.verificationMessage}` : serverResult.verificationMessage}</p>
+                {serverResult.valid && <div className="verification-badges"><span>{serverResult.animatable ? 'Dynamic coordinates' : 'Static plot'}</span><span>{serverResult.supports2dFallback ? '2D fallback ready' : 'No 2D fallback'}</span></div>}
                 {serverResult.variables.length > 0 && <div className="variable-list">{serverResult.variables.map((variable) => <span className="variable" key={variable}>{variable}</span>)}</div>}
-                 {serverResult.suggestions.length > 0 && <div className="suggestion-list">{serverResult.suggestions.map((suggestion) => <span className="suggestion" key={suggestion}>{suggestion}</span>)}</div>}
-                 {!serverResult.valid && <div className="failure-recovery"><span>Local preview can keep you moving.</span><button className="recovery-btn" type="button" onClick={recoverWithFallback}>Load safe fallback</button></div>}
+                {serverResult.suggestions.length > 0 && <div className="suggestion-list">{serverResult.suggestions.map((suggestion) => <span className="suggestion" key={suggestion}>{suggestion}</span>)}</div>}
+                {!serverResult.valid && <div className="failure-recovery"><span>Local preview can keep you moving.</span><button className="recovery-btn" type="button" onClick={recoverWithFallback}>Load safe fallback</button></div>}
               </div>
             ) : (
-              <div className="server-result"><div className="result-title"><span className="status-dot state-pending" /> Awaiting a cue</div><p className="result-copy">The engine will classify your expression as you type.</p></div>
+              <div className="server-result"><div className="result-title"><span className="status-dot state-pending" /> Awaiting a cue</div><p className="result-copy">The local engine will classify your expression as you type.</p></div>
             )}
           </section>
 
