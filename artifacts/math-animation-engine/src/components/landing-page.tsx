@@ -37,7 +37,7 @@ const examples: LandingExample[] = [
 
 const flowSteps = [
   { title: 'Input', copy: 'Type an equation, point set, or field in the language you already use.', icon: '01' },
-  { title: 'Backend verification', copy: 'A safe AST validator checks structure, variables, and supported math functions.', icon: '02' },
+  { title: 'Local verification', copy: 'A browser-side mathjs validator checks structure, variables, and supported math functions without a round trip.', icon: '02' },
   { title: 'Canvas animation', copy: 'The studio frames the result and turns it into a living, exportable scene.', icon: '03' },
 ];
 

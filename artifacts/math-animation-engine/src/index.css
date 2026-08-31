@@ -276,9 +276,9 @@
 .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 13px; height: 13px; border-radius: 50%; background: hsl(var(--muted-foreground)); transition: transform .2s ease, background .2s ease; }
 .switch.on { background: hsl(var(--accent)); }
 .switch.on::after { transform: translateX(15px); background: hsl(var(--foreground)); }
-.server-result { padding: 11px; border: 1px solid hsl(var(--border)); border-radius: 8px; background: hsl(var(--card)); }
-.server-result.valid { border-color: rgba(91,142,42,.45); }
-.server-result.invalid { border-color: rgba(177,79,59,.42); }
+.local-result { padding: 11px; border: 1px solid hsl(var(--border)); border-radius: 8px; background: hsl(var(--card)); }
+.local-result.valid { border-color: rgba(91,142,42,.45); }
+.local-result.invalid { border-color: rgba(177,79,59,.42); }
 .result-title { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; font-size: 11px; font-weight: 600; }
 .result-title .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .result-copy { margin: 0; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.5; }

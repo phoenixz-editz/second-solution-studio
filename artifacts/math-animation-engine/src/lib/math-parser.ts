@@ -40,11 +40,15 @@ export type LocalValidationResult = {
 
 function withAliases(scope: Record<string, number>) {
   const next = { ...scope };
-  const parameter = next.u ?? next.theta ?? next.x ?? next.t ?? 0;
+  // Keep parameter aliases aligned without letting a cartesian x coordinate
+  // overwrite an explicit animation parameter. This matters for vector fields
+  // that use both x/y and t/u in the same expression.
+  const parameter = next.u ?? next.theta ?? next.t ?? next.x ?? 0;
   const secondary = next.v ?? next.r ?? next.phi ?? next.y ?? next.b ?? 0;
   next.u ??= parameter;
   next.theta ??= parameter;
   next.t ??= parameter;
+  next.a ??= parameter;
   next.v ??= secondary;
   next.r ??= secondary;
   next.phi ??= secondary;
@@ -107,10 +111,12 @@ export function detectSmartMode(input: string): ResolvedStudioMode {
   const hasSpatialVariables =
     /\bx\b/i.test(normalized) && /\by\b/i.test(normalized) && /\bz\b/i.test(normalized);
   const pair = splitPair(renderSource);
-  const hasNamedParametricPair = /^\s*x\s*\(\s*t\s*\)\s*=|^\s*x\s*\(\s*u\s*\)\s*=/i.test(renderSource);
+  const hasNamedParametricPair = Boolean(getNamedCoordinateParts(renderSource));
 
   if ((lines.length > 1 && lines.every((line) => Boolean(parsePointPair(line)))) || /\)\s*[,;\n]\s*\(/.test(normalized)) return 'points';
-  if (pair && hasPair && pair.length === 3) return 'vector';
+  // A three-component tuple is a vector when it is static and a parametric
+  // curve when one of its coordinates is driven by t/u/theta.
+  if (pair && hasPair && pair.length === 3) return hasTime ? 'parametric' : 'vector';
   if (pair && (hasNamedParametricPair || hasTime)) return 'parametric';
   if (hasSpatialVariables) return 'implicit3d';
   if (equality && !/^\s*[xy]\s*$/i.test(equality[1]) && /\bx\b/i.test(renderSource) && /\by\b/i.test(renderSource)) return 'implicit';
@@ -253,6 +259,21 @@ function parsePointPair(input: string) {
   return parts.length === 2 ? parts : null;
 }
 
+function getNamedCoordinateParts(input: string) {
+  const renderSource = stripOuterCollections(input);
+  const assignments = splitTopLevel(renderSource, new Set([',']))
+    .map((part) => part.match(/^\s*([xyz])\s*\(\s*(?:t|u|theta)\s*\)\s*=\s*(.+)\s*$/i))
+    .filter((match): match is RegExpMatchArray => Boolean(match));
+  if (assignments.length < 2) return null;
+
+  const byCoordinate = new Map(assignments.map((match) => [match[1].toLowerCase(), match[2]]));
+  const x = byCoordinate.get('x');
+  const y = byCoordinate.get('y');
+  if (!x || !y) return null;
+  const z = byCoordinate.get('z');
+  return z ? [x, y, z] : [x, y];
+}
+
 export function splitEquationExpressions(input: string, mode: StudioMode) {
   const stripped = normalizeForPreview(input);
   if (!stripped) return [];
@@ -290,8 +311,8 @@ export function splitEquationExpressions(input: string, mode: StudioMode) {
 
 function splitPair(input: string) {
   const renderSource = splitProgramStatements(input).renderExpression;
-  const named = renderSource.match(/^\s*x\s*\(\s*(?:t|u)\s*\)\s*=\s*(.+?),\s*y\s*\(\s*(?:t|u)\s*\)\s*=\s*(.+)\s*$/i);
-  if (named) return [named[1], named[2]];
+  const named = getNamedCoordinateParts(renderSource);
+  if (named) return named;
 
   let pair = renderSource.trim();
   if (

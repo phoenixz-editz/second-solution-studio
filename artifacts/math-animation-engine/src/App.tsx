@@ -112,8 +112,8 @@ function getAudioContextConstructor() {
     ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
 }
 
-function scheduleAudioTone(engine: AudioEngine, frequency: number, duration = 0.085, volume = 0.12) {
-  const now = engine.context.currentTime;
+function scheduleAudioTone(engine: AudioEngine, frequency: number, duration = 0.085, volume = 0.12, when?: number) {
+  const now = Math.max(engine.context.currentTime, when ?? engine.context.currentTime);
   const oscillator = engine.context.createOscillator();
   const envelope = engine.context.createGain();
   oscillator.type = 'sine';
@@ -127,8 +127,8 @@ function scheduleAudioTone(engine: AudioEngine, frequency: number, duration = 0.
   oscillator.stop(now + duration + 0.02);
 }
 
-function scheduleAudioBeat(engine: AudioEngine, strength = 1) {
-  const now = engine.context.currentTime;
+function scheduleAudioBeat(engine: AudioEngine, strength = 1, when?: number) {
+  const now = Math.max(engine.context.currentTime, when ?? engine.context.currentTime);
   const oscillator = engine.context.createOscillator();
   const envelope = engine.context.createGain();
   oscillator.type = 'triangle';
@@ -2089,6 +2089,7 @@ function MainStudio() {
   const audioLastYRef = useRef<number | null>(null);
   const audioLastDirectionRef = useRef(0);
   const audioLastBeatTimeRef = useRef(0);
+  const audioLastBeatIndexRef = useRef(-1);
   const allowUnloadRef = useRef(false);
   const canvasColumnRef = useRef<HTMLDivElement>(null);
   const equationInputRef = useRef<HTMLTextAreaElement>(null);
@@ -2098,11 +2099,11 @@ function MainStudio() {
     const timer = window.setTimeout(() => setParsedEquation(equation), 300);
     return () => window.clearTimeout(timer);
   }, [equation]);
-  const serverResult = validation.validatedKey === `${mode}:${parsedEquation.trim()}` ? validation.data : undefined;
+  const localResult = validation.validatedKey === `${mode}:${parsedEquation.trim()}` ? validation.data : undefined;
   const renderEquation = parsedEquation;
   const localDetectedMode = useMemo(() => detectSmartMode(parsedEquation), [parsedEquation]);
-  const resolvedMode: ResolvedStudioMode = mode === 'auto' ? (serverResult?.valid ? serverResult.mode : localDetectedMode) : mode;
-  const animationExpected = serverResult?.valid ? serverResult.animatable : /\b(?:t|u|theta)\b/i.test(parsedEquation);
+  const resolvedMode: ResolvedStudioMode = mode === 'auto' ? (localResult?.valid ? localResult.mode : localDetectedMode) : mode;
+  const animationExpected = localResult?.valid ? localResult.animatable : /\b(?:t|u|theta)\b/i.test(parsedEquation);
   const details = modeDetails[mode];
   useEffect(() => {
     let cancelled = false;
@@ -2310,6 +2311,14 @@ function MainStudio() {
   }, [activeRange, audioEvaluator, speed]);
 
   useEffect(() => {
+    audioLastProgressRef.current = -1;
+    audioLastYRef.current = null;
+    audioLastDirectionRef.current = 0;
+    audioLastBeatTimeRef.current = 0;
+    audioLastBeatIndexRef.current = -1;
+  }, [audioEnabled, renderEquation, resolvedMode]);
+
+  useEffect(() => {
     if (!audioEnabled || !playing || !audioEngineRef.current) return;
     const engine = audioEngineRef.current;
     const currentProgress = progressRef.current;
@@ -2320,17 +2329,25 @@ function MainStudio() {
     const direction = previousY === null ? 0 : Math.sign(y - previousY);
     const now = engine.context.currentTime;
     const minInterval = Math.max(0.075, 0.18 / Math.max(0.25, speed));
+    const previousDirection = audioLastDirectionRef.current;
+    const changedDirection = direction !== 0
+      && previousDirection !== 0
+      && direction !== previousDirection;
+    const beatIndex = Math.floor(Math.max(0, Math.min(1, currentProgress)) * 16);
+    const fixedBeat = beatIndex > audioLastBeatIndexRef.current;
     if (now - audioLastBeatTimeRef.current > minInterval) {
       const normalizedY = Math.max(0, Math.min(1, (y + 4) / 8));
-      scheduleAudioTone(engine, AUDIO_MIN_HZ + normalizedY * (AUDIO_MAX_HZ - AUDIO_MIN_HZ));
-      const changedDirection = direction !== 0 && audioLastDirectionRef.current !== 0 && direction !== audioLastDirectionRef.current;
-      const fixedBeat = currentProgress > 0 && Math.floor(currentProgress * 16) !== Math.floor(audioLastProgressRef.current * 16);
+      // Put the pitch cue and beat on the same audio-clock timestamp so the
+      // visual extrema and the rhythmic accent stay locked together.
+      const scheduledAt = now + 0.012;
+      scheduleAudioTone(engine, AUDIO_MIN_HZ + normalizedY * (AUDIO_MAX_HZ - AUDIO_MIN_HZ), 0.085, 0.12, scheduledAt);
       if (changedDirection || fixedBeat) {
-        scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72);
+        scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72, scheduledAt);
         audioLastBeatTimeRef.current = now;
       }
-      audioLastDirectionRef.current = direction;
     }
+    if (direction !== 0) audioLastDirectionRef.current = direction;
+    audioLastBeatIndexRef.current = beatIndex;
     audioLastYRef.current = y;
     audioLastProgressRef.current = currentProgress;
   }, [audioEnabled, audioYValue, playing, progress, speed]);
@@ -2428,7 +2445,7 @@ function MainStudio() {
   }, [duration, playing, sessionReady]);
 
   useEffect(() => {
-    if (serverResult?.valid && renderEquation.trim()) {
+    if (localResult?.valid && renderEquation.trim()) {
       const key = `${resolvedMode}:${renderEquation.trim()}`;
       if (key !== lastHistoryKey.current) {
         lastHistoryKey.current = key;
@@ -2438,7 +2455,7 @@ function MainStudio() {
         });
       }
     }
-  }, [color, mode, renderEquation, resolvedMode, serverResult]);
+  }, [color, mode, renderEquation, resolvedMode, localResult]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -2767,29 +2784,33 @@ function MainStudio() {
       audioTrack,
     ]);
     const videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
-    const mimeType = [
+    const selectedMimeType = [
       'video/mp4;codecs=avc1.640028,mp4a.40.2',
       'video/mp4',
       'video/webm;codecs=vp9,opus',
       'video/webm;codecs=vp8,opus',
       'video/webm',
     ].find((type) => MediaRecorder.isTypeSupported(type));
-    if (!mimeType) {
+    if (!selectedMimeType) {
+      stream.getTracks().forEach((track) => track.stop());
       setExportStatus('HD video capture is not supported here');
+      window.setTimeout(() => setExportStatus(''), 3000);
       return;
     }
     let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(stream, { mimeType });
+      recorder = new MediaRecorder(stream, { mimeType: selectedMimeType });
     } catch {
       try {
         recorder = new MediaRecorder(stream);
       } catch {
+        stream.getTracks().forEach((track) => track.stop());
         setExportStatus('HD video capture is not supported here');
         window.setTimeout(() => setExportStatus(''), 3000);
         return;
       }
     }
+    const recordingMimeType = recorder.mimeType || selectedMimeType;
     const previousProgress = progressRef.current;
     const previousPlaying = playing;
     captureActiveRef.current = true;
@@ -2812,9 +2833,14 @@ function MainStudio() {
       setPlaying(previousPlaying);
       stream.getTracks().forEach((track) => track.stop());
        captureContext.clearRect(0, 0, captureCanvas.width, captureCanvas.height);
-      const isMp4 = mimeType.includes('mp4');
+      if (chunks.length === 0) {
+        setExportStatus('Video capture did not produce any frames');
+        window.setTimeout(() => setExportStatus(''), 3000);
+        return;
+      }
+      const isMp4 = recordingMimeType.includes('mp4');
       const extension = isMp4 ? 'mp4' : 'webm';
-      const url = URL.createObjectURL(new Blob(chunks, { type: mimeType }));
+      const url = URL.createObjectURL(new Blob(chunks, { type: recordingMimeType }));
       const link = document.createElement('a');
       link.download = `${filename.trim().replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || filenameFromEquation(renderEquation)}.${extension}`;
       link.href = url;
@@ -2850,10 +2876,10 @@ function MainStudio() {
 
   const validatorState = validation.isPending
     ? { label: 'Validating locally', className: 'state-pending' }
-    : { label: 'Validator active', className: serverResult?.valid === false ? 'state-error' : 'state-valid' };
+    : { label: 'Validator active', className: localResult?.valid === false ? 'state-error' : 'state-valid' };
   const autocompleteOptions = ['sin(', 'cos(', 'tan(', 'log(', 'sqrt('];
   const autocompleteSuggestions = autocompleteOptions.filter((item) => !equation.toLowerCase().includes(item.slice(0, -1))).slice(0, 5);
-  const usingSafeFallback = Boolean(renderEquation.trim() && (validation.isError || (serverResult && !serverResult.valid)));
+  const usingSafeFallback = Boolean(renderEquation.trim() && (validation.isError || (localResult && !localResult.valid)));
   const recoverWithFallback = () => {
     changeEquation('sin(x + t) * exp(-0.08 * x^2)');
     changeMode('function');
@@ -3137,9 +3163,9 @@ function MainStudio() {
                      <p>
                         {canvasEntries.length === 0
                           ? 'Turn a layer back on to continue exploring the scene.'
-                          : serverResult?.valid
-                         ? serverResult.verificationMessage
-                         : serverResult?.error || 'Try a simpler expression, then keep iterating.'}
+                          : localResult?.valid
+                         ? localResult.verificationMessage
+                         : localResult?.error || 'Try a simpler expression, then keep iterating.'}
                      </p>
                   </div>
                </div>
@@ -3296,18 +3322,18 @@ function MainStudio() {
           <section className="panel-section">
             <div className="panel-heading"><h2>Local validation</h2><Activity className="icon muted" /></div>
             {validation.isPending ? (
-              <div className="server-result"><div className="result-title"><span className="status-dot state-pending" /> Validating locally</div><p className="result-copy">Checking structure and finding variables in your browser…</p></div>
-            ) : serverResult ? (
-              <div className={`server-result ${serverResult.valid ? 'valid' : 'invalid'}`} data-testid="status-server-result">
-                <div className={`result-title ${serverResult.valid ? 'state-valid' : 'state-error'}`}><span className="status-dot" /> {serverResult.valid ? 'Expression accepted' : 'Expression needs edits'}</div>
-                <p className="result-copy">{serverResult.valid ? `Detected as ${modeDetails[serverResult.mode].title}. ${serverResult.verificationMessage}` : serverResult.verificationMessage}</p>
-                {serverResult.valid && <div className="verification-badges"><span>{serverResult.animatable ? 'Dynamic coordinates' : 'Static plot'}</span><span>{serverResult.supports2dFallback ? '2D fallback ready' : 'No 2D fallback'}</span></div>}
-                {serverResult.variables.length > 0 && <div className="variable-list">{serverResult.variables.map((variable) => <span className="variable" key={variable}>{variable}</span>)}</div>}
-                {serverResult.suggestions.length > 0 && <div className="suggestion-list">{serverResult.suggestions.map((suggestion) => <span className="suggestion" key={suggestion}>{suggestion}</span>)}</div>}
-                {!serverResult.valid && <div className="failure-recovery"><span>Local preview can keep you moving.</span><button className="recovery-btn" type="button" onClick={recoverWithFallback}>Load safe fallback</button></div>}
+              <div className="local-result"><div className="result-title"><span className="status-dot state-pending" /> Validating locally</div><p className="result-copy">Checking structure and finding variables in your browser…</p></div>
+            ) : localResult ? (
+              <div className={`local-result ${localResult.valid ? 'valid' : 'invalid'}`} data-testid="status-local-result">
+                <div className={`result-title ${localResult.valid ? 'state-valid' : 'state-error'}`}><span className="status-dot" /> {localResult.valid ? 'Expression accepted' : 'Expression needs edits'}</div>
+                <p className="result-copy">{localResult.valid ? `Detected as ${modeDetails[localResult.mode].title}. ${localResult.verificationMessage}` : localResult.verificationMessage}</p>
+                {localResult.valid && <div className="verification-badges"><span>{localResult.animatable ? 'Dynamic coordinates' : 'Static plot'}</span><span>{localResult.supports2dFallback ? '2D fallback ready' : 'No 2D fallback'}</span></div>}
+                {localResult.variables.length > 0 && <div className="variable-list">{localResult.variables.map((variable) => <span className="variable" key={variable}>{variable}</span>)}</div>}
+                {localResult.suggestions.length > 0 && <div className="suggestion-list">{localResult.suggestions.map((suggestion) => <span className="suggestion" key={suggestion}>{suggestion}</span>)}</div>}
+                {!localResult.valid && <div className="failure-recovery"><span>Local preview can keep you moving.</span><button className="recovery-btn" type="button" onClick={recoverWithFallback}>Load safe fallback</button></div>}
               </div>
             ) : (
-              <div className="server-result"><div className="result-title"><span className="status-dot state-pending" /> Awaiting a cue</div><p className="result-copy">The local engine will classify your expression as you type.</p></div>
+              <div className="local-result"><div className="result-title"><span className="status-dot state-pending" /> Awaiting a cue</div><p className="result-copy">The local engine will classify your expression as you type.</p></div>
             )}
           </section>
 
