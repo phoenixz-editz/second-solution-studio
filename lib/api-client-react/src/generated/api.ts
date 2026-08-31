@@ -285,6 +285,78 @@ export function useListFeedback<TData = Awaited<ReturnType<typeof listFeedback>>
 
 
 
+export const getCreateFeedbackUrl = () => {
+
+
+
+
+  return `/api/feedback`
+}
+
+/**
+ * Stores a named suggestion or bug report with a contact email.
+ * @summary Submit community feedback
+ */
+export const createFeedback = async (feedbackInput: FeedbackInput, options?: Parameters<typeof customFetch>[1]): Promise<Feedback> => {
+
+  return customFetch<Feedback>(getCreateFeedbackUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(feedbackInput)
+  }
+);}
+
+
+
+
+
+export const getCreateFeedbackMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFeedback>>, TError,{data: BodyType<FeedbackInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createFeedback>>, TError,{data: BodyType<FeedbackInput>}, TContext> => {
+
+const mutationKey = ['createFeedback'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createFeedback>>, {data: BodyType<FeedbackInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  createFeedback(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateFeedbackMutationResult = NonNullable<Awaited<ReturnType<typeof createFeedback>>>
+    export type CreateFeedbackMutationBody = BodyType<FeedbackInput>
+    export type CreateFeedbackMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Submit community feedback
+ */
+export const useCreateFeedback = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFeedback>>, TError,{data: BodyType<FeedbackInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createFeedback>>,
+        TError,
+        {data: BodyType<FeedbackInput>},
+        TContext
+      > => {
+      return useMutation(getCreateFeedbackMutationOptions(options));
+    }
+
 export const getListStudioContentUrl = () => {
 
 
@@ -433,77 +505,5 @@ export const useUpdateStudioContent = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getUpdateStudioContentMutationOptions(options));
-    }
-
-export const getCreateFeedbackUrl = () => {
-
-
-
-
-  return `/api/studio-content`
-}
-
-/**
- * Stores a named suggestion or bug report.
- * @summary Submit community feedback
- */
-export const createFeedback = async (feedbackInput: FeedbackInput, options?: Parameters<typeof customFetch>[1]): Promise<Feedback> => {
-
-  return customFetch<Feedback>(getCreateFeedbackUrl(),
-  {
-    ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    body: JSON.stringify(feedbackInput)
-  }
-);}
-
-
-
-
-
-export const getCreateFeedbackMutationOptions = <TError = ErrorType<ErrorResponse>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFeedback>>, TError,{data: BodyType<FeedbackInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
-): UseMutationOptions<Awaited<ReturnType<typeof createFeedback>>, TError,{data: BodyType<FeedbackInput>}, TContext> => {
-
-const mutationKey = ['createFeedback'];
-const {mutation: mutationOptions, request: requestOptions} = options ?
-      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
-      options
-      : {...options, mutation: {...options.mutation, mutationKey}}
-      : {mutation: { mutationKey, }, request: undefined};
-
-
-
-
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createFeedback>>, {data: BodyType<FeedbackInput>}> = (props) => {
-          const {data} = props ?? {};
-
-          return  createFeedback(data,requestOptions)
-        }
-
-
-
-
-
-
-  return  { mutationFn, ...mutationOptions }}
-
-    export type CreateFeedbackMutationResult = NonNullable<Awaited<ReturnType<typeof createFeedback>>>
-    export type CreateFeedbackMutationBody = BodyType<FeedbackInput>
-    export type CreateFeedbackMutationError = ErrorType<ErrorResponse>
-
-    /**
- * @summary Submit community feedback
- */
-export const useCreateFeedback = <TError = ErrorType<ErrorResponse>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFeedback>>, TError,{data: BodyType<FeedbackInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
- ): UseMutationResult<
-        Awaited<ReturnType<typeof createFeedback>>,
-        TError,
-        {data: BodyType<FeedbackInput>},
-        TContext
-      > => {
-      return useMutation(getCreateFeedbackMutationOptions(options));
     }
 

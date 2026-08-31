@@ -84,6 +84,7 @@ export const FeedbackCategory = {
 export interface Feedback {
   id: number;
   name: string;
+  email: string;
   timestamp: string;
   category: FeedbackCategory;
   content: string;
@@ -103,6 +104,11 @@ export interface FeedbackInput {
      * @maxLength 80
      */
   name: string;
+  /**
+     * @minLength 3
+     * @maxLength 320
+     */
+  email: string;
   category: FeedbackInputCategory;
   /**
      * @minLength 1

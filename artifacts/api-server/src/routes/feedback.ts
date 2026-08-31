@@ -13,6 +13,7 @@ function serializeFeedback(entry: typeof feedbackTable.$inferSelect) {
   return {
     id: entry.id,
     name: entry.name,
+    email: entry.email,
     timestamp: entry.createdAt.toISOString(),
     category: entry.category,
     content: entry.content,
@@ -39,9 +40,10 @@ router.post("/feedback", async (req, res): Promise<void> => {
     return;
   }
   const name = parsed.data.name.trim();
+  const email = parsed.data.email.trim().toLowerCase();
   const content = parsed.data.content.trim();
-  if (!name || !content) {
-    res.status(400).json({ error: "Name and feedback content are required." });
+  if (!name || !email || !content || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ error: "Name, a valid email, and feedback content are required." });
     return;
   }
 
@@ -50,6 +52,7 @@ router.post("/feedback", async (req, res): Promise<void> => {
       .insert(feedbackTable)
       .values({
         name,
+        email,
         category: parsed.data.category,
         content,
       })

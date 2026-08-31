@@ -13,6 +13,11 @@ export interface FeedbackInput {
      * @maxLength 80
      */
   name: string;
+  /**
+     * @minLength 3
+     * @maxLength 320
+     */
+  email: string;
   category: FeedbackInputCategory;
   /**
      * @minLength 1

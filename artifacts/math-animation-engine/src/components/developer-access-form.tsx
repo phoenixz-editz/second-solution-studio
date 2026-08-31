@@ -1,55 +1,38 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export const DEVELOPER_EMAIL = 'jhoncena4581@gmail.com';
 export const DEVELOPER_PASSWORD = 'developer$000';
 
-type DeveloperAccessFormProps = {
+type DeveloperAccessSequenceProps = {
+  active: boolean;
   onUnlock: () => void;
 };
 
-export function DeveloperAccessForm({ onUnlock }: DeveloperAccessFormProps) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
+export function DeveloperAccessSequence({ active, onUnlock }: DeveloperAccessSequenceProps) {
   const [progress, setProgress] = useState(1);
-  const [error, setError] = useState('');
   const animationFrameRef = useRef<number | null>(null);
+  const welcomeTriggeredRef = useRef(false);
 
-  useEffect(() => () => {
-    if (animationFrameRef.current !== null) {
-      window.cancelAnimationFrame(animationFrameRef.current);
-    }
-    if (typeof document !== 'undefined') {
-      document.body.classList.remove('developer-loading');
-    }
-  }, []);
-
-  const unlockDeveloperPage = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (loading) return;
-    if (email.trim() !== DEVELOPER_EMAIL || password !== DEVELOPER_PASSWORD) {
-      setError('Those developer credentials are not recognized.');
-      return;
-    }
-
-    setError('');
-    setLoading(true);
+  useEffect(() => {
+    if (!active) return;
     setProgress(1);
+    welcomeTriggeredRef.current = false;
     document.body.classList.add('developer-loading');
-
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const welcome = new SpeechSynthesisUtterance('Welcome back Phoenix to developer page');
-      welcome.rate = 0.96;
-      welcome.pitch = 0.9;
-      window.speechSynthesis.speak(welcome);
-    }
 
     const startedAt = performance.now();
     const duration = 4200;
     const animate = (now: number) => {
       const amount = Math.min(1, (now - startedAt) / duration);
-      setProgress(Math.max(1, Math.round(amount * 99) + (amount >= 1 ? 1 : 0)));
+      const nextProgress = Math.max(1, Math.round(amount * 99) + (amount >= 1 ? 1 : 0));
+      setProgress(nextProgress);
+      if (nextProgress >= 95 && !welcomeTriggeredRef.current && 'speechSynthesis' in window) {
+        welcomeTriggeredRef.current = true;
+        window.speechSynthesis.cancel();
+        const welcome = new SpeechSynthesisUtterance('Welcome back Phoenix to developer page');
+        welcome.rate = 0.96;
+        welcome.pitch = 0.9;
+        window.speechSynthesis.speak(welcome);
+      }
       if (amount < 1) {
         animationFrameRef.current = window.requestAnimationFrame(animate);
         return;
@@ -63,54 +46,28 @@ export function DeveloperAccessForm({ onUnlock }: DeveloperAccessFormProps) {
       onUnlock();
     };
     animationFrameRef.current = window.requestAnimationFrame(animate);
-  };
 
-  if (loading) {
-    return (
-      <div className="developer-loading-screen" role="status" aria-live="assertive">
-        <div className="developer-loading-mark">S²</div>
-        <span className="landing-eyebrow">Developer access</span>
-        <h3>Preparing your private studio.</h3>
-        <div className="developer-loading-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
-        <div className="developer-loading-meta"><span>PHOENIX PROTOCOL</span><strong>{progress}%</strong></div>
-        <p>Unlocking the tools reserved for the developer.</p>
-      </div>
-    );
-  }
+    return () => {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      document.body.classList.remove('developer-loading');
+    };
+  }, [active, onUnlock]);
+
+  if (!active) return null;
 
   return (
-    <form className="developer-access" onSubmit={unlockDeveloperPage}>
-      <div className="developer-access-heading">
-        <span className="landing-eyebrow">Developer access</span>
-        <strong>Enter the private studio</strong>
-        <small>Use your developer credentials to unlock live copy editing.</small>
+    <div className="developer-loading-screen" role="status" aria-live="assertive">
+      <div className="developer-loading-backdrop" aria-hidden="true" />
+      <div className="developer-loading-card">
+        <div className="developer-loading-mark">S²</div>
+        <span className="landing-eyebrow">Preparing workspace</span>
+        <h3>Opening your studio.</h3>
+        <div className="developer-loading-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
+        <div className="developer-loading-meta"><span>LOADING</span><strong>{progress}%</strong></div>
       </div>
-      <label>
-        <span>Email</span>
-        <input
-          type="email"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          autoComplete="username"
-          placeholder="Developer email"
-          required
-          data-testid="input-developer-email"
-        />
-      </label>
-      <label>
-        <span>Password</span>
-        <input
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          autoComplete="current-password"
-          placeholder="Developer password"
-          required
-          data-testid="input-developer-password"
-        />
-      </label>
-      {error && <p className="developer-access-error" role="alert">{error}</p>}
-      <button className="developer-access-submit" type="submit" data-testid="button-developer-login">Unlock developer page</button>
-    </form>
+    </div>
   );
 }

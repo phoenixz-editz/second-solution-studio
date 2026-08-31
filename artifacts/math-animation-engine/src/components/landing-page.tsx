@@ -48,10 +48,11 @@ type LandingPageProps = {
 };
 
 const examples: LandingExample[] = [
-  { title: 'Interference wave', equation: 'sin(x + t) * exp(-0.08 * x^2)', mode: 'function', accent: '#c7f36b' },
-  { title: 'Orbiting point set', equation: '(0, 0)\n(3*cos(t), 3*sin(t))\n(4*cos(t + 0.8), 4*sin(t + 0.8))', mode: 'points', accent: '#72d8ff' },
-  { title: 'Circle contour', equation: 'x^2 + y^2 = 4', mode: 'implicit', accent: '#ff8b6d' },
+  { title: 'Polynomial sweep', equation: '0.04 * x^3 - 0.35 * x', mode: 'function', accent: '#ff8b6d' },
+  { title: 'Trigonometric wave', equation: 'sin(x + t) * exp(-0.08 * x^2)', mode: 'function', accent: '#c7f36b' },
   { title: 'Polar bloom', equation: '4 * cos(3 * theta)', mode: 'polar', accent: '#d6a8ff' },
+  { title: 'Orbiting points', equation: '(0, 0)\n(3*cos(t), 3*sin(t))\n(4*cos(t + 0.8), 4*sin(t + 0.8))', mode: 'points', accent: '#72d8ff' },
+  { title: '3D quadric surface', equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1', mode: 'implicit3d', accent: '#8ce7cf' },
 ];
 
 const insights: BlogInsight[] = [
@@ -107,8 +108,140 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (!canvas || !context || typeof window === 'undefined') return;
+    if (!canvas || typeof window === 'undefined') return;
+
+    const gl = canvas.getContext('webgl', {
+      alpha: false,
+      antialias: true,
+      powerPreference: 'high-performance',
+    });
+    if (gl) {
+      const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+      const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+      const program = gl.createProgram();
+      const buffer = gl.createBuffer();
+      if (!vertexShader || !fragmentShader || !program || !buffer) return;
+      gl.shaderSource(vertexShader, `
+        attribute vec2 a_position;
+        uniform float u_point_size;
+        void main() {
+          gl_Position = vec4(a_position, 0.0, 1.0);
+          gl_PointSize = u_point_size;
+        }
+      `);
+      gl.shaderSource(fragmentShader, `
+        precision mediump float;
+        uniform vec4 u_color;
+        void main() { gl_FragColor = u_color; }
+      `);
+      gl.compileShader(vertexShader);
+      gl.compileShader(fragmentShader);
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        gl.deleteBuffer(buffer);
+        gl.deleteProgram(program);
+        gl.deleteShader(vertexShader);
+        gl.deleteShader(fragmentShader);
+        return;
+      }
+
+      const positionLocation = gl.getAttribLocation(program, 'a_position');
+      const colorLocation = gl.getUniformLocation(program, 'u_color');
+      const pointSizeLocation = gl.getUniformLocation(program, 'u_point_size');
+      const color = example.accent.replace('#', '').match(/.{2}/g)?.map((channel) => parseInt(channel, 16) / 255) ?? [0.78, 0.95, 0.42];
+      const startedAt = performance.now();
+      let animationFrame = 0;
+      const resize = () => {
+        const bounds = canvas.getBoundingClientRect();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.max(1, Math.floor(bounds.width * dpr));
+        canvas.height = Math.max(1, Math.floor(bounds.height * dpr));
+        gl.viewport(0, 0, canvas.width, canvas.height);
+      };
+      const drawSeries = (points: number[], pointSize = 2.2) => {
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(points), gl.DYNAMIC_DRAW);
+        gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+        gl.uniform1f(pointSizeLocation, pointSize);
+        gl.drawArrays(gl.LINE_STRIP, 0, points.length / 2);
+      };
+      const draw = (now: number) => {
+        const time = (now - startedAt) / 1000;
+        const pointerShift = pointerRef.current.active ? (pointerRef.current.x - 0.5) * 1.4 : 0;
+        gl.clearColor(0.098, 0.149, 0.176, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.enableVertexAttribArray(positionLocation);
+        gl.uniform4f(colorLocation, color[0], color[1], color[2], 0.96);
+
+        const createSeries = (orbit = 0) => {
+          const points: number[] = [];
+          for (let index = 0; index <= 240; index += 1) {
+            const amount = index / 240;
+            const angle = amount * Math.PI * 2;
+            let x = Math.cos(angle);
+            let y = Math.sin(angle);
+            if (example.mode === 'points') {
+              const radius = 0.28 + orbit * 0.16;
+              const orbitAngle = angle + time * (1.05 + orbit * 0.18) + orbit;
+              x = Math.cos(orbitAngle) * radius;
+              y = Math.sin(orbitAngle) * radius;
+            } else if (example.mode === 'implicit3d') {
+              const rotate = time * 0.42;
+              const vertical = Math.cos(angle) * (0.52 + orbit * 0.11);
+              const depth = Math.sin(angle) * (0.8 - orbit * 0.12);
+              x = depth * Math.cos(rotate) - vertical * Math.sin(rotate);
+              y = depth * Math.sin(rotate) + vertical * Math.cos(rotate);
+            } else if (example.mode === 'polar') {
+              const radius = 0.76 + 0.2 * Math.cos(3 * angle + time * 1.7 + pointerShift);
+              x = radius * Math.cos(angle);
+              y = radius * Math.sin(angle);
+            } else {
+              const graphX = angle * 2 - Math.PI;
+              x = graphX / Math.PI;
+              y = example.equation.includes('x^3')
+                ? 0.1 * Math.pow(graphX / 2.8, 3) - 0.38 * (graphX / 2.8) + Math.sin(time + pointerShift) * 0.08
+                : Math.sin(graphX * 1.25 + time * 1.8 + pointerShift) * 0.62 * Math.exp(-0.035 * graphX * graphX);
+            }
+            points.push(x * 0.88, y * 0.82);
+          }
+          return points;
+        };
+
+        if (example.mode === 'points' || example.mode === 'implicit3d') {
+          const count = example.mode === 'points' ? 3 : 3;
+          for (let orbit = 0; orbit < count; orbit += 1) drawSeries(createSeries(orbit), 2.2);
+        } else {
+          drawSeries(createSeries());
+        }
+        const tracerSeries = createSeries(example.mode === 'points' ? 1 : 0);
+        const tracerIndex = Math.floor(((time * 0.18) % 1) * 240);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tracerSeries), gl.DYNAMIC_DRAW);
+        gl.uniform1f(pointSizeLocation, 7);
+        gl.drawArrays(gl.POINTS, tracerIndex, 1);
+        animationFrame = window.requestAnimationFrame(draw);
+      };
+
+      resize();
+      const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+      observer?.observe(canvas);
+      window.addEventListener('resize', resize);
+      animationFrame = window.requestAnimationFrame(draw);
+      return () => {
+        window.cancelAnimationFrame(animationFrame);
+        observer?.disconnect();
+        window.removeEventListener('resize', resize);
+        gl.deleteBuffer(buffer);
+        gl.deleteProgram(program);
+        gl.deleteShader(vertexShader);
+        gl.deleteShader(fragmentShader);
+      };
+    }
+
+    const context = canvas.getContext('2d');
+    if (!context) return;
 
     let animationFrame = 0;
     const startedAt = performance.now();
@@ -194,6 +327,20 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
           context.arc(pointX, pointY, 4 + orbit, 0, Math.PI * 2);
           context.fill();
         }
+      } else if (example.mode === 'implicit3d') {
+        const rotate = time * 0.45;
+        for (let ring = 0; ring < 3; ring += 1) {
+          const points: Array<readonly [number, number]> = [];
+          for (let step = 0; step <= 120; step += 1) {
+            const angle = (step / 120) * Math.PI * 2;
+            const vertical = Math.cos(angle) * (0.48 + ring * 0.12);
+            const depth = Math.sin(angle) * (0.72 - ring * 0.12);
+            const rotatedX = depth * Math.cos(rotate) - vertical * Math.sin(rotate);
+            const rotatedY = depth * Math.sin(rotate) + vertical * Math.cos(rotate);
+            points.push(project(rotatedX, rotatedY));
+          }
+          drawPath(points);
+        }
       } else {
         const points: Array<readonly [number, number]> = [];
         for (let step = 0; step <= 180; step += 1) {
@@ -212,7 +359,9 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
           } else {
             const graphX = angle * 2 - Math.PI;
             x = graphX / Math.PI;
-            y = Math.sin(graphX * 1.25 + time * 1.8 + pointerShift) * 0.62 * Math.exp(-0.035 * graphX * graphX);
+            y = example.equation.includes('x^3')
+              ? (0.09 * Math.pow(graphX / 2.8, 3) - 0.42 * (graphX / 2.8)) + Math.sin(time + pointerShift) * 0.08
+              : Math.sin(graphX * 1.25 + time * 1.8 + pointerShift) * 0.62 * Math.exp(-0.035 * graphX * graphX);
           }
           points.push(project(x, y));
         }
@@ -263,6 +412,198 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
       }}
       onPointerLeave={() => { pointerRef.current.active = false; }}
     />
+  );
+}
+
+function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'polar'; equation: string; accent: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof window === 'undefined') return;
+    const gl = canvas.getContext('webgl', { alpha: true, antialias: true, powerPreference: 'high-performance' });
+    if (!gl) {
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      let frame = 0;
+      const startedAt = performance.now();
+      const resize = () => {
+        const bounds = canvas.getBoundingClientRect();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.max(1, Math.floor(bounds.width * dpr));
+        canvas.height = Math.max(1, Math.floor(bounds.height * dpr));
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      };
+      const draw = (now: number) => {
+        const bounds = canvas.getBoundingClientRect();
+        const width = Math.max(1, bounds.width);
+        const height = Math.max(1, bounds.height);
+        const time = (now - startedAt) / 1000;
+        const centerX = width * 0.5;
+        const centerY = height * 0.55;
+        const scale = Math.min(width, height) * 0.34;
+        context.clearRect(0, 0, width, height);
+        context.fillStyle = '#09141c';
+        context.fillRect(0, 0, width, height);
+        context.strokeStyle = 'rgba(238,244,241,.1)';
+        context.lineWidth = 1;
+        for (let index = 1; index < 5; index += 1) {
+          const x = (width * index) / 5;
+          context.beginPath();
+          context.moveTo(x, 0);
+          context.lineTo(x, height);
+          context.stroke();
+        }
+        context.beginPath();
+        context.moveTo(0, centerY);
+        context.lineTo(width, centerY);
+        context.moveTo(centerX, 0);
+        context.lineTo(centerX, height);
+        context.stroke();
+        const points: Array<readonly [number, number]> = [];
+        for (let index = 0; index <= 260; index += 1) {
+          const amount = index / 260;
+          const angle = -Math.PI * 2.2 + amount * Math.PI * 4.4;
+          const radius = kind === 'polar' ? 0.19 * 4 * Math.cos(3 * angle + time * 0.8) : 1;
+          const x = kind === 'polar' ? radius * Math.cos(angle) : angle / (Math.PI * 2.2);
+          const y = kind === 'polar' ? radius * Math.sin(angle) : Math.sin(angle + time * 1.4) * 0.7;
+          points.push([centerX + x * scale, centerY - y * scale]);
+        }
+        context.save();
+        context.strokeStyle = accent;
+        context.shadowColor = accent;
+        context.shadowBlur = 14;
+        context.lineWidth = 2.5;
+        context.beginPath();
+        points.forEach(([x, y], index) => {
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+        const tracerIndex = Math.floor(((time * 0.18) % 1) * (points.length - 1));
+        const tracerPoint = points[Math.max(0, Math.min(points.length - 1, tracerIndex))];
+        if (tracerPoint) {
+          const [tracerX, tracerY] = tracerPoint;
+          context.fillStyle = accent;
+          context.beginPath();
+          context.arc(tracerX, tracerY, 5, 0, Math.PI * 2);
+          context.fill();
+        }
+        context.restore();
+        frame = window.requestAnimationFrame(draw);
+      };
+      resize();
+      const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+      observer?.observe(canvas);
+      window.addEventListener('resize', resize);
+      frame = window.requestAnimationFrame(draw);
+      return () => {
+        window.cancelAnimationFrame(frame);
+        observer?.disconnect();
+        window.removeEventListener('resize', resize);
+      };
+    }
+
+    const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+    const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    if (!vertexShader || !fragmentShader) return;
+    gl.shaderSource(vertexShader, `
+      attribute vec2 a_position;
+      uniform float u_point_size;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+        gl_PointSize = u_point_size;
+      }
+    `);
+    gl.shaderSource(fragmentShader, `
+      precision mediump float;
+      uniform vec4 u_color;
+      void main() {
+        gl_FragColor = u_color;
+      }
+    `);
+    gl.compileShader(vertexShader);
+    gl.compileShader(fragmentShader);
+    const program = gl.createProgram();
+    if (!program) return;
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return;
+    const buffer = gl.createBuffer();
+    if (!buffer) return;
+    const positionLocation = gl.getAttribLocation(program, 'a_position');
+    const colorLocation = gl.getUniformLocation(program, 'u_color');
+    const pointSizeLocation = gl.getUniformLocation(program, 'u_point_size');
+    const color = accent.replace('#', '').match(/.{2}/g)?.map((channel) => parseInt(channel, 16) / 255) ?? [0.78, 0.95, 0.42];
+    let frame = 0;
+    const startedAt = performance.now();
+    const resize = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(bounds.width * dpr));
+      canvas.height = Math.max(1, Math.floor(bounds.height * dpr));
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    };
+    const draw = (now: number) => {
+      const time = (now - startedAt) / 1000;
+      const points = new Float32Array(241 * 2);
+      for (let index = 0; index <= 240; index += 1) {
+        const amount = index / 240;
+        const angle = -Math.PI * 2.2 + amount * Math.PI * 4.4;
+        let x = angle / (Math.PI * 2.2);
+        let y: number;
+        if (kind === 'polar') {
+          const theta = amount * Math.PI * 2;
+          const radius = 0.62 + 0.22 * Math.cos(3 * theta + time * 1.7);
+          x = radius * Math.cos(theta) * 1.22;
+          y = radius * Math.sin(theta) * 1.22;
+        } else {
+          y = Math.sin(angle + time * 1.4) * 0.7;
+          x *= 0.91;
+        }
+        points[index * 2] = x;
+        points[index * 2 + 1] = y;
+      }
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(program);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, points, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(positionLocation);
+      gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform4f(colorLocation, color[0], color[1], color[2], 0.96);
+      gl.uniform1f(pointSizeLocation, 1.5);
+      gl.lineWidth(2);
+      gl.drawArrays(gl.LINE_STRIP, 0, 241);
+      const tracerIndex = kind === 'polar'
+        ? Math.floor(((time * 0.18) % 1) * 240)
+        : Math.floor(((time * 0.16) % 1) * 240);
+      gl.uniform1f(pointSizeLocation, 7);
+      gl.drawArrays(gl.POINTS, tracerIndex, 1);
+      frame = window.requestAnimationFrame(draw);
+    };
+    resize();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    observer?.observe(canvas);
+    window.addEventListener('resize', resize);
+    frame = window.requestAnimationFrame(draw);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+      gl.deleteBuffer(buffer);
+      gl.deleteProgram(program);
+      gl.deleteShader(vertexShader);
+      gl.deleteShader(fragmentShader);
+    };
+  }, [accent, kind]);
+
+  return (
+    <div className="hero-curve-card" style={{ '--hero-curve-accent': accent } as CSSProperties}>
+      <div className="hero-curve-heading"><span className="mono">LIVE WEBGL</span><strong>{equation}</strong></div>
+      <canvas ref={canvasRef} className="hero-plot hero-plot-canvas" aria-label={`Live WebGL plot of ${equation}`} />
+    </div>
   );
 }
 
@@ -394,7 +735,11 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
   const [bugReport, setBugReport] = useState('');
   const [suggestion, setSuggestion] = useState('');
   const [feedbackName, setFeedbackName] = useState('');
+  const [feedbackEmail, setFeedbackEmail] = useState('');
+  const [feedbackErrors, setFeedbackErrors] = useState({ name: false, email: false, message: false });
   const [feedbackStatus, setFeedbackStatus] = useState('');
+  const insightCarouselRef = useRef<HTMLDivElement>(null);
+  const insightDragRef = useRef({ startX: 0, startScrollLeft: 0, dragging: false });
   const queryClient = useQueryClient();
   const feedbackQuery = useListFeedback({
     query: {
@@ -420,30 +765,29 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
 
   const submitFeedback = async (kind: FeedbackKind, message: string, clear: () => void) => {
     const trimmed = message.trim();
-    if (!trimmed) {
-      setFeedbackStatus(kind === 'bug' ? 'Describe the issue before sending.' : 'Add an idea before sending.');
+    const name = feedbackName.trim();
+    const email = feedbackEmail.trim();
+    const nextErrors = {
+      name: !name,
+      email: !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email),
+      message: !trimmed,
+    };
+    setFeedbackErrors(nextErrors);
+    if (nextErrors.name || nextErrors.email || nextErrors.message) {
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(100);
+      setFeedbackStatus('Please complete the highlighted fields before sending.');
       return;
     }
-    let name = feedbackName.trim();
-    if (!name && typeof window !== 'undefined') {
-      try {
-        name = window.prompt('What name should appear with your feedback?')?.trim() ?? '';
-      } catch {
-        name = '';
-      }
-    }
-    if (!name) {
-      setFeedbackStatus('Please enter a name before sending feedback.');
-      return;
-    }
-    setFeedbackName(name);
     setFeedbackStatus('Sending feedback…');
     try {
-      await createFeedbackMutation.mutateAsync({
-        data: { name, category: kind, content: trimmed },
+      const created = await createFeedbackMutation.mutateAsync({
+        data: { name, email, category: kind, content: trimmed },
       });
+      queryClient.setQueryData(getListFeedbackQueryKey(), (current: typeof feedbackEntries) => [created, ...(current ?? [])]);
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(100);
       setFeedbackStatus('Shared with the community — thank you for helping shape the studio.');
       clear();
+      setFeedbackErrors({ name: false, email: false, message: false });
     } catch {
       setFeedbackStatus('Could not share feedback right now. Please try again or use the contact email.');
     }
@@ -497,12 +841,13 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
               <span><CheckCircle2 className="icon" /> WebGL-enhanced canvas</span>
             </div>
           </div>
-          <div className="hero-visual" aria-label="Animated mathematical preview">
+          <div className="hero-visual" aria-label="Animated mathematical previews">
             <div className="hero-visual-glow" />
-            <div className="hero-equation hero-equation-main">y = sin(x + t)</div>
-            <div className="hero-equation hero-equation-secondary">r = 4 cos(3θ)</div>
-            <LiveHeroPreview />
-            <div className="hero-frame-label mono">FRAME 148 / 240 · LIVE</div>
+            <div className="hero-curve-stack">
+              <LiveHeroWebGL kind="trigonometric" equation="y = sin(x + t)" accent="#c7f36b" />
+              <LiveHeroWebGL kind="polar" equation="r = 4 cos(3θ)" accent="#72d8ff" />
+            </div>
+            <div className="hero-frame-label mono">TWO LIVE WEBGL CANVASES · 60 FPS</div>
           </div>
         </section>
 
@@ -569,7 +914,29 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
             <div><span className="landing-eyebrow">Math insights</span><h2>Learn the idea, then make it move.</h2></div>
             <p>Short, visual lessons that turn familiar equations into experiments you can remix.</p>
           </div>
-          <div className="insight-grid">
+          <div
+            className="insight-grid"
+            ref={insightCarouselRef}
+            onPointerDown={(event) => {
+              insightDragRef.current = {
+                startX: event.clientX,
+                startScrollLeft: insightCarouselRef.current?.scrollLeft ?? 0,
+                dragging: true,
+              };
+              event.currentTarget.setPointerCapture(event.pointerId);
+              event.currentTarget.classList.add('is-dragging');
+            }}
+            onPointerMove={(event) => {
+              if (!insightDragRef.current.dragging || !insightCarouselRef.current) return;
+              insightCarouselRef.current.scrollLeft = insightDragRef.current.startScrollLeft - (event.clientX - insightDragRef.current.startX);
+            }}
+            onPointerUp={(event) => {
+              insightDragRef.current.dragging = false;
+              event.currentTarget.releasePointerCapture?.(event.pointerId);
+              event.currentTarget.classList.remove('is-dragging');
+            }}
+            onPointerCancel={() => { insightDragRef.current.dragging = false; }}
+          >
             {insights.map((insight, index) => (
               <article className={`insight-card ${activeInsight === index ? 'active' : ''}`} key={insight.title} style={{ '--insight-accent': insight.accent } as CSSProperties}>
                 <button className="insight-select" type="button" onClick={() => setActiveInsight(index)} aria-expanded={activeInsight === index}>
@@ -603,18 +970,24 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
             </div>
           </div>
           <div className="feedback-grid">
-            <label className="feedback-name-field">
-              <span>Your name <small>(shown with your feedback)</small></span>
-              <input value={feedbackName} onChange={(event) => setFeedbackName(event.target.value)} placeholder="Name" maxLength={80} />
-            </label>
+            <div className="feedback-contact-fields">
+              <label className="feedback-name-field">
+                <span>Your name</span>
+                <input className={feedbackErrors.name ? 'has-error' : ''} value={feedbackName} onChange={(event) => { setFeedbackName(event.target.value); setFeedbackErrors((current) => ({ ...current, name: false })); }} placeholder="Name" maxLength={80} aria-invalid={feedbackErrors.name} />
+              </label>
+              <label className="feedback-email-field">
+                <span>Your email</span>
+                <input className={feedbackErrors.email ? 'has-error' : ''} type="email" value={feedbackEmail} onChange={(event) => { setFeedbackEmail(event.target.value); setFeedbackErrors((current) => ({ ...current, email: false })); }} placeholder="you@example.com" maxLength={320} aria-invalid={feedbackErrors.email} />
+              </label>
+            </div>
             <form className="feedback-card" onSubmit={(event) => { event.preventDefault(); void submitFeedback('bug', bugReport, () => setBugReport('')); }}>
               <div className="feedback-heading"><Bug className="icon" /><strong>Report a bug</strong></div>
-              <textarea value={bugReport} onChange={(event) => setBugReport(event.target.value)} placeholder="What happened? Include the mode and equation if useful." rows={4} />
+              <textarea className={feedbackErrors.message && !bugReport.trim() ? 'has-error' : ''} value={bugReport} onChange={(event) => { setBugReport(event.target.value); setFeedbackErrors((current) => ({ ...current, message: false })); }} placeholder="What happened? Include the mode and equation if useful." rows={4} aria-invalid={feedbackErrors.message && !bugReport.trim()} />
               <button type="submit" disabled={createFeedbackMutation.isPending}>Save bug report <ArrowRight className="icon" /></button>
             </form>
             <form className="feedback-card" onSubmit={(event) => { event.preventDefault(); void submitFeedback('suggestion', suggestion, () => setSuggestion('')); }}>
               <div className="feedback-heading"><Lightbulb className="icon" /><strong>Future suggestions</strong></div>
-              <textarea value={suggestion} onChange={(event) => setSuggestion(event.target.value)} placeholder="What should Second Solution Studio learn next?" rows={4} />
+              <textarea className={feedbackErrors.message && !suggestion.trim() ? 'has-error' : ''} value={suggestion} onChange={(event) => { setSuggestion(event.target.value); setFeedbackErrors((current) => ({ ...current, message: false })); }} placeholder="What should Second Solution Studio learn next?" rows={4} aria-invalid={feedbackErrors.message && !suggestion.trim()} />
               <button type="submit" disabled={createFeedbackMutation.isPending}>Save suggestion <ArrowRight className="icon" /></button>
             </form>
           </div>

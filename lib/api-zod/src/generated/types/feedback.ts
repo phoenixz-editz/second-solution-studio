@@ -10,6 +10,7 @@ import type { FeedbackCategory } from './feedbackCategory';
 export interface Feedback {
   id: number;
   name: string;
+  email: string;
   timestamp: Date;
   category: FeedbackCategory;
   content: string;

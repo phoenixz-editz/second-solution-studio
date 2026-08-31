@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import {
   Activity,
   Aperture,
@@ -32,7 +32,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ClerkProvider, SignIn, SignUp } from '@clerk/react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { LandingPage } from '@/components/landing-page';
-import { DeveloperAccessForm } from '@/components/developer-access-form';
+import { DEVELOPER_EMAIL, DEVELOPER_PASSWORD, DeveloperAccessSequence } from '@/components/developer-access-form';
 import { DeveloperTextEditor } from '@/components/developer-text-editor';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -545,7 +545,7 @@ const presets: Array<{ equation: string; label: string; mode: StudioMode; symbol
   { equation: 'x^2 + y^2 + z^2 + 2*x*y*z = 1', label: '3D Heart Solid', mode: 'implicit3d', symbol: '♥' },
   { equation: 'z = x^2 - y^2', label: 'Hyperbolic Paraboloid', mode: 'implicit3d', symbol: '⌁' },
   { equation: 'x^2 / 4 - y^2 / 9 - z^2 / 16 = 1', label: 'Hyperbola Surface', mode: 'implicit3d', symbol: '∞' },
-  { equation: '[1.6 * sin(t)^3, 1.3 * cos(t) - 0.5 * cos(2*t) - 0.2 * cos(3*t) - 0.1 * cos(4*t), 0.6 * sin(2*t)]', label: '3D Heart Curve', mode: 'parametric3d', symbol: '♥' },
+  { equation: '[16 * sin(t)^3, 13 * cos(t) - 5 * cos(2*t) - 2 * cos(3*t) - cos(4*t), v * sin(t)]', label: '3D Heart Curve', mode: 'parametric3d', symbol: '♥' },
   { equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1', label: 'Quadric Surface', mode: 'implicit3d', symbol: '◉' },
   { equation: 'z = x^2 - y^2', label: 'Saddle Points', mode: 'implicit3d', symbol: '⌁' },
 ];
@@ -893,7 +893,17 @@ function GraphCanvas({
     if (!canvas) return;
     let context: WebGL2RenderingContext | WebGLRenderingContext | null = null;
     try {
-      context = canvas.getContext('webgl2') ?? canvas.getContext('webgl');
+      context = canvas.getContext('webgl2', {
+        alpha: true,
+        antialias: true,
+        powerPreference: 'high-performance',
+        preserveDrawingBuffer: true,
+      }) ?? canvas.getContext('webgl', {
+        alpha: true,
+        antialias: true,
+        powerPreference: 'high-performance',
+        preserveDrawingBuffer: true,
+      });
     } catch {
       context = null;
     }
@@ -918,6 +928,7 @@ function GraphCanvas({
     const fullPixelRatio = Math.min(window.devicePixelRatio || 1, 2);
     const interactionPixelRatio = Math.min(fullPixelRatio, 0.85);
     let activePixelRatio = fullPixelRatio;
+    renderer.setPixelRatio(activePixelRatio);
     const setRenderQuality = (active: boolean) => {
       const nextRatio = active ? interactionPixelRatio : fullPixelRatio;
       if (nextRatio === activePixelRatio) return;
@@ -2423,7 +2434,8 @@ function MainStudio() {
     };
     try {
       if (audioEvaluator.kind === 'function') {
-        return { height: Number(audioEvaluator.expression.evaluate(scope)) || 0, slope: 0 };
+        const height = Number(audioEvaluator.expression.evaluate(scope)) || 0;
+        return { height, slope: 0 };
       }
       if (audioEvaluator.kind === 'parametric') {
         const y = Number(audioEvaluator.y.evaluate(scope)) || 0;
@@ -2511,7 +2523,8 @@ function MainStudio() {
         scheduleAudioTone(engine, frequency, 0.085, 0.12, scheduledAt);
         audioLastToneTimeRef.current = now;
         if ((changedDirection || fixedBeat) && now - audioLastBeatTimeRef.current > minInterval) {
-          scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72, scheduledAt);
+          const beatStrength = Math.max(0.45, Math.min(1.35, 0.6 + Math.abs(normalizedSlope) * 0.75 + normalizedHeight * 0.35));
+          scheduleAudioBeat(engine, beatStrength, scheduledAt);
           audioLastBeatTimeRef.current = now;
         }
       } catch {
@@ -3606,9 +3619,20 @@ function AuthModalRoute({
   onClose: () => void;
   onDeveloperUnlock: () => void;
 }) {
+  const [developerSequenceActive, setDeveloperSequenceActive] = useState(false);
+  const handleAuthSubmit = (event: FormEvent<HTMLDivElement>) => {
+    if (developerSequenceActive || !(event.target instanceof HTMLFormElement)) return;
+    const email = event.target.querySelector<HTMLInputElement>('input[name="identifier"], input[name="emailAddress"], input[type="email"]')?.value.trim();
+    const password = event.target.querySelector<HTMLInputElement>('input[name="password"], input[type="password"]')?.value;
+    if (email === DEVELOPER_EMAIL && password === DEVELOPER_PASSWORD) {
+      event.preventDefault();
+      setDeveloperSequenceActive(true);
+    }
+  };
+
   return (
     <div className="auth-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+      <div className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" onSubmitCapture={handleAuthSubmit}>
         <div className="auth-modal-heading">
           <div><span className="landing-eyebrow">Second Solution Studio account</span><h2 id="auth-modal-title">{mode === 'sign-in' ? 'Welcome back.' : 'Start your next proof.'}</h2><p>Email/password and configured social sign-in are supported.</p></div>
           <button className="icon-btn" type="button" onClick={onClose} aria-label="Close authentication dialog"><X className="icon" /></button>
@@ -3617,10 +3641,10 @@ function AuthModalRoute({
           <button type="button" role="tab" aria-selected={mode === 'sign-in'} className={mode === 'sign-in' ? 'active' : ''} onClick={() => onModeChange('sign-in')}>Login</button>
           <button type="button" role="tab" aria-selected={mode === 'sign-up'} className={mode === 'sign-up' ? 'active' : ''} onClick={() => onModeChange('sign-up')}>Sign up</button>
         </div>
-        <DeveloperAccessForm onUnlock={onDeveloperUnlock} />
         <div className="auth-component-wrap">
           {mode === 'sign-in' ? <SignIn routing="hash" appearance={clerkAppearance} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/studio`} /> : <SignUp routing="hash" appearance={clerkAppearance} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/studio`} />}
         </div>
+        <DeveloperAccessSequence active={developerSequenceActive} onUnlock={onDeveloperUnlock} />
       </div>
     </div>
   );
