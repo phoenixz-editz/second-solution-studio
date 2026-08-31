@@ -5,6 +5,7 @@ import {
   useListFeedback,
 } from '@workspace/api-client-react';
 import { useQueryClient } from '@tanstack/react-query';
+import { DeveloperTextEditor } from '@/components/developer-text-editor';
 import {
   Aperture,
   ArrowRight,
@@ -19,8 +20,10 @@ import {
   Mail,
   MessageCircle,
   Play,
+  SlidersHorizontal,
   ShieldCheck,
   Sparkles,
+  ToggleRight,
 } from 'lucide-react';
 import type { StudioMode } from '@/hooks/use-equation-validator';
 
@@ -43,6 +46,7 @@ type BlogInsight = {
   excerpt: string;
   body: InsightSection[];
   equation: string;
+  equations: string[];
   mode: StudioMode;
   accent: string;
 };
@@ -74,6 +78,11 @@ const insights: BlogInsight[] = [
       { heading: 'A useful workflow', copy: 'To build a live visualizer, multiply each audio slice by a Hann window to reduce edge discontinuities, run the FFT, convert magnitudes to decibels, and draw the result with logarithmic frequency spacing. Use the waveform for timing and the spectrum for tone color: kicks concentrate low energy, consonants spread energy upward, and a melody leaves moving harmonic ladders.' },
     ],
     equation: 'sin(x + t) + 0.35 * sin(3*x - t)',
+    equations: [
+      'x(t) = sin(t) + 0.35 · sin(3t)',
+      'X(f) = ∫ x(t)e^(−i2πft) dt',
+      'FFT cost: O(N log N)',
+    ],
     mode: 'function',
     accent: '#c7f36b',
   },
@@ -91,6 +100,11 @@ const insights: BlogInsight[] = [
       { heading: 'Practical application: a geometry lab', copy: 'Change only one coefficient at a time and predict the result before pressing play. Use a wireframe or contour rings to compare cross-sections, rotate slowly to check symmetry, and keep the equation visible beside the surface. This workflow is useful in CAD, computer graphics, optics, and data analysis: a rendered quadric is not decoration, but a compact visual proof of connectivity, scale, and curvature.' },
     ],
     equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1',
+    equations: [
+      'Ax² + By² + Cz² + Dxy + Exz + Fyz + Gx + Hy + Iz + J = 0',
+      'Ellipsoid: x²/a² + y²/b² + z²/c² = 1',
+      'Saddle: z = x² − y²',
+    ],
     mode: 'implicit3d',
     accent: '#72d8ff',
   },
@@ -108,6 +122,11 @@ const insights: BlogInsight[] = [
       { heading: 'Practical application: animate the prediction', copy: 'Sample enough θ or t values to keep loops smooth, draw the complete path faintly, then reveal a moving prefix and tracer. Display r, θ, ω, and speed so the controls explain themselves. Change k, φ, and the frequency ratio one at a time; predict the petal count, tilt, or closure first, then use the animation as a visual check.' },
     ],
     equation: '4 * cos(3 * theta)',
+    equations: [
+      'r = a · cos(kθ + φ)',
+      'x = r cos θ,   y = r sin θ',
+      'ω(t) = dθ/dt',
+    ],
     mode: 'polar',
     accent: '#d6a8ff',
   },
@@ -125,6 +144,11 @@ const insights: BlogInsight[] = [
       { heading: 'Practical application: build a fluid lab', copy: 'Seed particles on a grid or along an inlet, integrate with a stable step, and fade trails instead of redrawing an ever-growing history. Display arrows, divergence, and curl as separate layers; clamp extreme speeds so singularities do not dominate the frame. Try a vortex, a source-sink pair, and a divergence-free field to connect the animation to smoke, weather, incompressible fluids, and flow visualization.' },
     ],
     equation: '[cos(y), sin(x)]',
+    equations: [
+      'F(x,y) = P(x,y)i + Q(x,y)j',
+      '∇ · F = ∂P/∂x + ∂Q/∂y',
+      'curl F = ∂Q/∂x − ∂P/∂y',
+    ],
     mode: 'vector',
     accent: '#72d8ff',
   },
@@ -142,6 +166,11 @@ const insights: BlogInsight[] = [
       { heading: 'Practical application: a rate-of-change lab', copy: 'Start with f(x) = x²/4, move the tangent point from left to right, and increase the rectangle count while keeping the curve fixed. Compare f′(x) with a centered finite difference [f(x + h) − f(x − h)]/(2h) and watch the approximation improve as h decreases. Then try a corner or a rapidly oscillating function to see where differentiability and numerical resolution become important in engineering, motion design, and measurement.' },
     ],
     equation: 'x^2 / 4',
+    equations: [
+      'f′(x) = lim[h→0] [f(x+h) − f(x)] / h',
+      '∫ₐᵇ f(x) dx = lim[n→∞] Σ f(xᵢ*)Δx',
+      'A(x) = ∫ₐˣ f(u)du  ⇒  A′(x) = f(x)',
+    ],
     mode: 'function',
     accent: '#ff8b6d',
   },
@@ -171,7 +200,7 @@ function observeAnimationVisibility(target: HTMLElement, onChange: (visible: boo
   return () => observer.disconnect();
 }
 
-function LiveExamplePreview({ example }: { example: LandingExample }) {
+function LiveExamplePreview({ example, motionSpeed = 1, amplitude = 1 }: { example: LandingExample; motionSpeed?: number; amplitude?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointerRef = useRef({ x: 0.5, y: 0.5, active: false });
 
@@ -237,7 +266,7 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
         gl.drawArrays(gl.LINE_STRIP, 0, points.length / 2);
       };
       const draw = (now: number) => {
-        const time = (now - startedAt) / 1000;
+        const time = ((now - startedAt) / 1000) * motionSpeed;
         const pointerShift = pointerRef.current.active ? (pointerRef.current.x - 0.5) * 1.4 : 0;
         gl.clearColor(0.098, 0.149, 0.176, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
@@ -337,7 +366,7 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
       const bounds = canvas.getBoundingClientRect();
       const width = Math.max(1, bounds.width);
       const height = Math.max(1, bounds.height);
-      const time = (now - startedAt) / 1000;
+      const time = ((now - startedAt) / 1000) * motionSpeed;
       const pointer = pointerRef.current;
       const pointerShift = pointer.active ? (pointer.x - 0.5) * 1.5 : 0;
 
@@ -369,8 +398,8 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
       context.stroke();
 
       const project = (x: number, y: number) => [
-        width / 2 + x * width * 0.26,
-        height / 2 - y * height * 0.38,
+        width / 2 + x * width * 0.26 * amplitude,
+        height / 2 - y * height * 0.38 * amplitude,
       ] as const;
       const drawPath = (points: Array<readonly [number, number]>) => {
         if (points.length < 2) return;
@@ -486,7 +515,7 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
     };
-  }, [example]);
+  }, [amplitude, example, motionSpeed]);
 
   return (
     <canvas
@@ -857,6 +886,14 @@ function LandingBubbleBackground() {
   return (
     <div className="landing-bubble-background" aria-hidden="true">
       <div className="landing-mesh-gradient" />
+      <div className="landing-liquid-layer">
+        <span className="landing-liquid-blob landing-liquid-blob-lime" />
+        <span className="landing-liquid-blob landing-liquid-blob-cyan" />
+        <span className="landing-liquid-blob landing-liquid-blob-purple" />
+        <span className="landing-liquid-blob landing-liquid-blob-mint" />
+        <span className="landing-liquid-highlight landing-liquid-highlight-one" />
+        <span className="landing-liquid-highlight landing-liquid-highlight-two" />
+      </div>
       <div className="landing-bubble-wash" />
     </div>
   );
@@ -865,12 +902,18 @@ function LandingBubbleBackground() {
 export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) {
   const [activeFlow, setActiveFlow] = useState(0);
   const [activeInsight, setActiveInsight] = useState(0);
+  const [previewMotionSpeed, setPreviewMotionSpeed] = useState(1);
+  const [previewAmplitude, setPreviewAmplitude] = useState(1);
+  const [showLandingFeatures, setShowLandingFeatures] = useState(true);
+  const [showLandingPreviews, setShowLandingPreviews] = useState(true);
+  const [showLandingEquations, setShowLandingEquations] = useState(true);
   const [bugReport, setBugReport] = useState('');
   const [suggestion, setSuggestion] = useState('');
   const [feedbackName, setFeedbackName] = useState('');
   const [feedbackEmail, setFeedbackEmail] = useState('');
   const [feedbackErrors, setFeedbackErrors] = useState({ name: false, email: false, message: false });
   const [feedbackStatus, setFeedbackStatus] = useState('');
+  const landingRootRef = useRef<HTMLDivElement>(null);
   const insightCarouselRef = useRef<HTMLDivElement>(null);
   const insightDragRef = useRef({ startX: 0, startScrollLeft: 0, dragging: false });
   const queryClient = useQueryClient();
@@ -927,7 +970,7 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
   };
 
   return (
-    <div className="landing-page">
+    <div ref={landingRootRef} className="landing-page">
       <header className="landing-nav">
         <a className="landing-brand" href="/" aria-label="Second Solution Studio home">
           <span className="landing-brand-mark"><Aperture className="icon" /></span>
@@ -954,8 +997,39 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
         <span className="creator-credit">Made by SOHAIB KHAN</span>
       </header>
 
+       {isDeveloper && (
+         <section className="developer-landing-panel" data-dev-editor-ui aria-label="Developer landing controls">
+           <div className="developer-landing-panel-heading">
+             <span className="developer-active-tag"><span className="developer-active-dot" /> Developer Active</span>
+             <span className="mono">LIVE LANDING EDITOR</span>
+             <span className="developer-landing-hint">Click any title or copy to edit it</span>
+           </div>
+           <div className="developer-landing-controls">
+             <label>
+               <span><SlidersHorizontal className="icon" /> Preview motion <strong>{previewMotionSpeed.toFixed(1)}×</strong></span>
+               <input type="range" min="0.2" max="2.4" step="0.1" value={previewMotionSpeed} onChange={(event) => setPreviewMotionSpeed(Number(event.target.value))} />
+             </label>
+             <label>
+               <span><SlidersHorizontal className="icon" /> Preview amplitude <strong>{previewAmplitude.toFixed(1)}×</strong></span>
+               <input type="range" min="0.5" max="1.5" step="0.1" value={previewAmplitude} onChange={(event) => setPreviewAmplitude(Number(event.target.value))} />
+             </label>
+             <div className="developer-landing-toggles">
+               <button type="button" onClick={() => setShowLandingPreviews((value) => !value)} aria-pressed={showLandingPreviews}>
+                 <ToggleRight className="icon" /> Live previews {showLandingPreviews ? 'ON' : 'OFF'}
+               </button>
+               <button type="button" onClick={() => setShowLandingEquations((value) => !value)} aria-pressed={showLandingEquations}>
+                 <ToggleRight className="icon" /> Equations {showLandingEquations ? 'ON' : 'OFF'}
+               </button>
+               <button type="button" onClick={() => setShowLandingFeatures((value) => !value)} aria-pressed={showLandingFeatures}>
+                 <ToggleRight className="icon" /> Toolkit {showLandingFeatures ? 'ON' : 'OFF'}
+               </button>
+             </div>
+           </div>
+         </section>
+       )}
+
       <main>
-        <section className="landing-hero">
+         <section className="landing-hero">
           <div className="hero-copy">
             <div className="landing-kicker"><Sparkles className="icon" /> An animation studio for mathematical thinking</div>
             <h1>Make the invisible <em>move.</em></h1>
@@ -987,7 +1061,7 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
 
         <LandingBubbleBackground />
 
-        <section className="landing-section" id="features">
+         {showLandingFeatures && <section className="landing-section" id="features">
           <div className="landing-section-heading">
             <div><span className="landing-eyebrow">The toolkit</span><h2>Everything you need to see a pattern clearly.</h2></div>
             <p>Purpose-built controls keep the math in focus while the engine handles framing, motion, and recovery.</p>
@@ -1006,7 +1080,7 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
               </article>
             ))}
           </div>
-        </section>
+         </section>}
 
         <section className="landing-section workflow-section" id="workflow">
           <div className="landing-section-heading">
@@ -1034,11 +1108,22 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
             <p>Choose a scene and open it directly in the canvas, then change every parameter.</p>
           </div>
           <div className="example-grid">
-            {examples.map((example) => (
-              <button className="example-card" type="button" key={example.title} onClick={() => startStudio(example)} style={{ '--example-accent': example.accent } as CSSProperties}>
-                <span className="example-preview"><LiveExamplePreview example={example} /></span>
-                <span className="example-card-copy"><strong>{example.title}</strong><span className="mono">{example.equation}</span><small>{example.mode} · Open in studio <ArrowRight className="icon" /></small></span>
-              </button>
+             {examples.map((example) => (
+               <article className="example-card" key={example.title} style={{ '--example-accent': example.accent } as CSSProperties}>
+                 <button className="example-card-launch" type="button" onClick={() => startStudio(example)}>
+                   <span className={`example-preview ${showLandingPreviews ? '' : 'is-paused'}`}>
+                     {showLandingPreviews ? <LiveExamplePreview example={example} motionSpeed={previewMotionSpeed} amplitude={previewAmplitude} /> : <span className="example-preview-paused">LIVE PREVIEW PAUSED</span>}
+                   </span>
+                   <span className="example-card-copy"><strong>{example.title}</strong>{showLandingEquations && <span className="mono">{example.equation}</span>}<small>{example.mode} · Open in studio <ArrowRight className="icon" /></small></span>
+                 </button>
+                 {isDeveloper && (
+                   <div className="example-card-dev-controls" data-dev-editor-ui>
+                     <span className="mono">LIVE PARAMETERS</span>
+                     <label><span>Speed</span><input type="range" min="0.2" max="2.4" step="0.1" value={previewMotionSpeed} onChange={(event) => setPreviewMotionSpeed(Number(event.target.value))} /></label>
+                     <label><span>Scale</span><input type="range" min="0.5" max="1.5" step="0.1" value={previewAmplitude} onChange={(event) => setPreviewAmplitude(Number(event.target.value))} /></label>
+                   </div>
+                 )}
+               </article>
             ))}
           </div>
         </section>
@@ -1046,7 +1131,7 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
         <section className="landing-section insights-section" id="insights">
           <div className="landing-section-heading">
             <div><span className="landing-eyebrow">Math insights</span><h2>Learn the idea, then make it move.</h2></div>
-            <p>Short, visual lessons that turn familiar equations into experiments you can remix.</p>
+            <p>Long-form, visual lessons that turn familiar equations into experiments you can remix.</p>
           </div>
           <div
             className="insight-grid"
@@ -1055,14 +1140,19 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
               insightDragRef.current = {
                 startX: event.clientX,
                 startScrollLeft: insightCarouselRef.current?.scrollLeft ?? 0,
-                dragging: true,
+                dragging: false,
               };
-              event.currentTarget.setPointerCapture(event.pointerId);
-              event.currentTarget.classList.add('is-dragging');
             }}
             onPointerMove={(event) => {
-              if (!insightDragRef.current.dragging || !insightCarouselRef.current) return;
-              insightCarouselRef.current.scrollLeft = insightDragRef.current.startScrollLeft - (event.clientX - insightDragRef.current.startX);
+              if (!insightCarouselRef.current) return;
+              const deltaX = event.clientX - insightDragRef.current.startX;
+              if (!insightDragRef.current.dragging) {
+                if (Math.abs(deltaX) < 8) return;
+                insightDragRef.current.dragging = true;
+                event.currentTarget.setPointerCapture(event.pointerId);
+                event.currentTarget.classList.add('is-dragging');
+              }
+              insightCarouselRef.current.scrollLeft = insightDragRef.current.startScrollLeft - deltaX;
             }}
             onPointerUp={(event) => {
               insightDragRef.current.dragging = false;
@@ -1073,14 +1163,15 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
           >
             {insights.map((insight, index) => (
               <article className={`insight-card ${activeInsight === index ? 'active' : ''}`} key={insight.title} style={{ '--insight-accent': insight.accent } as CSSProperties}>
-                <button className="insight-select" type="button" onClick={() => setActiveInsight(index)} aria-expanded={activeInsight === index}>
+                <button className="insight-select" type="button" onClick={() => setActiveInsight(index)} aria-pressed={activeInsight === index}>
                   <span className="insight-card-top"><BookOpen className="icon" /><span>{insight.category}</span><span className="insight-read-time"><Clock3 className="icon" />{insight.readTime}</span></span>
                   <strong>{insight.title}</strong>
                   <span>{insight.excerpt}</span>
                 </button>
-                {activeInsight === index && (
                   <div className="insight-expanded">
-                    <div className="insight-equation mono">{insight.equation}</div>
+                    <div className="insight-equation mono" aria-label={`${insight.title} equations`}>
+                      {insight.equations.map((equation) => <code key={equation}>{equation}</code>)}
+                    </div>
                     <div className="insight-reading">
                       {insight.body.map((section) => (
                         <section key={section.heading}>
@@ -1093,7 +1184,6 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
                       Explore in Studio <ArrowUpRight className="icon" />
                     </button>
                   </div>
-                )}
               </article>
             ))}
           </div>
@@ -1156,7 +1246,7 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
       </main>
 
       <footer className="landing-footer"><span>Second Solution Studio</span><span>Visualize Mathematics Like Never Before.</span><span className="mono">MATH / MOTION / MEANING</span></footer>
-
+      <DeveloperTextEditor rootRef={landingRootRef} isDeveloper={isDeveloper} />
     </div>
   );
 }
