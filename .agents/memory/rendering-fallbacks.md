@@ -14,3 +14,9 @@ For worker-backed 3D scenes, retain validated mesh geometry even when the WebGL 
 **Why:** Preview-only WebGL failures otherwise discard otherwise-valid worker output and leave explicit 3D modes visually empty.
 
 **How to apply:** Keep geometry installation independent of the Three.js group, and choose the projected renderer based on renderer availability rather than worker completion alone.
+
+Decorative landing backgrounds should use CSS gradients and compositor-friendly transforms; reserve requestAnimationFrame loops for interactive plots and pause scene canvases when their container is off-screen.
+
+**Why:** A decorative animation can consume a full render loop without adding interaction, especially on mobile, while off-screen WebGL work continues unless visibility is handled explicitly.
+
+**How to apply:** Prefer a CSS-only ambient layer for page atmosphere and let IntersectionObserver mount or unmount expensive WebGL scene resources while leaving the CPU fallback available.

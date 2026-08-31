@@ -6,6 +6,7 @@ import {
   CircleHelp,
   Download,
   Gauge,
+  House,
   Minus,
   MonitorPlay,
   Pause,
@@ -640,6 +641,8 @@ function GraphCanvas({
   const surfaceColorRef = useRef(color);
   const installSurfaceRef = useRef<(positions: GeometryBufferInput, indices?: GeometryBufferInput) => void>(() => undefined);
   const drawRef = useRef<() => void>(() => undefined);
+  const visibilityTargetRef = useRef<HTMLDivElement>(null);
+  const [isVisible, setIsVisible] = useState(true);
   const [surfaceQuality, setSurfaceQuality] = useState<'draft' | 'final'>('final');
   const evaluator = useMemo(() => buildGraphEvaluator(equation, mode), [equation, mode]);
   const viewportRangeRef = useRef(range);
@@ -648,6 +651,17 @@ function GraphCanvas({
   useEffect(() => {
     surfaceColorRef.current = color;
   }, [color]);
+
+  useEffect(() => {
+    const target = visibilityTargetRef.current;
+    if (!target || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setIsVisible(Boolean(entry?.isIntersecting)),
+      { rootMargin: '0px', threshold: 0.01 },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, []);
 
   const createFrameBuffer = useCallback((frameIndex: number): CachedFrame => {
     const frameProgress = frameIndex / Math.max(1, FRAME_CACHE_SIZE - 1);
@@ -1038,10 +1052,10 @@ function GraphCanvas({
       threeSurfaceGeometryRef.current = null;
       threeSurfaceReadyRef.current = false;
     };
-  }, [mode]);
+  }, [isVisible, mode]);
 
   useEffect(() => {
-    if (mode !== 'implicit3d') return;
+    if (mode !== 'implicit3d' || !isVisible) return;
     let worker: Worker;
     try {
       worker = new Worker(new URL('./workers/implicit-surface.worker.ts', import.meta.url), { type: 'module' });
@@ -1169,11 +1183,11 @@ function GraphCanvas({
       installSurfaceRef.current = () => undefined;
       disposeSurface();
     };
-  }, [mode, onRenderStart, onRenderStatus, onRuntimeWarning]);
+  }, [isVisible, mode, onRenderStart, onRenderStatus, onRuntimeWarning]);
 
   useEffect(() => {
     const group = threeSurfaceGroupRef.current;
-    if (mode !== 'parametric3d' || evaluator?.kind !== 'parametric' || !evaluator.z || !group) return;
+    if (!isVisible || mode !== 'parametric3d' || evaluator?.kind !== 'parametric' || !evaluator.z || !group) return;
 
     const geometry = new THREE.BufferGeometry();
     const positions: number[] = [];
@@ -1229,7 +1243,7 @@ function GraphCanvas({
       if (threeSurfaceGeometryRef.current === geometry) threeSurfaceGeometryRef.current = null;
       threeSurfaceReadyRef.current = false;
     };
-  }, [color, evaluator, mode, onRenderStart, onRenderStatus, progress, range, speed]);
+  }, [color, evaluator, isVisible, mode, onRenderStart, onRenderStatus, progress, range, speed]);
 
   useEffect(() => {
     const group = threeSurfaceGroupRef.current;
@@ -1245,7 +1259,7 @@ function GraphCanvas({
       threeSurfaceGeometryRef.current = null;
       threeSurfaceReadyRef.current = false;
     };
-    if (mode !== 'implicit3d' || evaluator?.kind !== 'implicit') {
+    if (!isVisible || mode !== 'implicit3d' || evaluator?.kind !== 'implicit') {
       surfaceRequestIdRef.current += 1;
       surfaceQueueTokenRef.current += 1;
       surfaceRequestRef.current = null;
@@ -1321,11 +1335,11 @@ function GraphCanvas({
       }, wait);
     }
     return undefined;
-  }, [equation, evaluator, mode, playing, progress, speed, surfaceQuality]);
+  }, [equation, evaluator, isVisible, mode, playing, progress, speed, surfaceQuality]);
 
   useEffect(() => {
     const scene = threeSceneRef.current;
-    if (!scene || evaluator?.kind !== 'points') return;
+    if (!isVisible || !scene || evaluator?.kind !== 'points') return;
     const group = new THREE.Group();
     const visibleCount = Math.min(evaluator.points.length, Math.max(1, Math.ceil(evaluator.points.length * easeInOutCubic(progress))));
     const pointCoordinates = evaluatePointSet(evaluator.points, progress * Math.PI * 2, speed);
@@ -1365,7 +1379,7 @@ function GraphCanvas({
         }
       });
     };
-  }, [color, evaluator, pointStyle, progress, speed]);
+  }, [color, evaluator, isVisible, pointStyle, progress, speed]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -2118,8 +2132,8 @@ function GraphCanvas({
   }, []);
 
   return (
-    <div className="graph-renderer">
-      <canvas ref={webglCanvasRef} className="webgl-canvas" aria-hidden="true" />
+    <div ref={visibilityTargetRef} className="graph-renderer">
+      {isVisible && <canvas ref={webglCanvasRef} className="webgl-canvas" aria-hidden="true" />}
       <canvas ref={canvasRef} className="graph-canvas" data-testid="canvas-graph-renderer" aria-label={`Animated ${mode} graph for ${equation}`} />
     </div>
   );
@@ -2127,6 +2141,7 @@ function GraphCanvas({
 
 function MainStudio() {
   const { isDeveloper } = useDeveloperSession();
+  const [, setLocation] = useLocation();
   const studioRootRef = useRef<HTMLDivElement>(null);
   const launchParams = useMemo(
     () => new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search),
@@ -3163,6 +3178,9 @@ function MainStudio() {
         </div>
         <div className="top-actions">
           <span className="shortcut">SPACE · R · E · G</span>
+           <button className="studio-home-btn" type="button" onClick={() => setLocation('/')} data-testid="button-main-page" aria-label="Return to Main Page">
+             <House className="icon" /> <span>Main Page</span>
+           </button>
             <button className="graph-maker-btn" type="button" onClick={() => setShowGraphMaker(true)} data-testid="button-graph-maker" aria-label="Open Graph Maker">
               <Waves className="icon" /> Graph Maker
             </button>
@@ -3631,14 +3649,14 @@ function MainStudio() {
 
 function LandingRoute() {
   const [, setLocation] = useLocation();
-  const { grantDeveloperSession, resetDeveloperSession } = useDeveloperSession();
+  const { grantDeveloperSession, isDeveloper } = useDeveloperSession();
   const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up' | null>(null);
   return (
     <>
       <LandingPage
+        isDeveloper={isDeveloper}
         onAuth={(nextMode) => setAuthMode(nextMode)}
       onStart={(example) => {
-        resetDeveloperSession();
         if (!example) {
           setLocation('/studio');
           return;
@@ -3725,12 +3743,6 @@ function stripBase(path: string) {
 function ClerkApp() {
   const [, setLocation] = useLocation();
   const [isDeveloper, setIsDeveloper] = useState(false);
-  const [location] = useLocation();
-
-  useEffect(() => {
-    const route = stripBase(location).split('?')[0];
-    if (route !== '/studio') setIsDeveloper(false);
-  }, [location]);
 
   return (
     <ClerkProvider
