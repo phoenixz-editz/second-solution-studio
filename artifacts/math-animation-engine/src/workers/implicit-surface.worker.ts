@@ -4,6 +4,7 @@ type GenerateRequest = {
   type: 'generate';
   id: number;
   equation: string;
+  mode?: 'implicit3d' | 'surface3d';
   phase: number;
   speed: number;
   resolution: number;
@@ -19,9 +20,9 @@ type WorkerRequest = GenerateRequest | CancelRequest;
 
 let activeRequestId = 0;
 
-function compileImplicitEquation(source: string) {
-  const evaluator = buildGraphEvaluator(source, 'implicit3d');
-  if (!evaluator || evaluator.kind !== 'implicit') {
+function compileSurfaceEquation(source: string, mode: 'implicit3d' | 'surface3d') {
+  const evaluator = buildGraphEvaluator(source, mode);
+  if (!evaluator || (evaluator.kind !== 'implicit' && evaluator.kind !== 'surface')) {
     throw new Error('The 3D expression could not be compiled locally.');
   }
   return evaluator.expression;
@@ -42,7 +43,10 @@ function safeEvaluate(expression: { evaluate: (scope: Record<string, number>) =>
       a: phase,
       b: speed,
     }));
-    return Number.isFinite(value) ? value : Number.NaN;
+    if (Number.isFinite(value)) return Math.max(-1e6, Math.min(1e6, value));
+    if (value === Number.POSITIVE_INFINITY) return 1e6;
+    if (value === Number.NEGATIVE_INFINITY) return -1e6;
+    return Number.NaN;
   } catch {
     return Number.NaN;
   }
@@ -57,9 +61,59 @@ function clamp(value: number, minimum: number, maximum: number) {
 }
 
 async function generateSurface(request: GenerateRequest) {
-  const expression = compileImplicitEquation(request.equation);
-  const resolution = Math.max(8, Math.min(72, Math.round(request.resolution)));
+  const mode = request.mode ?? 'implicit3d';
+  const expression = compileSurfaceEquation(request.equation, mode);
+  const resolution = Math.max(8, Math.min(96, Math.round(request.resolution)));
   const extent = request.extent;
+  if (mode === 'surface3d') {
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const heights = new Float32Array((resolution + 1) * (resolution + 1));
+    const step = (extent * 2) / resolution;
+    const indexOf = (x: number, y: number) => y * (resolution + 1) + x;
+    for (let y = 0; y <= resolution; y += 1) {
+      for (let x = 0; x <= resolution; x += 1) {
+        const worldX = -extent + x * step;
+        const worldY = extent - y * step;
+        const height = safeEvaluate(expression, worldX, worldY, 0, request.phase, request.speed);
+        heights[indexOf(x, y)] = Number.isFinite(height)
+          ? Math.max(-extent * 1.8, Math.min(extent * 1.8, height))
+          : Number.NaN;
+      }
+      if (activeRequestId !== request.id) return;
+      await yieldToBrowser();
+    }
+    const vertexIndex = (x: number, y: number) => {
+      const height = heights[indexOf(x, y)];
+      if (!Number.isFinite(height)) return -1;
+      const index = positions.length / 3;
+      positions.push(-extent + x * step, extent - y * step, height);
+      return index;
+    };
+    for (let y = 0; y < resolution; y += 1) {
+      for (let x = 0; x < resolution; x += 1) {
+        const topLeft = vertexIndex(x, y);
+        const topRight = vertexIndex(x + 1, y);
+        const bottomLeft = vertexIndex(x, y + 1);
+        const bottomRight = vertexIndex(x + 1, y + 1);
+        if ([topLeft, topRight, bottomLeft, bottomRight].some((index) => index < 0)) continue;
+        indices.push(topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight);
+      }
+      if (activeRequestId !== request.id) return;
+      await yieldToBrowser();
+    }
+    const response = {
+      type: 'result' as const,
+      id: request.id,
+      positions: new Float32Array(positions).buffer,
+      indices: new Uint32Array(indices).buffer,
+    };
+    (globalThis as unknown as { postMessage: (message: unknown, transfer: ArrayBuffer[]) => void }).postMessage(
+      response,
+      [response.positions, response.indices],
+    );
+    return;
+  }
   const size = resolution + 1;
   const values = new Float32Array(size * size * size);
   const indexOf = (x: number, y: number, z: number) => (z * size + y) * size + x;

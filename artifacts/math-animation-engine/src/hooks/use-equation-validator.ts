@@ -4,7 +4,7 @@ import {
   type LocalValidationResult,
 } from '@/lib/math-parser';
 
-export type StudioMode = 'auto' | 'function' | 'parametric' | 'parametric3d' | 'implicit' | 'implicit3d' | 'polar' | 'vector' | 'piecewise' | 'points';
+export type StudioMode = 'auto' | 'function' | 'parametric' | 'parametric3d' | 'implicit' | 'implicit3d' | 'surface3d' | 'polar' | 'vector' | 'piecewise' | 'points';
 
 export function useEquationValidator(equation: string, mode: StudioMode) {
   const workerRef = useRef<Worker | null>(null);

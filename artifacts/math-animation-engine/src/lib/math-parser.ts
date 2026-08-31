@@ -9,6 +9,7 @@ export type GraphEvaluator =
   | { kind: 'function'; expression: CompiledExpression }
   | { kind: 'parametric'; x: CompiledExpression; y: CompiledExpression; z?: CompiledExpression }
   | { kind: 'implicit'; expression: CompiledExpression }
+  | { kind: 'surface'; expression: CompiledExpression }
   | { kind: 'polar'; expression: CompiledExpression }
   | { kind: 'vector'; x: CompiledExpression; y: CompiledExpression; z?: CompiledExpression }
   | { kind: 'points'; points: CompiledPoint[] }
@@ -97,6 +98,19 @@ export function normalizeForPreview(input: string) {
     .replace(/\\sqrt\s*\{([^{}]+)\}/g, 'sqrt($1)')
     .replace(/\{([^{}]+)\}/g, '($1)')
     .replace(/(\S)\s+mod\s+(\S)/gi, '$1 % $2')
+    // A pasted shader expression often carries a stray delimiter or typo.
+    // Remove only unambiguous trailing noise; valid math in the middle is left intact.
+    .replace(/[;,]+$/g, '')
+    .replace(/\s+q+$/i, '')
+    .trim();
+}
+
+export function normalizeSurfaceExpression(input: string) {
+  const renderSource = splitProgramStatements(normalizeForPreview(input)).renderExpression;
+  return renderSource
+    .replace(/^\s*z\s*=\s*/i, '')
+    .replace(/^\s*(.+?)\s*=\s*z\s*$/i, '$1')
+    .replace(/\s*-\s*z\s*$/i, '')
     .trim();
 }
 
@@ -118,8 +132,10 @@ export function detectSmartMode(input: string): ResolvedStudioMode {
   // curve when one of its coordinates is driven by t/u/theta.
   if (pair && hasPair && pair.length === 3) return hasTime ? 'parametric3d' : 'vector';
   if (pair && (hasNamedParametricPair || hasTime)) return pair.length === 3 ? 'parametric3d' : 'parametric';
+  if (equality && /^\s*z\s*=/i.test(equality[0]) && /\bx\b/i.test(renderSource) && /\by\b/i.test(renderSource)) return 'surface3d';
   if (hasSpatialVariables) return 'implicit3d';
   if (equality && !/^\s*[xy]\s*$/i.test(equality[1]) && /\bx\b/i.test(renderSource) && /\by\b/i.test(renderSource)) return 'implicit';
+  if (/\bx\b/i.test(renderSource) && /\by\b/i.test(renderSource) && !equality) return 'surface3d';
   if (/\bx\b/i.test(renderSource) && /\by\b/i.test(renderSource)) return 'implicit';
   if (/\b(?:r|theta)\b|θ/i.test(normalized) && !/\b(?:x|y)\b/i.test(normalized)) return 'polar';
   if (hasPair && Boolean(pair)) return 'vector';
@@ -361,6 +377,9 @@ export function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEv
       return mode === 'vector'
         ? { kind: 'vector', x: compileProgramPart(input, parts[0]), y: compileProgramPart(input, parts[1]), z: parts[2] ? compileProgramPart(input, parts[2]) : undefined }
         : { kind: 'parametric', x: compileProgramPart(input, parts[0]), y: compileProgramPart(input, parts[1]), z: parts[2] ? compileProgramPart(input, parts[2]) : undefined };
+    }
+    if (mode === 'surface3d') {
+      return { kind: 'surface', expression: compileProgramExpression(normalizeSurfaceExpression(input)) };
     }
     if (mode === 'implicit' || mode === 'implicit3d') {
       const renderSource = splitProgramStatements(input).renderExpression;

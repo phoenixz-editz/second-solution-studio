@@ -44,6 +44,7 @@ import { basePath, clerkAppearance, clerkProxyUrl, clerkPubKey } from '@/lib/cle
 import {
   buildGraphEvaluator as parserBuildGraphEvaluator,
   evaluatePointSet,
+  normalizeSurfaceExpression as parserNormalizeSurfaceExpression,
   normalizeForPreview as parserNormalizeForPreview,
   splitEquationExpressions as parserSplitEquationExpressions,
   detectSmartMode,
@@ -74,7 +75,7 @@ function useDeveloperSession() {
 type ScreenPoint = [number, number];
 type ContourSegment = { start: ScreenPoint; end: ScreenPoint };
 type ContourPolyline = ScreenPoint[];
-type GraphRange = { xMin: number; xMax: number; tMin: number; tMax: number };
+type GraphRange = { xMin: number; xMax: number; tMin: number; tMax: number; worldExtent?: number };
 type CachedVectorArrow = { x: number; y: number; endX: number; endY: number };
 type WorldContourPolyline = ScreenPoint[];
 type CachedFrame = {
@@ -113,6 +114,7 @@ type ImplicitSurfaceWorkerRequest = {
   type: 'generate';
   id: number;
   equation: string;
+  mode: 'implicit3d' | 'surface3d';
   phase: number;
   speed: number;
   resolution: number;
@@ -221,12 +223,23 @@ function easeInOutCubic(value: number) {
 
 function detectSmartRange(equation: string, mode: StudioMode): GraphRange {
   const input = normalizeForPreview(equation).toLowerCase();
+  const denominatorPeak = [...input.matchAll(/\/\s*(\d+(?:\.\d+)?)/g)]
+    .map((match) => Number(match[1]))
+    .filter(Number.isFinite)
+    .reduce((maximum, value) => Math.max(maximum, value), 0);
+  const distantCenter = [...input.matchAll(/(?:x|y|z)\s*-\s*(-?\d+(?:\.\d+)?)/g)]
+    .map((match) => Math.abs(Number(match[1])))
+    .filter(Number.isFinite)
+    .reduce((maximum, value) => Math.max(maximum, value), 0);
+  const worldExtent = mode === 'implicit3d' || mode === 'surface3d'
+    ? Math.min(10, Math.max(IMPLICIT_3D_WORLD_EXTENT, denominatorPeak >= 500 ? 8 : 0, distantCenter + 2))
+    : undefined;
   if (mode === 'parametric' || mode === 'parametric3d') {
     const isSpiral = /(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(input);
-    return { xMin: -10, xMax: 10, tMin: 0, tMax: isSpiral ? 10 : 2 * Math.PI };
+    return { xMin: -10, xMax: 10, tMin: 0, tMax: isSpiral ? 10 : 2 * Math.PI, worldExtent };
   }
-  if (mode === 'polar') return { xMin: -6, xMax: 6, tMin: 0, tMax: 2 * Math.PI };
-  return { xMin: -10, xMax: 10, tMin: 0, tMax: 2 * Math.PI };
+  if (mode === 'polar') return { xMin: -6, xMax: 6, tMin: 0, tMax: 2 * Math.PI, worldExtent };
+  return { xMin: -10, xMax: 10, tMin: 0, tMax: 2 * Math.PI, worldExtent };
 }
 
 function contourPointKey(point: ScreenPoint) {
@@ -277,15 +290,18 @@ function createImplicitSurfaceGeometry(
   phase: number,
   speed: number,
   resolution: number,
+  extent = IMPLICIT_3D_WORLD_EXTENT,
 ) {
-  const extent = IMPLICIT_3D_WORLD_EXTENT;
   const size = resolution + 1;
   const values = new Float32Array(size * size * size);
   const indexOf = (x: number, y: number, z: number) => (z * size + y) * size + x;
   const evaluate = (x: number, y: number, z: number) => {
     try {
       const value = Number(expression.evaluate({ x, y, z, t: phase, a: phase, b: speed }));
-      return Number.isFinite(value) ? value : Number.NaN;
+      if (Number.isFinite(value)) return Math.max(-1e6, Math.min(1e6, value));
+      if (value === Number.POSITIVE_INFINITY) return 1e6;
+      if (value === Number.NEGATIVE_INFINITY) return -1e6;
+      return Number.NaN;
     } catch {
       return Number.NaN;
     }
@@ -372,6 +388,59 @@ function createImplicitSurfaceGeometry(
   return smoothedGeometry;
 }
 
+function createHeightmapSurfaceGeometry(
+  expression: CompiledExpression,
+  phase: number,
+  speed: number,
+  resolution: number,
+  extent = IMPLICIT_3D_WORLD_EXTENT,
+) {
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const heights = new Float32Array((resolution + 1) * (resolution + 1));
+  const step = (extent * 2) / resolution;
+  const indexOf = (x: number, y: number) => y * (resolution + 1) + x;
+  for (let y = 0; y <= resolution; y += 1) {
+    for (let x = 0; x <= resolution; x += 1) {
+      const worldX = -extent + x * step;
+      const worldY = extent - y * step;
+      try {
+        const value = Number(expression.evaluate({ x: worldX, y: worldY, z: 0, t: phase, a: phase, b: speed }));
+        heights[indexOf(x, y)] = Number.isFinite(value)
+          ? Math.max(-extent * 1.8, Math.min(extent * 1.8, value))
+          : Number.NaN;
+      } catch {
+        heights[indexOf(x, y)] = Number.NaN;
+      }
+    }
+  }
+  const vertexIndex = (x: number, y: number) => {
+    const height = heights[indexOf(x, y)];
+    if (!Number.isFinite(height)) return -1;
+    const index = positions.length / 3;
+    positions.push(-extent + x * step, extent - y * step, height);
+    return index;
+  };
+  for (let y = 0; y < resolution; y += 1) {
+    for (let x = 0; x < resolution; x += 1) {
+      const topLeft = vertexIndex(x, y);
+      const topRight = vertexIndex(x + 1, y);
+      const bottomLeft = vertexIndex(x, y + 1);
+      const bottomRight = vertexIndex(x + 1, y + 1);
+      if ([topLeft, topRight, bottomLeft, bottomRight].some((index) => index < 0)) continue;
+      indices.push(topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  if (positions.length > 0) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  if (indices.length > 0) geometry.setIndex(indices);
+  if (geometry.getAttribute('position')) {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+  }
+  return geometry;
+}
+
 function splitEquationExpressions(input: string, mode: StudioMode) {
   return parserSplitEquationExpressions(input, mode);
   /*
@@ -448,6 +517,7 @@ function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator
 
 type HistoryItem = { equation: string; mode: ResolvedStudioMode; at: number; preview?: string };
 type EquationLayer = { id: number; equation: string; mode: ResolvedStudioMode; color: string; visible: boolean };
+type SurfaceBlendMode = 'overlay' | 'union' | 'intersection' | 'additive';
 type StudioTheme = 'light' | 'dark' | 'neon';
 type StudioSessionState = {
   equation: string;
@@ -479,6 +549,7 @@ type StudioSessionState = {
   fps: number;
   pageZoom: number;
   graphZoom: number;
+  surfaceBlendMode: SurfaceBlendMode;
   history: HistoryItem[];
 };
 
@@ -486,7 +557,7 @@ const SESSION_STORAGE_KEY = 'second-solution-studio-session-v1';
 const DEFAULT_EQUATION = 'sin(x + t) * exp(-0.08 * x^2)';
 
 function isStudioMode(value: unknown): value is StudioMode {
-  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'polar', 'vector', 'piecewise', 'points'].includes(String(value));
+  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'surface3d', 'polar', 'vector', 'piecewise', 'points'].includes(String(value));
 }
 
 function isStudioTheme(value: unknown): value is StudioTheme {
@@ -504,6 +575,20 @@ function clampPageZoom(value: number) {
 const layerColors = ['#c7f36b', '#ff8b6d', '#72d8ff', '#d6a8ff', '#ffd166'];
 const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
 
+function implicitFieldSource(equation: string, mode: StudioMode) {
+  if (mode === 'surface3d') return `(z) - (${parserNormalizeSurfaceExpression(equation)})`;
+  const normalized = normalizeForPreview(equation);
+  const equality = normalized.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
+  return equality ? `(${equality[1]}) - (${equality[2]})` : normalized;
+}
+
+function combineImplicitFields(entries: Array<{ expression: string; mode: StudioMode }>, blendMode: SurfaceBlendMode) {
+  const fields = entries.map((entry) => implicitFieldSource(entry.expression, entry.mode));
+  if (blendMode === 'union') return `min(${fields.map((field) => `(${field})`).join(', ')})`;
+  if (blendMode === 'intersection') return `max(${fields.map((field) => `(${field})`).join(', ')})`;
+  return fields.map((field) => `(${field})`).join(' + ');
+}
+
 function smartPatternLabel(equation: string, mode: StudioMode) {
   const input = normalizeForPreview(equation).toLowerCase();
   if (mode === 'parametric' || mode === 'parametric3d') return /t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(input) ? 'Spiral' : 'Parametric pattern';
@@ -512,7 +597,7 @@ function smartPatternLabel(equation: string, mode: StudioMode) {
   if (mode === 'piecewise') return 'Piecewise function';
   if (/\b(?:sin|cos|tan)\b/.test(input)) return 'Wave';
   if (/\^|\b(?:poly|x\s*\*)/.test(input)) return 'Polynomial';
-  return mode === 'implicit' || mode === 'implicit3d' ? 'Contour' : mode === 'points' ? 'Point trail' : 'Function';
+  return mode === 'implicit' || mode === 'implicit3d' || mode === 'surface3d' ? 'Contour' : mode === 'points' ? 'Point trail' : 'Function';
 }
 
 function makeHistoryPreview(equation: string, mode: StudioMode, color = '#c7f36b') {
@@ -561,6 +646,7 @@ const modeDetails: Record<StudioMode, { title: string; helper: string; placehold
   parametric3d: { title: '3D Parametric', helper: 'x(t), y(t), z(t)', placeholder: '[cos(t), sin(t), 0.4t]' },
   implicit: { title: 'Implicit', helper: 'F(x, y) = 0', placeholder: 'x² + y² = 4' },
   implicit3d: { title: '3D Implicit', helper: 'F(x, y, z) = 0', placeholder: 'x² + y² + z² = 4' },
+  surface3d: { title: '3D Surface', helper: 'z = f(x, y)', placeholder: 'z = sin(x) * cos(y)' },
   polar: { title: 'Polar', helper: 'r = f(θ, t)', placeholder: '4 * cos(3 * theta)' },
   vector: { title: 'Vector field', helper: '(u, v)', placeholder: '(-y, x)' },
   piecewise: { title: 'Piecewise', helper: 'conditional f(x)', placeholder: 'x < 0 ? sin(x) : cos(x)' },
@@ -643,6 +729,7 @@ function GraphCanvas({
   const drawRef = useRef<() => void>(() => undefined);
   const visibilityTargetRef = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState(true);
+  const [hoverPoint, setHoverPoint] = useState<{ point: THREE.Vector3; x: number; y: number } | null>(null);
   const [surfaceQuality, setSurfaceQuality] = useState<'draft' | 'final'>('final');
   const evaluator = useMemo(() => buildGraphEvaluator(equation, mode), [equation, mode]);
   const viewportRangeRef = useRef(range);
@@ -684,7 +771,7 @@ function GraphCanvas({
       }
     };
     const sampleLine = (currentPhase: number) => {
-      if (!evaluator || evaluator.kind === 'points' || evaluator.kind === 'vector' || evaluator.kind === 'implicit') return [];
+      if (!evaluator || evaluator.kind === 'points' || evaluator.kind === 'vector' || evaluator.kind === 'implicit' || evaluator.kind === 'surface') return [];
       const sampleCount = evaluator.kind === 'function' ? 1000 : evaluator.kind === 'polar' ? 900 : 650;
       const sampled: GraphPoint[] = [];
       for (let index = 0; index <= sampleCount; index += 1) {
@@ -1016,11 +1103,45 @@ function GraphCanvas({
       surfaceGroup.rotation.z += event.key === 'q' ? -0.08 : 0.08;
       event.preventDefault();
     };
-    canvas.style.pointerEvents = mode === 'implicit3d' ? 'auto' : 'none';
-    canvas.tabIndex = mode === 'implicit3d' ? 0 : -1;
+    const isThreeDimensional = mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d';
+    canvas.style.pointerEvents = isThreeDimensional ? 'auto' : 'none';
+    canvas.tabIndex = isThreeDimensional ? 0 : -1;
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Line.threshold = 0.14;
+    const pointer = new THREE.Vector2();
+    const hoverIndicator = new THREE.Mesh(
+      new THREE.SphereGeometry(0.075, 12, 8),
+      new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.95 }),
+    );
+    hoverIndicator.visible = false;
+    scene.add(hoverIndicator);
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!isThreeDimensional || !threeSurfaceGroupRef.current) return;
+      const bounds = canvas.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
+      pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const intersections = raycaster.intersectObjects(threeSurfaceGroupRef.current.children, true);
+      const hit = intersections.find((intersection) => intersection.object !== hoverIndicator);
+      if (!hit) {
+        hoverIndicator.visible = false;
+        setHoverPoint(null);
+        return;
+      }
+      hoverIndicator.position.copy(hit.point);
+      hoverIndicator.visible = true;
+      setHoverPoint({ point: hit.point.clone(), x: event.clientX - bounds.left, y: event.clientY - bounds.top });
+    };
+    const handlePointerLeave = () => {
+      hoverIndicator.visible = false;
+      setHoverPoint(null);
+    };
     controls.addEventListener('start', handleControlStart);
     controls.addEventListener('end', handleControlEnd);
     canvas.addEventListener('keydown', handleKeyDown);
+    canvas.addEventListener('pointermove', handlePointerMove);
+    canvas.addEventListener('pointerleave', handlePointerLeave);
     let frame = 0;
     const render = (now: number) => {
       stars.rotation.z = now * 0.000012;
@@ -1035,10 +1156,15 @@ function GraphCanvas({
       controls.removeEventListener('start', handleControlStart);
       controls.removeEventListener('end', handleControlEnd);
       canvas.removeEventListener('keydown', handleKeyDown);
+      canvas.removeEventListener('pointermove', handlePointerMove);
+      canvas.removeEventListener('pointerleave', handlePointerLeave);
       controls.dispose();
       observer.disconnect();
       starsGeometry.dispose();
       stars.material.dispose();
+      scene.remove(hoverIndicator);
+      hoverIndicator.geometry.dispose();
+      hoverIndicator.material.dispose();
       surfaceGroup.traverse((object) => {
         const mesh = object as THREE.Mesh;
         if (mesh.geometry) mesh.geometry.dispose();
@@ -1051,6 +1177,7 @@ function GraphCanvas({
       threeSurfaceGeometryRef.current?.dispose();
       threeSurfaceGeometryRef.current = null;
       threeSurfaceReadyRef.current = false;
+      setHoverPoint(null);
     };
   }, [isVisible, mode]);
 
@@ -1259,7 +1386,7 @@ function GraphCanvas({
       threeSurfaceGeometryRef.current = null;
       threeSurfaceReadyRef.current = false;
     };
-    if (!isVisible || mode !== 'implicit3d' || evaluator?.kind !== 'implicit') {
+    if (!isVisible || (mode !== 'implicit3d' && mode !== 'surface3d') || (evaluator?.kind !== 'implicit' && evaluator?.kind !== 'surface')) {
       surfaceRequestIdRef.current += 1;
       surfaceQueueTokenRef.current += 1;
       surfaceRequestRef.current = null;
@@ -1269,7 +1396,7 @@ function GraphCanvas({
       return;
     }
 
-    const surfaceInputKey = `${equation}|${surfaceQuality}|${playing}`;
+    const surfaceInputKey = `${equation}|${mode}|${surfaceQuality}|${playing}|${range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT}`;
     const inputChanged = surfaceInputKeyRef.current !== surfaceInputKey;
     if (inputChanged) {
       surfaceInputKeyRef.current = surfaceInputKey;
@@ -1285,19 +1412,22 @@ function GraphCanvas({
       type: 'generate' as const,
       id: 0,
       equation,
+        mode,
       phase: progress * Math.PI * 2 * speed,
       speed,
-      resolution: surfaceQuality === 'final' && !playing
-        ? IMPLICIT_3D_FINAL_GRID_RESOLUTION
-        : IMPLICIT_3D_DRAFT_GRID_RESOLUTION,
-      extent: IMPLICIT_3D_WORLD_EXTENT,
+        resolution: Math.min(96, surfaceQuality === 'final' && !playing
+          ? IMPLICIT_3D_FINAL_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 24 : 0)
+          : IMPLICIT_3D_DRAFT_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 8 : 0)),
+        extent: range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT,
     };
     surfaceRequestRef.current = request;
     const worker = surfaceWorkerRef.current;
     if (!worker) {
       const fallbackTimer = window.setTimeout(() => {
         if (queueToken !== surfaceQueueTokenRef.current) return;
-        const geometry = createImplicitSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution);
+         const geometry = evaluator.kind === 'surface'
+           ? createHeightmapSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution, request.extent)
+           : createImplicitSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution, request.extent);
         const positions = geometry.getAttribute('position')?.array.buffer;
         if (positions) installSurfaceRef.current(positions);
         geometry.dispose();
@@ -1322,12 +1452,9 @@ function GraphCanvas({
           surfaceWorkerBusyRef.current = false;
           surfaceRequestIdRef.current += 1;
           worker.postMessage({ type: 'cancel', id: surfaceRequestIdRef.current });
-          const fallbackGeometry = createImplicitSurfaceGeometry(
-            evaluator.expression,
-            latestRequest.phase,
-            latestRequest.speed,
-            IMPLICIT_3D_DRAFT_GRID_RESOLUTION,
-          );
+           const fallbackGeometry = evaluator.kind === 'surface'
+             ? createHeightmapSurfaceGeometry(evaluator.expression, latestRequest.phase, latestRequest.speed, IMPLICIT_3D_DRAFT_GRID_RESOLUTION, latestRequest.extent)
+             : createImplicitSurfaceGeometry(evaluator.expression, latestRequest.phase, latestRequest.speed, IMPLICIT_3D_DRAFT_GRID_RESOLUTION, latestRequest.extent);
           const fallbackPositions = fallbackGeometry.getAttribute('position')?.array.buffer;
           if (fallbackPositions) installSurfaceRef.current(fallbackPositions);
           fallbackGeometry.dispose();
@@ -1335,7 +1462,7 @@ function GraphCanvas({
       }, wait);
     }
     return undefined;
-  }, [equation, evaluator, isVisible, mode, playing, progress, speed, surfaceQuality]);
+  }, [equation, evaluator, isVisible, mode, playing, progress, range.worldExtent, speed, surfaceQuality]);
 
   useEffect(() => {
     const scene = threeSceneRef.current;
@@ -2187,6 +2314,7 @@ function MainStudio() {
   const [showWatermark, setShowWatermark] = useState(true);
   const [pageZoom, setPageZoom] = useState(1);
   const [graphZoom, setGraphZoom] = useState(1);
+  const [surfaceBlendMode, setSurfaceBlendMode] = useState<SurfaceBlendMode>('overlay');
   const [watermark, setWatermark] = useState('Second Solution Studio');
   const [filename, setFilename] = useState('');
   const [fps, setFps] = useState(60);
@@ -2308,6 +2436,7 @@ function MainStudio() {
         if (typeof saved.watermark === 'string') setWatermark(saved.watermark);
         if (typeof saved.filename === 'string') setFilename(saved.filename);
         if (saved.fps === 30 || saved.fps === 60) setFps(saved.fps);
+         if (saved.surfaceBlendMode === 'overlay' || saved.surfaceBlendMode === 'union' || saved.surfaceBlendMode === 'intersection' || saved.surfaceBlendMode === 'additive') setSurfaceBlendMode(saved.surfaceBlendMode);
         setPageZoom(clampPageZoom(finiteNumber(saved.pageZoom, 1)));
         setGraphZoom(Math.min(2.5, Math.max(0.5, finiteNumber(saved.graphZoom, 1))));
          if (Array.isArray(saved.history)) {
@@ -2724,6 +2853,7 @@ function MainStudio() {
       fps,
       pageZoom,
       graphZoom,
+      surfaceBlendMode,
       history,
     };
     sessionSnapshotRef.current = snapshot;
@@ -2738,6 +2868,7 @@ function MainStudio() {
     gridDensity, history, layers, lineWidth, manualTMax, manualTMin, manualXMax,
     manualXMin, mode, originView, pageZoom, playing, pointStyle, progress,
     sessionReady, showAxes, showFps, showGrid, showTrail, showWatermark, speed,
+    surfaceBlendMode,
     theme, watermark,
   ]);
 
@@ -2862,10 +2993,18 @@ function MainStudio() {
   };
   const addLayer = () => {
     const id = Math.max(...layers.map((layer) => layer.id), 0) + 1;
+    const is3d = resolvedMode === 'implicit3d' || resolvedMode === 'surface3d';
+    const nextMode: ResolvedStudioMode = is3d
+      ? resolvedMode
+      : 'function';
     const nextLayer: EquationLayer = {
       id,
-      equation: 'cos(x - t) * 0.65',
-      mode: 'function',
+      equation: nextMode === 'surface3d'
+        ? 'z = 0.5 * sin(x) * cos(y)'
+        : nextMode === 'implicit3d'
+          ? 'x^2 + y^2 + z^2 = 3'
+          : 'cos(x - t) * 0.65',
+      mode: nextMode,
       color: layerColors[(id - 1) % layerColors.length],
       visible: true,
     };
