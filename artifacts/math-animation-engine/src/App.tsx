@@ -100,6 +100,34 @@ type ImplicitSurfaceWorkerRequest = {
   extent: number;
 };
 
+type GeometryBufferInput = ArrayBufferLike | ArrayLike<number>;
+
+function normalizeIndexBuffer(input: GeometryBufferInput): Uint16Array | Uint32Array | null {
+  let values: number[];
+  if (ArrayBuffer.isView(input) || Array.isArray(input)) {
+    values = Array.from(input as ArrayLike<number>, Number);
+  } else {
+    const buffer = input as ArrayBuffer;
+    const byteLength = buffer.byteLength;
+    if (byteLength === 0 || byteLength % 2 !== 0) return null;
+    values = Array.from(
+      byteLength % 4 === 0
+        ? new Uint32Array(buffer)
+        : new Uint16Array(buffer),
+    );
+  }
+
+  if (values.length === 0) return null;
+  let maxIndex = 0;
+  const cleanValues: number[] = [];
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    cleanValues.push(value);
+    maxIndex = Math.max(maxIndex, value);
+  }
+  return maxIndex > 65535 ? new Uint32Array(cleanValues) : new Uint16Array(cleanValues);
+}
+
 type AudioEngine = {
   context: AudioContext;
   master: GainNode;
@@ -601,7 +629,7 @@ function GraphCanvas({
   const surfaceWorkerBusyRef = useRef(false);
   const surfaceInputKeyRef = useRef('');
   const surfaceColorRef = useRef(color);
-  const installSurfaceRef = useRef<(positions: ArrayBufferLike, indices?: ArrayBufferLike) => void>(() => undefined);
+  const installSurfaceRef = useRef<(positions: GeometryBufferInput, indices?: GeometryBufferInput) => void>(() => undefined);
   const drawRef = useRef<() => void>(() => undefined);
   const [surfaceQuality, setSurfaceQuality] = useState<'draft' | 'final'>('final');
   const evaluator = useMemo(() => buildGraphEvaluator(equation, mode), [equation, mode]);
@@ -1016,18 +1044,26 @@ function GraphCanvas({
       threeSurfaceReadyRef.current = false;
     };
 
-    const installSurface = (positions: ArrayBufferLike, indices?: ArrayBufferLike) => {
+    const installSurface = (positions: GeometryBufferInput, indices?: GeometryBufferInput) => {
       const group = threeSurfaceGroupRef.current;
+      const positionValues = ArrayBuffer.isView(positions) || Array.isArray(positions)
+        ? Array.from(positions as ArrayLike<number>, Number)
+        : new Float32Array(positions as ArrayBuffer);
+      if (positionValues.length === 0 || positionValues.length % 3 !== 0) {
+        onRuntimeWarning('3D surface returned an invalid position buffer; using the CPU fallback.');
+        return;
+      }
       const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(positions), 3));
-      if (indices && new Uint32Array(indices).length > 0) {
-        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positionValues, 3));
+      const indexArray = indices ? normalizeIndexBuffer(indices) : null;
+      if (indexArray) {
+        geometry.setIndex(new THREE.BufferAttribute(indexArray, 1));
       } else if (geometry.getAttribute('position')?.count) {
         const smoothedGeometry = mergeVertices(geometry, 0.005);
         geometry.dispose();
         smoothedGeometry.computeVertexNormals();
         smoothedGeometry.computeBoundingSphere();
-        installSurface(smoothedGeometry.getAttribute('position').array.buffer, smoothedGeometry.getIndex()?.array.buffer);
+        installSurface(smoothedGeometry.getAttribute('position').array, smoothedGeometry.getIndex()?.array);
         return;
       }
       if (geometry.getAttribute('position')?.count === 0) {
@@ -2441,6 +2477,19 @@ function MainStudio() {
     audioLastProgressRef.current = currentProgress;
   }, [audioEnabled, audioYValue, playing, progress, speed]);
 
+  useEffect(() => {
+    if (!audioEnabled || typeof window === 'undefined') return;
+    const initializeAudioFromInteraction = () => {
+      void ensureAudioEngine();
+    };
+    window.addEventListener('pointerdown', initializeAudioFromInteraction, { once: true });
+    window.addEventListener('keydown', initializeAudioFromInteraction, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', initializeAudioFromInteraction);
+      window.removeEventListener('keydown', initializeAudioFromInteraction);
+    };
+  }, [audioEnabled, ensureAudioEngine]);
+
   useEffect(() => () => {
     audioEngineRef.current?.context.close();
     audioEngineRef.current = null;
@@ -2631,7 +2680,7 @@ function MainStudio() {
     setTopNotice(`${nextTheme === 'light' ? 'Minimal Light' : nextTheme === 'neon' ? 'Neon Glow' : 'Dark'} theme`);
   };
   const togglePlayback = () => {
-    if (!playing || progress >= 1) void ensureAudioEngine();
+    void ensureAudioEngine();
     if (progress >= 1) {
       setProgress(0);
       setPlaying(true);

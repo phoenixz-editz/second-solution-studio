@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
   getListFeedbackQueryKey,
   useCreateFeedback,
@@ -52,6 +52,171 @@ function formatFeedbackTimestamp(timestamp: string) {
   const date = new Date(timestamp);
   if (!Number.isFinite(date.getTime())) return 'Recently';
   return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function LiveExamplePreview({ example }: { example: LandingExample }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pointerRef = useRef({ x: 0.5, y: 0.5, active: false });
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context || typeof window === 'undefined') return;
+
+    let animationFrame = 0;
+    const startedAt = performance.now();
+    const resize = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(bounds.width * dpr));
+      canvas.height = Math.max(1, Math.floor(bounds.height * dpr));
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    const draw = (now: number) => {
+      const bounds = canvas.getBoundingClientRect();
+      const width = Math.max(1, bounds.width);
+      const height = Math.max(1, bounds.height);
+      const time = (now - startedAt) / 1000;
+      const pointer = pointerRef.current;
+      const pointerShift = pointer.active ? (pointer.x - 0.5) * 1.5 : 0;
+
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#19262d';
+      context.fillRect(0, 0, width, height);
+      context.strokeStyle = 'rgba(238,244,241,.1)';
+      context.lineWidth = 1;
+      for (let column = 1; column < 4; column += 1) {
+        const x = (width * column) / 4;
+        context.beginPath();
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+        context.stroke();
+      }
+      for (let row = 1; row < 3; row += 1) {
+        const y = (height * row) / 3;
+        context.beginPath();
+        context.moveTo(0, y);
+        context.lineTo(width, y);
+        context.stroke();
+      }
+      context.strokeStyle = 'rgba(238,244,241,.2)';
+      context.beginPath();
+      context.moveTo(0, height / 2);
+      context.lineTo(width, height / 2);
+      context.moveTo(width / 2, 0);
+      context.lineTo(width / 2, height);
+      context.stroke();
+
+      const project = (x: number, y: number) => [
+        width / 2 + x * width * 0.26,
+        height / 2 - y * height * 0.38,
+      ] as const;
+      const drawPath = (points: Array<readonly [number, number]>) => {
+        if (points.length < 2) return;
+        context.beginPath();
+        points.forEach(([x, y], index) => {
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+      };
+
+      context.save();
+      context.strokeStyle = example.accent;
+      context.shadowColor = example.accent;
+      context.shadowBlur = 13;
+      context.lineWidth = 2.2;
+      if (example.mode === 'points') {
+        for (let orbit = 0; orbit < 3; orbit += 1) {
+          const points: Array<readonly [number, number]> = [];
+          for (let step = 0; step <= 100; step += 1) {
+            const angle = (step / 100) * Math.PI * 2 + time * (1.1 + orbit * 0.16) + orbit;
+            points.push(project(
+              Math.cos(angle) * (0.35 + orbit * 0.17),
+              Math.sin(angle) * (0.35 + orbit * 0.17),
+            ));
+          }
+          drawPath(points);
+          const angle = time * (1.1 + orbit * 0.16) + orbit;
+          const [pointX, pointY] = project(
+            Math.cos(angle) * (0.35 + orbit * 0.17),
+            Math.sin(angle) * (0.35 + orbit * 0.17),
+          );
+          context.fillStyle = example.accent;
+          context.beginPath();
+          context.arc(pointX, pointY, 4 + orbit, 0, Math.PI * 2);
+          context.fill();
+        }
+      } else {
+        const points: Array<readonly [number, number]> = [];
+        for (let step = 0; step <= 180; step += 1) {
+          const amount = step / 180;
+          const angle = amount * Math.PI * 2;
+          let x = Math.cos(angle);
+          let y = Math.sin(angle);
+          if (example.mode === 'polar') {
+            const radius = 0.72 + 0.22 * Math.cos(3 * angle + time * 1.7 + pointerShift);
+            x = radius * Math.cos(angle);
+            y = radius * Math.sin(angle);
+          } else if (example.mode === 'implicit') {
+            const radius = 0.82 + 0.035 * Math.sin(4 * angle + time);
+            x = radius * Math.cos(angle);
+            y = radius * Math.sin(angle);
+          } else {
+            const graphX = angle * 2 - Math.PI;
+            x = graphX / Math.PI;
+            y = Math.sin(graphX * 1.25 + time * 1.8 + pointerShift) * 0.62 * Math.exp(-0.035 * graphX * graphX);
+          }
+          points.push(project(x, y));
+        }
+        drawPath(points);
+      }
+      context.restore();
+
+      if (pointer.active) {
+        context.strokeStyle = 'rgba(238,244,241,.38)';
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(pointer.x * width - 8, pointer.y * height);
+        context.lineTo(pointer.x * width + 8, pointer.y * height);
+        context.moveTo(pointer.x * width, pointer.y * height - 8);
+        context.lineTo(pointer.x * width, pointer.y * height + 8);
+        context.stroke();
+      }
+      context.fillStyle = 'rgba(238,244,241,.5)';
+      context.font = '9px DM Mono, monospace';
+      context.fillText(`${example.mode.toUpperCase()} · LIVE`, 14, 18);
+      animationFrame = window.requestAnimationFrame(draw);
+    };
+
+    resize();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    observer?.observe(canvas);
+    window.addEventListener('resize', resize);
+    animationFrame = window.requestAnimationFrame(draw);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+    };
+  }, [example]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="example-preview-canvas"
+      aria-hidden="true"
+      onPointerMove={(event) => {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        pointerRef.current = {
+          x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+          y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height)),
+          active: true,
+        };
+      }}
+      onPointerLeave={() => { pointerRef.current.active = false; }}
+    />
+  );
 }
 
 export function LandingPage({ onStart, onAuth }: LandingPageProps) {
@@ -232,7 +397,7 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
           <div className="example-grid">
             {examples.map((example) => (
               <button className="example-card" type="button" key={example.title} onClick={() => startStudio(example)} style={{ '--example-accent': example.accent } as CSSProperties}>
-                <span className="example-preview"><span className="example-preview-axis" /><span className="example-preview-line" /></span>
+                <span className="example-preview"><LiveExamplePreview example={example} /></span>
                 <span className="example-card-copy"><strong>{example.title}</strong><span className="mono">{example.equation}</span><small>{example.mode} · Open in studio <ArrowRight className="icon" /></small></span>
               </button>
             ))}
