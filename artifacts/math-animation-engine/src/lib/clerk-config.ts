@@ -2,8 +2,10 @@ import { publishableKeyFromHost } from '@clerk/react/internal';
 import { shadcn } from '@clerk/themes';
 
 export const basePath = import.meta.env.BASE_URL.replace(/\/$/, '');
+const browserHostname = typeof window !== 'undefined' ? window.location.hostname : '';
+const browserOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 export const clerkPubKey = publishableKeyFromHost(
-  window.location.hostname,
+  browserHostname,
   import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
 );
 export const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
@@ -14,7 +16,7 @@ export const clerkAppearance = {
   options: {
     logoPlacement: 'inside' as const,
     logoLinkUrl: basePath || '/',
-    logoImageUrl: `${window.location.origin}${basePath}/logo.svg`,
+    logoImageUrl: `${browserOrigin}${basePath}/logo.svg`,
     socialButtonsPlacement: 'top' as const,
     socialButtonsVariant: 'blockButton' as const,
   },

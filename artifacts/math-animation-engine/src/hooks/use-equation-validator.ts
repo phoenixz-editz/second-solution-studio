@@ -15,6 +15,7 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
   const [validatedKey, setValidatedKey] = useState('');
 
   useEffect(() => {
+    if (typeof window === 'undefined' || typeof Worker === 'undefined') return;
     const worker = new Worker(
       new URL('../workers/math-validation.worker.ts', import.meta.url),
       { type: 'module' },

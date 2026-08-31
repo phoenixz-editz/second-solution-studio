@@ -107,6 +107,7 @@ type AudioEngine = {
 };
 
 function getAudioContextConstructor() {
+  if (typeof window === 'undefined') return undefined;
   return window.AudioContext
     ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
 }
@@ -2000,7 +2001,10 @@ function GraphCanvas({
 }
 
 function MainStudio() {
-  const launchParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  const launchParams = useMemo(
+    () => new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search),
+    [],
+  );
   const launchEquation = launchParams.get('equation') || DEFAULT_EQUATION;
   const launchModeParam = launchParams.get('mode');
   const launchMode: StudioMode = isStudioMode(launchModeParam) ? launchModeParam : 'auto';
@@ -2012,7 +2016,12 @@ function MainStudio() {
   ]);
   const [activeLayerId, setActiveLayerId] = useState(1);
   const [theme, setTheme] = useState<StudioTheme>(() => {
-    try { return (localStorage.getItem('second-solution-theme') as StudioTheme) || 'dark'; } catch { return 'dark'; }
+    try {
+      if (typeof window === 'undefined') return 'dark';
+      return (window.localStorage.getItem('second-solution-theme') as StudioTheme) || 'dark';
+    } catch {
+      return 'dark';
+    }
   });
   const [playing, setPlaying] = useState(true);
   const [progress, setProgress] = useState(0);
@@ -2050,7 +2059,10 @@ function MainStudio() {
   const [showGuide, setShowGuide] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
-      const raw = localStorage.getItem('second-solution-history') || localStorage.getItem('mae-history') || '[]';
+      if (typeof window === 'undefined') return [];
+      const raw = window.localStorage.getItem('second-solution-history')
+        || window.localStorage.getItem('mae-history')
+        || '[]';
       return (JSON.parse(raw) as HistoryItem[]).slice(0, 8);
     } catch {
       return [];
@@ -2670,6 +2682,16 @@ function MainStudio() {
 
   const captureWebm = async () => {
     if (captureActiveRef.current) return;
+    if (
+      typeof window === 'undefined'
+      || typeof document === 'undefined'
+      || typeof HTMLCanvasElement === 'undefined'
+      || typeof MediaRecorder === 'undefined'
+      || typeof MediaStream === 'undefined'
+    ) {
+      setExportStatus('HD video capture is not supported here');
+      return;
+    }
     const audioEngine = await ensureAudioEngine();
     if (!audioEngine) {
       setExportStatus('Audio capture is not supported in this browser');
@@ -2678,7 +2700,7 @@ function MainStudio() {
     }
     const sourceCanvases = Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.graph-canvas') ?? []);
     const webglCanvases = Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.webgl-canvas') ?? []);
-    if (sourceCanvases.length === 0 || !('MediaRecorder' in window) || !HTMLCanvasElement.prototype.captureStream) {
+    if (sourceCanvases.length === 0 || !HTMLCanvasElement.prototype.captureStream) {
       setExportStatus('HD video capture is not supported here');
       window.setTimeout(() => setExportStatus(''), 3000);
       return;

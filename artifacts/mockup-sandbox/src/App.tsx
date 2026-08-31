@@ -119,6 +119,7 @@ function Gallery() {
 
 function getPreviewPath(): string | null {
   const basePath = getBasePath();
+  if (typeof window === "undefined") return null;
   const { pathname } = window.location;
   const local =
     basePath && pathname.startsWith(basePath)
