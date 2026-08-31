@@ -156,6 +156,16 @@ function formatFeedbackTimestamp(timestamp: string) {
   return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+function observeAnimationVisibility(target: HTMLElement, onChange: (visible: boolean) => void) {
+  if (typeof IntersectionObserver === 'undefined') return () => undefined;
+  const observer = new IntersectionObserver(
+    ([entry]) => onChange(Boolean(entry?.isIntersecting)),
+    { rootMargin: '160px 0px', threshold: 0.01 },
+  );
+  observer.observe(target);
+  return () => observer.disconnect();
+}
+
 function LiveExamplePreview({ example }: { example: LandingExample }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointerRef = useRef({ x: 0.5, y: 0.5, active: false });
@@ -207,6 +217,7 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
       const color = example.accent.replace('#', '').match(/.{2}/g)?.map((channel) => parseInt(channel, 16) / 255) ?? [0.78, 0.95, 0.42];
       const startedAt = performance.now();
       let animationFrame = 0;
+      let isVisible = true;
       const resize = () => {
         const bounds = canvas.getBoundingClientRect();
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -275,17 +286,27 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tracerSeries), gl.DYNAMIC_DRAW);
         gl.uniform1f(pointSizeLocation, 7);
         gl.drawArrays(gl.POINTS, tracerIndex, 1);
-        animationFrame = window.requestAnimationFrame(draw);
+        if (isVisible) animationFrame = window.requestAnimationFrame(draw);
       };
 
       resize();
-      const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
-      observer?.observe(canvas);
+      const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+      resizeObserver?.observe(canvas);
       window.addEventListener('resize', resize);
+      const stopVisibilityObserver = observeAnimationVisibility(canvas, (visible) => {
+        isVisible = visible;
+        if (!visible && animationFrame) {
+          window.cancelAnimationFrame(animationFrame);
+          animationFrame = 0;
+        } else if (visible && !animationFrame) {
+          animationFrame = window.requestAnimationFrame(draw);
+        }
+      });
       animationFrame = window.requestAnimationFrame(draw);
       return () => {
         window.cancelAnimationFrame(animationFrame);
-        observer?.disconnect();
+        stopVisibilityObserver();
+        resizeObserver?.disconnect();
         window.removeEventListener('resize', resize);
         gl.deleteBuffer(buffer);
         gl.deleteProgram(program);
@@ -298,6 +319,7 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
     if (!context) return;
 
     let animationFrame = 0;
+    let isVisible = true;
     const startedAt = performance.now();
     const resize = () => {
       const bounds = canvas.getBoundingClientRect();
@@ -436,17 +458,27 @@ function LiveExamplePreview({ example }: { example: LandingExample }) {
       context.fillStyle = 'rgba(238,244,241,.5)';
       context.font = '9px DM Mono, monospace';
       context.fillText(`${example.mode.toUpperCase()} · LIVE`, 14, 18);
-      animationFrame = window.requestAnimationFrame(draw);
+      if (isVisible) animationFrame = window.requestAnimationFrame(draw);
     };
 
     resize();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
-    observer?.observe(canvas);
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    resizeObserver?.observe(canvas);
     window.addEventListener('resize', resize);
+    const stopVisibilityObserver = observeAnimationVisibility(canvas, (visible) => {
+      isVisible = visible;
+      if (!visible && animationFrame) {
+        window.cancelAnimationFrame(animationFrame);
+        animationFrame = 0;
+      } else if (visible && !animationFrame) {
+        animationFrame = window.requestAnimationFrame(draw);
+      }
+    });
     animationFrame = window.requestAnimationFrame(draw);
     return () => {
       window.cancelAnimationFrame(animationFrame);
-      observer?.disconnect();
+      stopVisibilityObserver();
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
     };
   }, [example]);
@@ -480,6 +512,7 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
       const context = canvas.getContext('2d');
       if (!context) return;
       let frame = 0;
+      let isVisible = true;
       const startedAt = performance.now();
       const resize = () => {
         const bounds = canvas.getBoundingClientRect();
@@ -544,16 +577,26 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
           context.fill();
         }
         context.restore();
-        frame = window.requestAnimationFrame(draw);
+        if (isVisible) frame = window.requestAnimationFrame(draw);
       };
       resize();
-      const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
-      observer?.observe(canvas);
+      const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+      resizeObserver?.observe(canvas);
       window.addEventListener('resize', resize);
+      const stopVisibilityObserver = observeAnimationVisibility(canvas, (visible) => {
+        isVisible = visible;
+        if (!visible && frame) {
+          window.cancelAnimationFrame(frame);
+          frame = 0;
+        } else if (visible && !frame) {
+          frame = window.requestAnimationFrame(draw);
+        }
+      });
       frame = window.requestAnimationFrame(draw);
       return () => {
         window.cancelAnimationFrame(frame);
-        observer?.disconnect();
+        stopVisibilityObserver();
+        resizeObserver?.disconnect();
         window.removeEventListener('resize', resize);
       };
     }
@@ -591,6 +634,7 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
     const pointSizeLocation = gl.getUniformLocation(program, 'u_point_size');
     const color = accent.replace('#', '').match(/.{2}/g)?.map((channel) => parseInt(channel, 16) / 255) ?? [0.78, 0.95, 0.42];
     let frame = 0;
+    let isVisible = true;
     const startedAt = performance.now();
     const resize = () => {
       const bounds = canvas.getBoundingClientRect();
@@ -635,16 +679,26 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
         : Math.floor(((time * 0.16) % 1) * 240);
       gl.uniform1f(pointSizeLocation, 7);
       gl.drawArrays(gl.POINTS, tracerIndex, 1);
-      frame = window.requestAnimationFrame(draw);
+      if (isVisible) frame = window.requestAnimationFrame(draw);
     };
     resize();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
-    observer?.observe(canvas);
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    resizeObserver?.observe(canvas);
     window.addEventListener('resize', resize);
+    const stopVisibilityObserver = observeAnimationVisibility(canvas, (visible) => {
+      isVisible = visible;
+      if (!visible && frame) {
+        window.cancelAnimationFrame(frame);
+        frame = 0;
+      } else if (visible && !frame) {
+        frame = window.requestAnimationFrame(draw);
+      }
+    });
     frame = window.requestAnimationFrame(draw);
     return () => {
       window.cancelAnimationFrame(frame);
-      observer?.disconnect();
+      stopVisibilityObserver();
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
@@ -670,6 +724,7 @@ function LiveHeroPreview() {
     if (!canvas || !context || typeof window === 'undefined') return;
 
     let frame = 0;
+    let isVisible = true;
     const startedAt = performance.now();
     const resize = () => {
       const bounds = canvas.getBoundingClientRect();
@@ -765,17 +820,27 @@ function LiveHeroPreview() {
       context.fill();
       context.restore();
 
-      frame = window.requestAnimationFrame(draw);
+      if (isVisible) frame = window.requestAnimationFrame(draw);
     };
 
     resize();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
-    observer?.observe(canvas);
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    resizeObserver?.observe(canvas);
     window.addEventListener('resize', resize);
+    const stopVisibilityObserver = observeAnimationVisibility(canvas, (visible) => {
+      isVisible = visible;
+      if (!visible && frame) {
+        window.cancelAnimationFrame(frame);
+        frame = 0;
+      } else if (visible && !frame) {
+        frame = window.requestAnimationFrame(draw);
+      }
+    });
     frame = window.requestAnimationFrame(draw);
     return () => {
       window.cancelAnimationFrame(frame);
-      observer?.disconnect();
+      stopVisibilityObserver();
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
     };
   }, []);
@@ -811,6 +876,7 @@ function LandingBubbleBackground() {
       color: index % 3 === 0 ? [199, 243, 107] : index % 3 === 1 ? [114, 216, 255] : [214, 168, 255],
     }));
     let frame = 0;
+    let isVisible = true;
     let width = 1;
     let height = 1;
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -910,17 +976,27 @@ function LandingBubbleBackground() {
         context.shadowBlur = 0;
       });
       context.globalCompositeOperation = 'source-over';
-      if (!reducedMotion) frame = window.requestAnimationFrame(draw);
+      if (!reducedMotion && isVisible) frame = window.requestAnimationFrame(draw);
     };
 
     resize();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
-    observer?.observe(canvas);
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
+    resizeObserver?.observe(canvas);
     window.addEventListener('resize', resize);
+    const stopVisibilityObserver = observeAnimationVisibility(canvas, (visible) => {
+      isVisible = visible;
+      if (!visible && frame) {
+        window.cancelAnimationFrame(frame);
+        frame = 0;
+      } else if (visible && !frame && !reducedMotion) {
+        frame = window.requestAnimationFrame(draw);
+      }
+    });
     frame = window.requestAnimationFrame(draw);
     return () => {
       window.cancelAnimationFrame(frame);
-      observer?.disconnect();
+      stopVisibilityObserver();
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
     };
   }, []);
@@ -928,6 +1004,12 @@ function LandingBubbleBackground() {
   return (
     <div className="landing-bubble-background" aria-hidden="true">
       <canvas ref={canvasRef} />
+      <div className="landing-liquid-layer">
+        <span className="landing-liquid-orb landing-liquid-orb-lime" />
+        <span className="landing-liquid-orb landing-liquid-orb-cyan" />
+        <span className="landing-liquid-orb landing-liquid-orb-purple" />
+        <span className="landing-liquid-orb landing-liquid-orb-mint" />
+      </div>
       <div className="landing-bubble-wash" />
     </div>
   );
