@@ -1,5 +1,11 @@
 import { useState, type CSSProperties } from 'react';
 import {
+  getListFeedbackQueryKey,
+  useCreateFeedback,
+  useListFeedback,
+} from '@workspace/api-client-react';
+import { useQueryClient } from '@tanstack/react-query';
+import {
   Aperture,
   ArrowRight,
   Bug,
@@ -14,7 +20,6 @@ import {
   Sparkles,
 } from 'lucide-react';
 import type { StudioMode } from '@/hooks/use-equation-validator';
-import { loadEncryptedJson, saveEncryptedJson } from '@/lib/session-storage';
 
 type LandingExample = {
   title: string;
@@ -41,29 +46,72 @@ const flowSteps = [
   { title: 'Canvas animation', copy: 'The studio frames the result and turns it into a living, exportable scene.', icon: '03' },
 ];
 
-type StoredFeedback = { kind: 'bug' | 'suggestion'; message: string; at: number };
+type FeedbackKind = 'bug' | 'suggestion';
+
+function formatFeedbackTimestamp(timestamp: string) {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return 'Recently';
+  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
 
 export function LandingPage({ onStart, onAuth }: LandingPageProps) {
   const [activeFlow, setActiveFlow] = useState(0);
   const [bugReport, setBugReport] = useState('');
   const [suggestion, setSuggestion] = useState('');
+  const [feedbackName, setFeedbackName] = useState('');
   const [feedbackStatus, setFeedbackStatus] = useState('');
+  const queryClient = useQueryClient();
+  const feedbackQuery = useListFeedback({
+    query: {
+      queryKey: getListFeedbackQueryKey(),
+      refetchInterval: 5000,
+      refetchOnMount: true,
+      retry: 2,
+      staleTime: 0,
+    },
+  });
+  const createFeedbackMutation = useCreateFeedback({
+    mutation: {
+      onSuccess: () => {
+        void queryClient.invalidateQueries({ queryKey: getListFeedbackQueryKey() });
+      },
+    },
+  });
+  const feedbackEntries = Array.isArray(feedbackQuery.data) ? feedbackQuery.data : [];
 
   const startStudio = (example?: LandingExample) => {
     onStart(example);
   };
 
-  const submitFeedback = async (kind: StoredFeedback['kind'], message: string, clear: () => void) => {
+  const submitFeedback = async (kind: FeedbackKind, message: string, clear: () => void) => {
     const trimmed = message.trim();
     if (!trimmed) {
       setFeedbackStatus(kind === 'bug' ? 'Describe the issue before sending.' : 'Add an idea before sending.');
       return;
     }
-    const previous = await loadEncryptedJson<StoredFeedback[]>('second-solution-feedback');
-    const next = [{ kind, message: trimmed, at: Date.now() }, ...(previous ?? [])].slice(0, 20);
-    const saved = await saveEncryptedJson('second-solution-feedback', next);
-    setFeedbackStatus(saved ? 'Saved locally — thank you for helping shape the studio.' : 'Could not save locally. Please use the contact email instead.');
-    if (saved) clear();
+    let name = feedbackName.trim();
+    if (!name && typeof window !== 'undefined') {
+      try {
+        name = window.prompt('What name should appear with your feedback?')?.trim() ?? '';
+      } catch {
+        name = '';
+      }
+    }
+    if (!name) {
+      setFeedbackStatus('Please enter a name before sending feedback.');
+      return;
+    }
+    setFeedbackName(name);
+    setFeedbackStatus('Sending feedback…');
+    try {
+      await createFeedbackMutation.mutateAsync({
+        data: { name, category: kind, content: trimmed },
+      });
+      setFeedbackStatus('Shared with the community — thank you for helping shape the studio.');
+      clear();
+    } catch {
+      setFeedbackStatus('Could not share feedback right now. Please try again or use the contact email.');
+    }
   };
 
   return (
@@ -89,6 +137,7 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
             Get started <ArrowRight className="icon" />
           </button>
         </div>
+        <span className="creator-credit">Made by SOHAIB KHAN</span>
       </header>
 
       <main>
@@ -194,7 +243,7 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
           <div className="support-copy">
             <span className="landing-eyebrow">Community & support</span>
             <h2>Help make the next equation feel effortless.</h2>
-            <p>Found a rough edge or have a mode that deserves a better visual language? Send it our way. Notes stay encrypted and local in this prototype.</p>
+             <p>Found a rough edge or have a mode that deserves a better visual language? Send it our way. Shared notes help every visitor see what the studio is learning.</p>
             <div className="support-links">
               <a href="mailto:jhoncena4581@gmail.com?subject=Second%20Solution%20Studio%20support"><Mail className="icon" /> jhoncena4581@gmail.com</a>
               <a href="https://www.instagram.com/second_solution_math?igsi=MXFlbjg2d3AzZ3Y2eA==" target="_blank" rel="noreferrer"><Instagram className="icon" /> Instagram / second_solution_math</a>
@@ -203,18 +252,40 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
             </div>
           </div>
           <div className="feedback-grid">
+            <label className="feedback-name-field">
+              <span>Your name <small>(shown with your feedback)</small></span>
+              <input value={feedbackName} onChange={(event) => setFeedbackName(event.target.value)} placeholder="Name" maxLength={80} />
+            </label>
             <form className="feedback-card" onSubmit={(event) => { event.preventDefault(); void submitFeedback('bug', bugReport, () => setBugReport('')); }}>
               <div className="feedback-heading"><Bug className="icon" /><strong>Report a bug</strong></div>
               <textarea value={bugReport} onChange={(event) => setBugReport(event.target.value)} placeholder="What happened? Include the mode and equation if useful." rows={4} />
-              <button type="submit">Save bug report <ArrowRight className="icon" /></button>
+              <button type="submit" disabled={createFeedbackMutation.isPending}>Save bug report <ArrowRight className="icon" /></button>
             </form>
             <form className="feedback-card" onSubmit={(event) => { event.preventDefault(); void submitFeedback('suggestion', suggestion, () => setSuggestion('')); }}>
               <div className="feedback-heading"><Lightbulb className="icon" /><strong>Future suggestions</strong></div>
               <textarea value={suggestion} onChange={(event) => setSuggestion(event.target.value)} placeholder="What should Second Solution Studio learn next?" rows={4} />
-              <button type="submit">Save suggestion <ArrowRight className="icon" /></button>
+              <button type="submit" disabled={createFeedbackMutation.isPending}>Save suggestion <ArrowRight className="icon" /></button>
             </form>
           </div>
           {feedbackStatus && <p className="feedback-status" role="status">{feedbackStatus}</p>}
+          <div className="feedback-stream" aria-live="polite">
+            <div className="feedback-stream-heading">
+              <span className="landing-eyebrow">Community notes</span>
+              <span className="mono">{feedbackQuery.isFetching ? 'SYNCING' : `${feedbackEntries.length} SHARED`}</span>
+            </div>
+            {feedbackEntries.length > 0 ? feedbackEntries.map((entry) => (
+              <article className="feedback-entry" key={entry.id}>
+                <div className="feedback-entry-meta">
+                  <strong>{entry.name}</strong>
+                  <span className={`feedback-category ${entry.category}`}>{entry.category === 'bug' ? 'Bug' : 'Suggestion'}</span>
+                  <time dateTime={entry.timestamp}>{formatFeedbackTimestamp(entry.timestamp)}</time>
+                </div>
+                <p>{entry.content}</p>
+              </article>
+            )) : (
+              <p className="feedback-empty">{feedbackQuery.isLoading ? 'Loading community notes…' : 'No community notes yet. Be the first to leave one.'}</p>
+            )}
+          </div>
         </section>
       </main>
 

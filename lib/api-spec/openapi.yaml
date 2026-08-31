@@ -12,6 +12,8 @@ tags:
     description: Health operations
   - name: validation
     description: Mathematical expression validation
+  - name: feedback
+    description: Landing page suggestions and bug reports
 paths:
   /healthz:
     get:
@@ -47,6 +49,57 @@ paths:
                 $ref: "#/components/schemas/EquationValidationResult"
         "400":
           description: Malformed request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /feedback:
+    get:
+      operationId: listFeedback
+      tags: [feedback]
+      summary: List community feedback
+      description: Returns the latest suggestions and bug reports shared on the landing page.
+      responses:
+        "200":
+          description: Community feedback entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Feedback"
+        "503":
+          description: Feedback storage is temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createFeedback
+      tags: [feedback]
+      summary: Submit community feedback
+      description: Stores a named suggestion or bug report.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackInput"
+      responses:
+        "201":
+          description: Stored feedback entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Feedback"
+        "400":
+          description: Malformed request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Feedback storage is temporarily unavailable
           content:
             application/json:
               schema:
@@ -122,4 +175,44 @@ components:
           type: string
       required:
         - error
+    Feedback:
+      type: object
+      properties:
+        id:
+          type: number
+          format: int32
+        name:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        category:
+          type: string
+          enum: [bug, suggestion]
+        content:
+          type: string
+      required:
+        - id
+        - name
+        - timestamp
+        - category
+        - content
+    FeedbackInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        category:
+          type: string
+          enum: [bug, suggestion]
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      required:
+        - name
+        - category
+        - content
 

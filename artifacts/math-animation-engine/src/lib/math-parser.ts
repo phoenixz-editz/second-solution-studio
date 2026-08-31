@@ -116,8 +116,8 @@ export function detectSmartMode(input: string): ResolvedStudioMode {
   if ((lines.length > 1 && lines.every((line) => Boolean(parsePointPair(line)))) || /\)\s*[,;\n]\s*\(/.test(normalized)) return 'points';
   // A three-component tuple is a vector when it is static and a parametric
   // curve when one of its coordinates is driven by t/u/theta.
-  if (pair && hasPair && pair.length === 3) return hasTime ? 'parametric' : 'vector';
-  if (pair && (hasNamedParametricPair || hasTime)) return 'parametric';
+  if (pair && hasPair && pair.length === 3) return hasTime ? 'parametric3d' : 'vector';
+  if (pair && (hasNamedParametricPair || hasTime)) return pair.length === 3 ? 'parametric3d' : 'parametric';
   if (hasSpatialVariables) return 'implicit3d';
   if (equality && !/^\s*[xy]\s*$/i.test(equality[1]) && /\bx\b/i.test(renderSource) && /\by\b/i.test(renderSource)) return 'implicit';
   if (/\bx\b/i.test(renderSource) && /\by\b/i.test(renderSource)) return 'implicit';
@@ -281,7 +281,7 @@ export function splitEquationExpressions(input: string, mode: StudioMode) {
   if (mode === 'points') return [stripped];
   if (splitProgramStatements(stripped).helpers.length > 0) return [stripped];
 
-  if (mode === 'parametric') {
+  if (mode === 'parametric' || mode === 'parametric3d') {
     if (/[;\n]/.test(stripped)) {
       return splitTopLevel(stripped, new Set([';', '\n'])).flatMap((part) =>
         part.trim().startsWith('(') ? splitTopLevel(part, new Set([','])) : [part],
@@ -355,7 +355,7 @@ export function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEv
       const points = parseManualPoints(input);
       return points.length >= 2 ? { kind: 'points', points } : null;
     }
-    if (mode === 'parametric' || mode === 'vector') {
+    if (mode === 'parametric' || mode === 'parametric3d' || mode === 'vector') {
       const parts = splitPair(input);
       if (!parts) return null;
       return mode === 'vector'
@@ -423,7 +423,7 @@ export function validateEquationLocally(equation: string, mode: StudioMode): Loc
       mode: resolvedMode,
       animatable: valid && hasTimeVariable,
       hasTimeVariable,
-      supports2dFallback: resolvedMode !== 'implicit3d' || normalized.includes('x') && normalized.includes('y'),
+      supports2dFallback: resolvedMode !== 'implicit3d' && resolvedMode !== 'parametric3d' || normalized.includes('x') && normalized.includes('y'),
       verificationStatus: valid ? (hasTimeVariable ? 'dynamic' : 'static') : 'invalid',
       verificationMessage: valid
         ? hasTimeVariable ? 'Local validation active. Dynamic coordinates ready.' : 'Local validation active. Static plot ready.'

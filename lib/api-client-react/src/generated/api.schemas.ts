@@ -73,3 +73,41 @@ export interface ErrorResponse {
   error: string;
 }
 
+export type FeedbackCategory = typeof FeedbackCategory[keyof typeof FeedbackCategory];
+
+
+export const FeedbackCategory = {
+  bug: 'bug',
+  suggestion: 'suggestion',
+} as const;
+
+export interface Feedback {
+  id: number;
+  name: string;
+  timestamp: string;
+  category: FeedbackCategory;
+  content: string;
+}
+
+export type FeedbackInputCategory = typeof FeedbackInputCategory[keyof typeof FeedbackInputCategory];
+
+
+export const FeedbackInputCategory = {
+  bug: 'bug',
+  suggestion: 'suggestion',
+} as const;
+
+export interface FeedbackInput {
+  /**
+     * @minLength 1
+     * @maxLength 80
+     */
+  name: string;
+  category: FeedbackInputCategory;
+  /**
+     * @minLength 1
+     * @maxLength 2000
+     */
+  content: string;
+}
+

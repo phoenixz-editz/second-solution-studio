@@ -44,3 +44,42 @@ export const ValidateEquationResponse = zod.object({
 })
 
 
+/**
+ * Returns the latest suggestions and bug reports shared on the landing page.
+ * @summary List community feedback
+ */
+export const ListFeedbackResponseItem = zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "timestamp": zod.coerce.date(),
+  "category": zod.enum(['bug', 'suggestion']),
+  "content": zod.string()
+})
+export const ListFeedbackResponse = zod.array(ListFeedbackResponseItem)
+
+
+/**
+ * Stores a named suggestion or bug report.
+ * @summary Submit community feedback
+ */
+export const createFeedbackBodyNameMax = 80;
+
+export const createFeedbackBodyContentMax = 2000;
+
+
+
+export const CreateFeedbackBody = zod.object({
+  "name": zod.string().min(1).max(createFeedbackBodyNameMax),
+  "category": zod.enum(['bug', 'suggestion']),
+  "content": zod.string().min(1).max(createFeedbackBodyContentMax)
+})
+
+export const CreateFeedbackResponse = zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "timestamp": zod.coerce.date(),
+  "category": zod.enum(['bug', 'suggestion']),
+  "content": zod.string()
+})
+
+

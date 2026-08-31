@@ -187,7 +187,7 @@ function easeInOutCubic(value: number) {
 
 function detectSmartRange(equation: string, mode: StudioMode): GraphRange {
   const input = normalizeForPreview(equation).toLowerCase();
-  if (mode === 'parametric') {
+  if (mode === 'parametric' || mode === 'parametric3d') {
     const isSpiral = /(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(input);
     return { xMin: -10, xMax: 10, tMin: 0, tMax: isSpiral ? 10 : 2 * Math.PI };
   }
@@ -452,7 +452,11 @@ const SESSION_STORAGE_KEY = 'second-solution-studio-session-v1';
 const DEFAULT_EQUATION = 'sin(x + t) * exp(-0.08 * x^2)';
 
 function isStudioMode(value: unknown): value is StudioMode {
-  return ['auto', 'function', 'parametric', 'implicit', 'implicit3d', 'polar', 'vector', 'piecewise', 'points'].includes(String(value));
+  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'polar', 'vector', 'piecewise', 'points'].includes(String(value));
+}
+
+function isStudioTheme(value: unknown): value is StudioTheme {
+  return value === 'light' || value === 'dark' || value === 'neon';
 }
 
 function finiteNumber(value: unknown, fallback: number) {
@@ -468,7 +472,7 @@ const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
 
 function smartPatternLabel(equation: string, mode: StudioMode) {
   const input = normalizeForPreview(equation).toLowerCase();
-  if (mode === 'parametric') return /t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(input) ? 'Spiral' : 'Parametric pattern';
+  if (mode === 'parametric' || mode === 'parametric3d') return /t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(input) ? 'Spiral' : 'Parametric pattern';
   if (mode === 'polar') return 'Polar field';
   if (mode === 'vector') return 'Direction field';
   if (mode === 'piecewise') return 'Piecewise function';
@@ -507,12 +511,16 @@ const presets: Array<{ equation: string; label: string; mode: StudioMode; symbol
   { equation: '(-y, x)', label: 'Orbit field', mode: 'vector', symbol: '↗' },
   { equation: 'x < 0 ? sin(x) : cos(x)', label: 'Split wave', mode: 'piecewise', symbol: '⌁' },
   { equation: '(1, 1)\n(2, 4)\n(3, 9)\n(4, 16)', label: 'Point trail', mode: 'points', symbol: '⋮' },
+  { equation: '[2 * cos(t)^3, 2 * sin(t)^3, 1.4 * sin(3 * t)]', label: '3D Rose Surface', mode: 'parametric3d', symbol: '✿' },
+  { equation: 'x^2 + y^2 + z^2 + 2*x*y*z = 1', label: '3D Heart Solid', mode: 'implicit3d', symbol: '♥' },
+  { equation: 'z = x^2 - y^2', label: 'Hyperbolic Paraboloid', mode: 'implicit3d', symbol: '⌁' },
 ];
 
 const modeDetails: Record<StudioMode, { title: string; helper: string; placeholder: string }> = {
   auto: { title: 'Auto / Smart', helper: 'detect from variables', placeholder: 'Try any equation, curve, field, or point set' },
   function: { title: 'Function', helper: 'y = f(x, t)', placeholder: 'sin(x + t) / (1 + 0.2x²)' },
   parametric: { title: 'Parametric', helper: 'x(t), y(t)', placeholder: 'cos(t), sin(t)' },
+  parametric3d: { title: '3D Parametric', helper: 'x(t), y(t), z(t)', placeholder: '[cos(t), sin(t), 0.4t]' },
   implicit: { title: 'Implicit', helper: 'F(x, y) = 0', placeholder: 'x² + y² = 4' },
   implicit3d: { title: '3D Implicit', helper: 'F(x, y, z) = 0', placeholder: 'x² + y² + z² = 4' },
   polar: { title: 'Polar', helper: 'r = f(θ, t)', placeholder: '4 * cos(3 * theta)' },
@@ -1109,6 +1117,66 @@ function GraphCanvas({
 
   useEffect(() => {
     const group = threeSurfaceGroupRef.current;
+    if (mode !== 'parametric3d' || evaluator?.kind !== 'parametric' || !evaluator.z || !group) return;
+
+    const geometry = new THREE.BufferGeometry();
+    const positions: number[] = [];
+    const sampleCount = 720;
+    const phase = progress * Math.PI * 2 * speed;
+    for (let index = 0; index <= sampleCount; index += 1) {
+      const amount = index / sampleCount;
+      const parameter = range.tMin + amount * (range.tMax - range.tMin);
+      const scope = {
+        x: 0,
+        y: 0,
+        z: 0,
+        t: parameter,
+        u: parameter,
+        theta: parameter,
+        v: phase,
+        r: phase,
+        phi: phase,
+        a: phase,
+        b: speed,
+      };
+      try {
+        const x = Number(evaluator.x.evaluate(scope));
+        const y = Number(evaluator.y.evaluate(scope));
+        const z = Number(evaluator.z.evaluate(scope));
+        if ([x, y, z].every((value) => Number.isFinite(value) && Math.abs(value) < 100)) {
+          positions.push(x, y, z);
+        }
+      } catch {
+        // Invalid samples are omitted; the projected fallback reports health.
+      }
+    }
+    if (positions.length < 6) {
+      geometry.dispose();
+      return;
+    }
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeBoundingSphere();
+    const line = new THREE.Line(
+      geometry,
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.94 }),
+    );
+    group.add(line);
+    threeSurfaceGeometryRef.current = geometry;
+    threeSurfaceReadyRef.current = true;
+    onRenderStart();
+    onRenderStatus('ready');
+
+    return () => {
+      group.remove(line);
+      geometry.dispose();
+      line.material.dispose();
+      if (threeSurfaceGeometryRef.current === geometry) threeSurfaceGeometryRef.current = null;
+      threeSurfaceReadyRef.current = false;
+    };
+  }, [color, evaluator, mode, onRenderStart, onRenderStatus, progress, range, speed]);
+
+  useEffect(() => {
+    const group = threeSurfaceGroupRef.current;
     const disposeSurface = () => {
       group?.traverse((object) => {
         const mesh = object as THREE.Mesh;
@@ -1278,7 +1346,7 @@ function GraphCanvas({
       if (frameCacheRef.current.size === 0) frameCacheRef.current.set(0, cachedFrame);
     }
     const renderProgress = progress;
-    const isParametricSpiral = mode === 'parametric'
+    const isParametricSpiral = (mode === 'parametric' || mode === 'parametric3d')
       && /(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(normalizedEquation);
     const isFunctionLike = mode === 'function' || mode === 'piecewise';
     const phase = cachedFrame.phase;
@@ -1350,12 +1418,13 @@ function GraphCanvas({
     const drawProgress = easeInOutCubic(renderProgress);
 
     ctx.clearRect(0, 0, w, h);
-    const isThreeDimensional = mode === 'implicit3d';
-    if (!isThreeDimensional) {
+    const isThreeDimensional = mode === 'implicit3d' || mode === 'parametric3d';
+    const useProjectedFallback = isThreeDimensional && !threeSceneRef.current;
+    if (!isThreeDimensional || useProjectedFallback) {
       ctx.fillStyle = '#171a24';
       ctx.fillRect(0, 0, w, h);
     }
-    if (showGrid && !isThreeDimensional) {
+    if (showGrid && (!isThreeDimensional || useProjectedFallback)) {
       ctx.lineWidth = 1;
       ctx.strokeStyle = 'rgba(221, 217, 208, 0.075)';
        const gridStep = Math.max(14, scale * gridDensity);
@@ -1372,7 +1441,7 @@ function GraphCanvas({
         ctx.stroke();
       }
     }
-    if (showAxes && !isThreeDimensional) {
+    if (showAxes && (!isThreeDimensional || useProjectedFallback)) {
       ctx.lineWidth = 1;
       ctx.strokeStyle = 'rgba(221, 217, 208, 0.26)';
       ctx.beginPath();
@@ -1394,7 +1463,7 @@ function GraphCanvas({
       const sampleCount = isFunctionLike ? 1000 : mode === 'polar' ? 900 : 650;
       for (let i = 0; i <= sampleCount; i += 1) {
         const normalized = i / sampleCount;
-        if ((isFunctionLike || mode === 'parametric' || mode === 'polar') && normalized > drawProgress) break;
+        if ((isFunctionLike || mode === 'parametric' || mode === 'parametric3d' || mode === 'polar') && normalized > drawProgress) break;
         const u = isFunctionLike
            ? viewportRange.xMin + normalized * (viewportRange.xMax - viewportRange.xMin)
           : mode === 'polar'
@@ -1874,7 +1943,7 @@ function GraphCanvas({
        else renderImplicitContour(phase);
     } else if (mode === 'implicit3d' && evaluator?.kind === 'implicit' && !threeSceneRef.current) {
       renderImplicit3dFallback();
-    } else if (evaluator && mode !== 'implicit3d') {
+    } else if (evaluator && (!isThreeDimensional || useProjectedFallback)) {
       if (cachedFrame.line.length > 0) {
         if (showTrail) {
           ctx.shadowBlur = 0;
@@ -1901,12 +1970,12 @@ function GraphCanvas({
       trace((u) => [(1.45 + 0.12 * Math.sin(phase)) * Math.cos(u), (1.45 + 0.12 * Math.sin(phase)) * Math.sin(u)], '#ff8b6d', 1.1);
       ctx.restore();
     }
-    if (evaluator && evaluator.kind !== 'points' && evaluator.kind !== 'vector' && mode !== 'implicit3d') {
+    if (evaluator && evaluator.kind !== 'points' && evaluator.kind !== 'vector' && (!isThreeDimensional || useProjectedFallback)) {
       ctx.fillStyle = 'rgba(199, 243, 107, .9)';
       ctx.beginPath();
        const markerParameter = isFunctionLike
          ? viewportRange.xMin + drawProgress * (viewportRange.xMax - viewportRange.xMin)
-        : mode === 'parametric'
+         : mode === 'parametric' || mode === 'parametric3d'
           ? drawProgress * Math.PI * 7 - Math.PI * 3.5
           : mode === 'polar'
             ? drawProgress * Math.PI * 2
@@ -1948,12 +2017,12 @@ function GraphCanvas({
     pixelVerificationFramesRef.current = hasNonEmptyPixels
       ? pixelVerificationFramesRef.current + 1
       : 0;
-    if (mode === 'implicit3d' && evaluator?.kind === 'implicit') {
+    if (isThreeDimensional && evaluator?.kind === 'implicit') {
       // The WebGL surface owns the 3D draw path; the transparent 2D layer
       // must not mark a valid volumetric render as an empty XY slice.
       geometrySamples = threeSurfaceReadyRef.current ? 1 : 0;
     }
-    if (evaluator && mode !== 'implicit3d') {
+    if (evaluator && (!isThreeDimensional || useProjectedFallback)) {
       if (geometrySamples === 0 || pixelVerificationFramesRef.current === 0) {
         renderHealthFramesRef.current += 1;
         if (renderHealthFramesRef.current >= 4 && !healthReportedRef.current) {
@@ -2018,7 +2087,8 @@ function MainStudio() {
   const [theme, setTheme] = useState<StudioTheme>(() => {
     try {
       if (typeof window === 'undefined') return 'dark';
-      return (window.localStorage.getItem('second-solution-theme') as StudioTheme) || 'dark';
+      const storedTheme = window.localStorage.getItem('second-solution-theme');
+      return isStudioTheme(storedTheme) ? storedTheme : 'dark';
     } catch {
       return 'dark';
     }
@@ -2110,8 +2180,10 @@ function MainStudio() {
     const hasLaunchScene = launchParams.has('equation');
     if (hasLaunchScene) {
       try {
-        localStorage.removeItem('second-solution-theme');
-        localStorage.removeItem('second-solution-history');
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem('second-solution-theme');
+          window.localStorage.removeItem('second-solution-history');
+        }
       } catch {
         // Legacy values are best-effort migration inputs only.
       }
@@ -2142,7 +2214,7 @@ function MainStudio() {
         if (typeof saved.activeLayerId === 'number') setActiveLayerId(saved.activeLayerId);
         if (saved.theme === 'light' || saved.theme === 'dark' || saved.theme === 'neon') setTheme(saved.theme);
         if (typeof saved.playing === 'boolean') setPlaying(saved.playing);
-        if (typeof saved.progress === 'number') setProgress(Math.min(1, Math.max(0, saved.progress)));
+         setProgress(Math.min(1, Math.max(0, finiteNumber(saved.progress, 0))));
         if (typeof saved.autoRange === 'boolean') setAutoRange(saved.autoRange);
         setManualXMin(finiteNumber(saved.manualXMin, -10));
         setManualXMax(finiteNumber(saved.manualXMax, 10));
@@ -2165,11 +2237,20 @@ function MainStudio() {
         if (saved.fps === 30 || saved.fps === 60) setFps(saved.fps);
         setPageZoom(clampPageZoom(finiteNumber(saved.pageZoom, 1)));
         setGraphZoom(Math.min(2.5, Math.max(0.5, finiteNumber(saved.graphZoom, 1))));
-        if (Array.isArray(saved.history)) setHistory(saved.history.slice(0, 8));
+         if (Array.isArray(saved.history)) {
+           setHistory(saved.history.filter((item) => (
+             Boolean(item)
+             && typeof item.equation === 'string'
+             && isStudioMode(item.mode)
+             && typeof item.at === 'number'
+           )).slice(0, 8));
+         }
       }
       try {
-        localStorage.removeItem('second-solution-theme');
-        localStorage.removeItem('second-solution-history');
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem('second-solution-theme');
+          window.localStorage.removeItem('second-solution-history');
+        }
       } catch {
         // Legacy values are best-effort migration inputs only.
       }
@@ -2252,8 +2333,12 @@ function MainStudio() {
   );
   const ensureAudioEngine = useCallback(async () => {
     if (audioEngineRef.current) {
-      if (audioEngineRef.current.context.state === 'suspended') {
-        await audioEngineRef.current.context.resume();
+      try {
+        if (audioEngineRef.current.context.state === 'suspended') {
+          await audioEngineRef.current.context.resume();
+        }
+      } catch {
+        return null;
       }
       return audioEngineRef.current;
     }
@@ -2340,10 +2425,14 @@ function MainStudio() {
       // Put the pitch cue and beat on the same audio-clock timestamp so the
       // visual extrema and the rhythmic accent stay locked together.
       const scheduledAt = now + 0.012;
-      scheduleAudioTone(engine, AUDIO_MIN_HZ + normalizedY * (AUDIO_MAX_HZ - AUDIO_MIN_HZ), 0.085, 0.12, scheduledAt);
-      if (changedDirection || fixedBeat) {
-        scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72, scheduledAt);
-        audioLastBeatTimeRef.current = now;
+       try {
+         scheduleAudioTone(engine, AUDIO_MIN_HZ + normalizedY * (AUDIO_MAX_HZ - AUDIO_MIN_HZ), 0.085, 0.12, scheduledAt);
+         if (changedDirection || fixedBeat) {
+           scheduleAudioBeat(engine, changedDirection ? 1.25 : 0.72, scheduledAt);
+           audioLastBeatTimeRef.current = now;
+         }
+       } catch {
+         // Web Audio is progressive enhancement and must not interrupt rendering.
       }
     }
     if (direction !== 0) audioLastDirectionRef.current = direction;
@@ -2405,6 +2494,7 @@ function MainStudio() {
   }, [equation, mode, resolvedMode]);
 
   useEffect(() => {
+    if (typeof document === 'undefined') return;
     document.title = 'Second Solution Studio — Visualize Mathematics Like Never Before';
   }, []);
 
@@ -2555,7 +2645,9 @@ function MainStudio() {
     const engine = audioEngineRef.current;
     if (engine) {
       engine.master.gain.setTargetAtTime(nextEnabled ? 0.72 : 0, engine.context.currentTime, 0.025);
-      if (nextEnabled && engine.context.state === 'suspended') void engine.context.resume();
+      if (nextEnabled && engine.context.state === 'suspended') {
+        void engine.context.resume().catch(() => setTopNotice('Audio synthesis is unavailable in this browser'));
+      }
     } else if (nextEnabled) {
       void ensureAudioEngine();
     }
@@ -2654,13 +2746,19 @@ function MainStudio() {
   };
   const clearHistory = () => {
     try {
-      localStorage.removeItem('second-solution-history');
-      localStorage.removeItem('mae-history');
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem('second-solution-history');
+        window.localStorage.removeItem('mae-history');
+      }
     } catch { /* local storage is optional */ }
     setHistory([]);
   };
 
   const downloadPng = () => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      setExportStatus('PNG export is not available outside a browser');
+      return;
+    }
     const canvases = [
       ...Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.webgl-canvas') ?? []),
       ...Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.graph-canvas') ?? []),
@@ -2690,8 +2788,14 @@ function MainStudio() {
     }
     const link = document.createElement('a');
     link.download = `${filename.trim().replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || filenameFromEquation(renderEquation)}.png`;
-    link.href = exportCanvas.toDataURL('image/png');
-    link.click();
+    try {
+      link.href = exportCanvas.toDataURL('image/png');
+      link.click();
+    } catch {
+      setExportStatus('PNG export is not supported in this browser');
+      window.setTimeout(() => setExportStatus(''), 2500);
+      return;
+    }
     setExportStatus('PNG frame saved');
     window.setTimeout(() => setExportStatus(''), 2500);
   };
@@ -2705,6 +2809,7 @@ function MainStudio() {
       || typeof HTMLCanvasElement === 'undefined'
       || typeof MediaRecorder === 'undefined'
       || typeof MediaStream === 'undefined'
+      || typeof MediaRecorder.isTypeSupported !== 'function'
     ) {
       setExportStatus('HD video capture is not supported here');
       return;
@@ -2779,10 +2884,18 @@ function MainStudio() {
       window.setTimeout(() => setExportStatus(''), 3000);
       return;
     }
-    const stream = new MediaStream([
-      ...videoStream.getVideoTracks(),
-      audioTrack,
-    ]);
+    let stream: MediaStream;
+    try {
+      stream = new MediaStream([
+        ...videoStream.getVideoTracks(),
+        audioTrack,
+      ]);
+    } catch {
+      videoStream.getTracks().forEach((track) => track.stop());
+      setExportStatus('HD video capture is not supported here');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
     const videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
     const selectedMimeType = [
       'video/mp4;codecs=avc1.640028,mp4a.40.2',
@@ -2942,6 +3055,7 @@ function MainStudio() {
           </div>
           <button className="icon-btn" type="button" onClick={() => setTopNotice('Inspector controls are live on the right')} data-testid="button-settings" aria-label="Open studio settings"><Settings2 className="icon" /></button>
         </div>
+        <span className="creator-credit creator-credit-studio">Made by SOHAIB KHAN</span>
       </header>
       {(runtimeWarning || parserWarning) && <div className="parser-toast" role="status"><span className="status-dot" /> {runtimeWarning || parserWarning}</div>}
 

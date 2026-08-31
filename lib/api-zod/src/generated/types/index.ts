@@ -12,4 +12,8 @@ export * from './equationValidationResult';
 export * from './equationValidationResultMode';
 export * from './equationValidationResultVerificationStatus';
 export * from './errorResponse';
+export * from './feedback';
+export * from './feedbackCategory';
+export * from './feedbackInput';
+export * from './feedbackInputCategory';
 export * from './healthStatus';

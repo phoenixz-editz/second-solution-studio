@@ -4,7 +4,7 @@ import {
   type LocalValidationResult,
 } from '@/lib/math-parser';
 
-export type StudioMode = 'auto' | 'function' | 'parametric' | 'implicit' | 'implicit3d' | 'polar' | 'vector' | 'piecewise' | 'points';
+export type StudioMode = 'auto' | 'function' | 'parametric' | 'parametric3d' | 'implicit' | 'implicit3d' | 'polar' | 'vector' | 'piecewise' | 'points';
 
 export function useEquationValidator(equation: string, mode: StudioMode) {
   const workerRef = useRef<Worker | null>(null);
@@ -16,11 +16,17 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof Worker === 'undefined') return;
-    const worker = new Worker(
-      new URL('../workers/math-validation.worker.ts', import.meta.url),
-      { type: 'module' },
-    );
-    workerRef.current = worker;
+    let worker: Worker;
+    try {
+      worker = new Worker(
+        new URL('../workers/math-validation.worker.ts', import.meta.url),
+        { type: 'module' },
+      );
+      workerRef.current = worker;
+    } catch {
+      workerRef.current = null;
+      return;
+    }
     return () => {
       worker.terminate();
       workerRef.current = null;
@@ -28,6 +34,7 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
   }, []);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     const trimmed = equation.trim();
     const requestId = ++requestIdRef.current;
     setIsPending(Boolean(trimmed));
@@ -38,9 +45,15 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
     const timer = window.setTimeout(() => {
       const worker = workerRef.current;
       if (!worker) {
-        setValidatedKey(`${mode}:${trimmed}`);
-        setData(validateEquationLocally(trimmed, mode));
-        setIsPending(false);
+        try {
+          setValidatedKey(`${mode}:${trimmed}`);
+          setData(validateEquationLocally(trimmed, mode));
+        } catch {
+          setData(undefined);
+          setIsError(true);
+        } finally {
+          setIsPending(false);
+        }
         return;
       }
 
@@ -55,14 +68,23 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
       const handleError = () => {
         if (requestId !== requestIdRef.current) return;
         worker.removeEventListener('message', handleMessage);
-        setData(validateEquationLocally(trimmed, mode));
+        try {
+          setData(validateEquationLocally(trimmed, mode));
+        } catch {
+          setData(undefined);
+          setIsError(true);
+        }
         setValidatedKey(`${mode}:${trimmed}`);
         setIsPending(false);
         setIsError(false);
       };
       worker.addEventListener('message', handleMessage);
       worker.addEventListener('error', handleError, { once: true });
-      worker.postMessage({ id: requestId, equation: trimmed, mode });
+      try {
+        worker.postMessage({ id: requestId, equation: trimmed, mode });
+      } catch {
+        handleError();
+      }
     }, 300);
     return () => window.clearTimeout(timer);
   }, [equation, mode]);

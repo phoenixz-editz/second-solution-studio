@@ -4,6 +4,7 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from 'react';
+import { clearStoredSession } from '@/lib/session-storage';
 
 export interface ErrorFallbackProps {
   error: Error;
@@ -36,6 +37,15 @@ function toError(value: unknown): Error {
 }
 
 function DefaultFallback({ error, resetError }: ErrorFallbackProps) {
+  const resetApplicationState = () => {
+    clearStoredSession('second-solution-studio-session-v1');
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+      return;
+    }
+    resetError();
+  };
+
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-gray-50 p-6">
       <div className="max-w-lg w-full text-center">
@@ -59,6 +69,13 @@ function DefaultFallback({ error, resetError }: ErrorFallbackProps) {
         >
           Try again
         </button>
+        <button
+          type="button"
+          onClick={resetApplicationState}
+          className="mt-3 rounded border border-gray-300 bg-white px-4 py-2 text-sm text-gray-900 hover:bg-gray-100"
+        >
+          Reset Application State
+        </button>
       </div>
     </div>
   );
@@ -75,10 +92,14 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo): void {
+    const normalizedError = toError(error);
     console.error(
       'ErrorBoundary caught an error:',
-      toError(error),
-      info.componentStack,
+      {
+        error: normalizedError,
+        stack: normalizedError.stack,
+        componentStack: info.componentStack,
+      },
     );
   }
 
