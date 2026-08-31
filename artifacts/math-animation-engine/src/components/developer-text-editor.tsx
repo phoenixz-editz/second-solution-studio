@@ -91,6 +91,8 @@ export function DeveloperTextEditor({ rootRef, isDeveloper }: DeveloperTextEdito
   const [confirming, setConfirming] = useState(false);
   const [status, setStatus] = useState('');
   const overridesRef = useRef(overrides);
+  const optimisticOverridesRef = useRef(new Map<string, string>());
+  const editingNodeRef = useRef<Node | null>(null);
   overridesRef.current = overrides;
 
   const serverOverrides = useMemo(() => {
@@ -100,6 +102,20 @@ export function DeveloperTextEditor({ rootRef, isDeveloper }: DeveloperTextEdito
     }
     return next;
   }, [contentQuery.data]);
+
+  const localOverrides = useMemo(() => {
+    const next = new Map<string, string>();
+    try {
+      const raw = window.localStorage.getItem('second-solution-studio-content');
+      const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      Object.entries(parsed).forEach(([key, value]) => {
+        if (typeof value === 'string') next.set(key, value);
+      });
+    } catch {
+      // Browser storage is an optimistic fallback only.
+    }
+    return next;
+  }, []);
 
   const applyOverrides = useCallback(() => {
     const root = rootRef.current;
@@ -119,8 +135,11 @@ export function DeveloperTextEditor({ rootRef, isDeveloper }: DeveloperTextEdito
   }, [rootRef]);
 
   useEffect(() => {
-    setOverrides(serverOverrides);
-  }, [serverOverrides]);
+    const merged = new Map(serverOverrides);
+    localOverrides.forEach((value, key) => merged.set(key, value));
+    optimisticOverridesRef.current.forEach((value, key) => merged.set(key, value));
+    setOverrides(merged);
+  }, [localOverrides, serverOverrides]);
 
   useEffect(() => {
     applyOverrides();
@@ -153,6 +172,7 @@ export function DeveloperTextEditor({ rootRef, isDeveloper }: DeveloperTextEdito
     event.preventDefault();
     event.stopPropagation();
     const rect = textRect(node);
+    editingNodeRef.current = node;
     setEditing({ key, value: node.nodeValue ?? '', ...rect });
     setDraft(node.nodeValue ?? '');
     setStatus('');
@@ -172,30 +192,45 @@ export function DeveloperTextEditor({ rootRef, isDeveloper }: DeveloperTextEdito
 
   const saveEdit = async () => {
     if (!editing || !draft.trim()) return;
+    const nextText = draft.trim();
+    if (editingNodeRef.current) editingNodeRef.current.nodeValue = nextText;
+    optimisticOverridesRef.current.set(editing.key, nextText);
+    setOverrides((current) => new Map(current).set(editing.key, nextText));
+    try {
+      const raw = window.localStorage.getItem('second-solution-studio-content');
+      const localContent = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      localContent[editing.key] = nextText;
+      window.localStorage.setItem('second-solution-studio-content', JSON.stringify(localContent));
+    } catch {
+      // The shared save below still provides persistence when browser storage is restricted.
+    }
     setStatus('Saving shared copy…');
     try {
       const saved = await updateContentMutation.mutateAsync({
         data: {
           key: editing.key,
-          text: draft,
+          text: nextText,
           developerEmail: DEVELOPER_EMAIL,
           developerPassword: DEVELOPER_PASSWORD,
         },
       });
       setOverrides((current) => new Map(current).set(saved.key, saved.text));
+      optimisticOverridesRef.current.set(saved.key, saved.text);
       await queryClient.invalidateQueries({ queryKey: getListStudioContentQueryKey() });
       setConfirming(false);
       setEditing(null);
+      editingNodeRef.current = null;
       setStatus('Saved for every Studio visitor.');
     } catch {
       setConfirming(false);
-      setStatus('Could not save this change. Please try again.');
+      setStatus('Could not save this change. The local copy is kept for this browser.');
     }
   };
 
   const cancelEdit = () => {
     setConfirming(false);
     setEditing(null);
+    editingNodeRef.current = null;
     setDraft('');
   };
 

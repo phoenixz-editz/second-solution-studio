@@ -35,6 +35,7 @@ import { ErrorBoundary } from '@/components/error-boundary';
 import { LandingPage } from '@/components/landing-page';
 import { DEVELOPER_EMAIL, DEVELOPER_PASSWORD, DeveloperAccessSequence } from '@/components/developer-access-form';
 import { DeveloperTextEditor } from '@/components/developer-text-editor';
+import { DeveloperAiAssistant, type AssistantChatMessage, type AssistantPanel, type DiagnosticItem } from '@/components/developer-ai-assistant';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
@@ -2262,12 +2263,24 @@ function GraphCanvas({
     <div ref={visibilityTargetRef} className="graph-renderer">
       {isVisible && <canvas ref={webglCanvasRef} className="webgl-canvas" aria-hidden="true" />}
       <canvas ref={canvasRef} className="graph-canvas" data-testid="canvas-graph-renderer" aria-label={`Animated ${mode} graph for ${equation}`} />
+      {hoverPoint && (mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d') && (
+        <div
+          className="three-hover-tooltip"
+          style={{ left: hoverPoint.x + 14, top: hoverPoint.y + 14 }}
+          role="status"
+          data-testid="tooltip-3d-coordinate"
+        >
+          <span className="three-hover-tooltip-label">SURFACE POINT</span>
+          <strong>({hoverPoint.point.x.toFixed(2)}, {hoverPoint.point.y.toFixed(2)}, {hoverPoint.point.z.toFixed(2)})</strong>
+          <small>{mode === 'surface3d' ? 'height field' : 'implicit layer'} · drag to orbit</small>
+        </div>
+      )}
     </div>
   );
 }
 
 function MainStudio() {
-  const { isDeveloper } = useDeveloperSession();
+  const { grantDeveloperSession, isDeveloper } = useDeveloperSession();
   const [, setLocation] = useLocation();
   const studioRootRef = useRef<HTMLDivElement>(null);
   const launchParams = useMemo(
@@ -2328,6 +2341,17 @@ function MainStudio() {
   const [renderHealthMessage, setRenderHealthMessage] = useState('');
   const [showGraphMaker, setShowGraphMaker] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantPanel, setAssistantPanel] = useState<AssistantPanel>('overview');
+  const [assistantDiagnostics, setAssistantDiagnostics] = useState<DiagnosticItem[]>([]);
+  const [assistantDiagnosticsLoading, setAssistantDiagnosticsLoading] = useState(false);
+  const [assistantChatDraft, setAssistantChatDraft] = useState('');
+  const [assistantMessages, setAssistantMessages] = useState<AssistantChatMessage[]>([
+    { id: 'welcome', role: 'assistant', content: 'I can inspect the active equation, renderer, local scene, and authentication state without leaving this studio.' },
+  ]);
+  const [assistantPaymentStatus, setAssistantPaymentStatus] = useState<'idle' | 'connecting' | 'ready' | 'error'>('idle');
+  const [assistantPaymentMessage, setAssistantPaymentMessage] = useState('Stripe is not connected. You can connect it later from the workspace integration panel.');
+  const [assistantAuthModal, setAssistantAuthModal] = useState<'sign-in' | 'sign-up' | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       if (typeof window === 'undefined') return [];
@@ -2376,6 +2400,105 @@ function MainStudio() {
   const resolvedMode: ResolvedStudioMode = mode === 'auto' ? (localResult?.valid ? localResult.mode : localDetectedMode) : mode;
   const animationExpected = localResult?.valid ? localResult.animatable : /\b(?:t|u|theta)\b/i.test(parsedEquation);
   const details = modeDetails[mode];
+  const runAssistantDiagnostics = useCallback(async () => {
+    setAssistantDiagnosticsLoading(true);
+    setAssistantDiagnostics([]);
+    await new Promise((resolve) => window.setTimeout(resolve, 140));
+    const next: DiagnosticItem[] = [];
+    const evaluator = parserBuildGraphEvaluator(renderEquation, resolvedMode);
+    next.push({
+      id: 'equation',
+      label: 'Equation parser',
+      status: localResult?.valid && evaluator ? 'ok' : 'error',
+      detail: localResult?.valid && evaluator ? `${modeDetails[resolvedMode].title} expression compiled locally.` : localResult?.error || 'The active expression needs attention.',
+      timestamp: 'now',
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    let webglReady = false;
+    try {
+      const probe = document.createElement('canvas');
+      webglReady = Boolean(probe.getContext('webgl2') || probe.getContext('webgl'));
+    } catch {
+      webglReady = false;
+    }
+    next.push({
+      id: 'renderer',
+      label: 'Renderer health',
+      status: renderHealth === 'error' ? 'error' : renderHealth === 'ready' ? 'ok' : 'warning',
+      detail: renderHealth === 'ready' ? 'Canvas has reported a ready frame.' : renderHealthMessage || 'Renderer is still warming up or using a fallback path.',
+      timestamp: 'now',
+    });
+    next.push({
+      id: 'webgl',
+      label: 'WebGL enhancement',
+      status: webglReady ? 'ok' : 'warning',
+      detail: webglReady ? 'WebGL context available for enhanced 3D surfaces.' : 'WebGL is unavailable; the CPU canvas remains available.',
+      timestamp: 'now',
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    let localStorageReady = false;
+    try {
+      const key = '__second_solution_assistant_probe__';
+      window.localStorage.setItem(key, 'ok');
+      localStorageReady = window.localStorage.getItem(key) === 'ok';
+      window.localStorage.removeItem(key);
+    } catch {
+      localStorageReady = false;
+    }
+    next.push({
+      id: 'scene-state',
+      label: 'Local scene state',
+      status: sessionReady && localStorageReady ? 'ok' : 'warning',
+      detail: sessionReady && localStorageReady ? 'Encrypted session persistence and local storage are available.' : 'The scene is still loading or browser storage is restricted.',
+      timestamp: 'now',
+    });
+    next.push({
+      id: 'authentication',
+      label: 'Authentication',
+      status: isDeveloper ? 'ok' : 'warning',
+      detail: isDeveloper ? 'Developer session is active.' : 'Guest mode is active; protected actions can open the Clerk flow.',
+      timestamp: 'now',
+    });
+    setAssistantDiagnostics(next);
+    setAssistantDiagnosticsLoading(false);
+  }, [isDeveloper, localResult, renderEquation, renderHealth, renderHealthMessage, resolvedMode, sessionReady]);
+  const handleAssistantChat = useCallback((value: string) => {
+    const prompt = value.trim();
+    if (!prompt) return;
+    const lower = prompt.toLowerCase();
+    const response = lower.includes('3d') || lower.includes('surface')
+      ? 'For 3D surfaces, start with Auto Range and keep the active layer visible. Union, intersection, and additive blends compile into one implicit field; overlay keeps each mesh separate.'
+      : lower.includes('login') || lower.includes('auth')
+        ? 'Use Authenticated login to open the protected sign-in or sign-up flow. The local scene remains usable while you are signed out.'
+        : lower.includes('bug') || lower.includes('error')
+          ? `Run Bug check first. The current renderer is ${renderHealth}; ${localResult?.valid ? 'the active equation currently compiles.' : 'the active equation still needs parser edits.'}`
+          : lower.includes('theme') || lower.includes('color')
+            ? 'Open Customization to switch between Studio, Midnight, and Paper presets. The selected studio theme is saved with the local session.'
+            : 'I can help with parser modes, layered surfaces, local persistence, renderer fallbacks, exports, and authentication. Ask about one of those paths.';
+    setAssistantMessages((current) => [
+      ...current,
+      { id: `user-${Date.now()}`, role: 'user', content: prompt },
+      { id: `assistant-${Date.now() + 1}`, role: 'assistant', content: response },
+    ]);
+    setAssistantChatDraft('');
+  }, [localResult, renderHealth]);
+  const handleAssistantQuickAction = useCallback((action: 'bug-check' | 'payment-setup' | 'chat' | 'customization' | 'database-sync' | 'authenticated-login') => {
+    if (action === 'bug-check') void runAssistantDiagnostics();
+    if (action === 'database-sync') {
+      setTopNotice(sessionReady ? 'Local scene sync is healthy' : 'Local scene is still loading');
+      if (sessionSnapshotRef.current) void saveEncryptedJson(SESSION_STORAGE_KEY, sessionSnapshotRef.current);
+    }
+    if (action === 'payment-setup') {
+      setAssistantPaymentStatus('error');
+      setAssistantPaymentMessage('Stripe was not connected, so checkout remains disabled. Re-open the integration setup when you are ready to add billing.');
+    }
+    if (action === 'authenticated-login') setAssistantAuthModal('sign-in');
+  }, [runAssistantDiagnostics, sessionReady]);
+  const assistantThemeOptions = [
+    { id: 'dark', label: 'Studio', description: 'Dark canvas, lime signal', swatch: '#202635', accent: '#c7f36b' },
+    { id: 'neon', label: 'Midnight', description: 'Electric contrast for 3D work', swatch: '#101728', accent: '#72d8ff' },
+    { id: 'light', label: 'Paper', description: 'Quiet surface, coral ink', swatch: '#f5f0e7', accent: '#ff8b6d' },
+  ];
   useEffect(() => {
     let cancelled = false;
     const hasLaunchScene = launchParams.has('equation');
@@ -2737,11 +2860,21 @@ function MainStudio() {
         range: detectSmartRange(layer.equation, layer.mode),
       }];
       });
-    return entries.map((entry, index) => ({
+    const coloredEntries = entries.map((entry, index) => ({
       ...entry,
       color: entries.length > 1 ? multiGraphColors[index % multiGraphColors.length] : entry.color,
     }));
-  }, [activeLayerId, activeRange, layers, resolvedMode, renderExpressions]);
+    const threeDimensionalEntries = coloredEntries.filter((entry) => entry.mode === 'implicit3d' || entry.mode === 'surface3d');
+    if (surfaceBlendMode !== 'overlay' && threeDimensionalEntries.length > 1) {
+      return [{
+        expression: combineImplicitFields(threeDimensionalEntries, surfaceBlendMode),
+        color: threeDimensionalEntries[0].color,
+        mode: 'implicit3d' as const,
+        range: threeDimensionalEntries[0].range,
+      }, ...coloredEntries.filter((entry) => entry.mode !== 'implicit3d' && entry.mode !== 'surface3d')];
+    }
+    return coloredEntries;
+  }, [activeLayerId, activeRange, layers, resolvedMode, renderExpressions, surfaceBlendMode]);
   useEffect(() => {
     if (skippedExpressionCount === 0) {
       setParserWarning('');
@@ -3347,8 +3480,6 @@ function MainStudio() {
         </div>
         <span className="creator-credit creator-credit-studio">Made by SOHAIB KHAN</span>
       </header>
-      {(runtimeWarning || parserWarning) && <div className="parser-toast" role="status"><span className="status-dot" /> {runtimeWarning || parserWarning}</div>}
-
         {showGraphMaker && (
           <div className="graph-maker-modal" role="dialog" aria-modal="true" aria-labelledby="graph-maker-title">
             <div className="graph-maker-panel">
@@ -3781,6 +3912,50 @@ function MainStudio() {
          <span className="footer-tagline">Visualize Mathematics Like Never Before</span>
          <span className="mono">LOCAL-FIRST · CPU ADAPTIVE</span>
        </footer>
+       <DeveloperAiAssistant
+         open={assistantOpen}
+         onToggle={() => setAssistantOpen(true)}
+         onClose={() => setAssistantOpen(false)}
+         activePanel={assistantPanel}
+         onPanelChange={setAssistantPanel}
+         onQuickAction={handleAssistantQuickAction}
+         isAuthenticated={isDeveloper}
+         accountLabel={isDeveloper ? 'Developer session' : 'Guest session'}
+         diagnostics={assistantDiagnostics}
+         diagnosticsLoading={assistantDiagnosticsLoading}
+         onRefreshDiagnostics={() => void runAssistantDiagnostics()}
+         messages={assistantMessages}
+         chatDraft={assistantChatDraft}
+         onChatDraftChange={setAssistantChatDraft}
+         onSendMessage={handleAssistantChat}
+         paymentStatus={assistantPaymentStatus}
+         paymentMessage={assistantPaymentMessage}
+         onPaymentSetup={() => {
+           setAssistantPaymentStatus('error');
+           setAssistantPaymentMessage('Stripe setup is not connected in this workspace. No checkout or charges were created.');
+         }}
+         themeOptions={assistantThemeOptions}
+         selectedTheme={theme}
+         onThemeChange={(themeId) => {
+           if (themeId === 'dark' || themeId === 'light' || themeId === 'neon') {
+             setTheme(themeId);
+             setTopNotice(`${themeId === 'light' ? 'Minimal Light' : themeId === 'neon' ? 'Neon Glow' : 'Dark'} theme`);
+           }
+         }}
+         onAuthenticate={(authMode) => setAssistantAuthModal(authMode)}
+       />
+       {assistantAuthModal && (
+         <AuthModalRoute
+           mode={assistantAuthModal}
+           onClose={() => setAssistantAuthModal(null)}
+           onModeChange={setAssistantAuthModal}
+           onDeveloperUnlock={() => {
+             grantDeveloperSession();
+             setAssistantAuthModal(null);
+             setAssistantPanel('auth');
+           }}
+         />
+       )}
       <DeveloperTextEditor rootRef={studioRootRef} isDeveloper={isDeveloper} />
     </div>
   );

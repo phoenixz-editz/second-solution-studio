@@ -52,6 +52,10 @@ function safeEvaluate(expression: { evaluate: (scope: Record<string, number>) =>
   }
 }
 
+function isUsableExtent(value: number) {
+  return Number.isFinite(value) && value > 0.05 && value < 100;
+}
+
 function yieldToBrowser() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
@@ -64,7 +68,7 @@ async function generateSurface(request: GenerateRequest) {
   const mode = request.mode ?? 'implicit3d';
   const expression = compileSurfaceEquation(request.equation, mode);
   const resolution = Math.max(8, Math.min(96, Math.round(request.resolution)));
-  const extent = request.extent;
+  const extent = isUsableExtent(request.extent) ? request.extent : 3.4;
   if (mode === 'surface3d') {
     const positions: number[] = [];
     const indices: number[] = [];
@@ -219,6 +223,9 @@ async function generateSurface(request: GenerateRequest) {
     await yieldToBrowser();
   }
 
+  if (vertices.length === 0 || indices.length === 0) {
+    throw new Error('The 3D field did not produce a finite surface in this viewport.');
+  }
   const response = {
     type: 'result' as const,
     id: request.id,

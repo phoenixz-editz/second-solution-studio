@@ -6,6 +6,8 @@ import {
 } from '@workspace/api-client-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { DeveloperTextEditor } from '@/components/developer-text-editor';
+import { AmbientParticles } from '@/components/ambient-particles';
+import { DeveloperAiAssistant, type AssistantChatMessage, type AssistantPanel, type DiagnosticItem } from '@/components/developer-ai-assistant';
 import {
   Aperture,
   ArrowRight,
@@ -894,6 +896,16 @@ function LandingBubbleBackground() {
         <span className="landing-liquid-highlight landing-liquid-highlight-one" />
         <span className="landing-liquid-highlight landing-liquid-highlight-two" />
       </div>
+      <AmbientParticles
+        className="landing-ambient-particles"
+        particleCount={46}
+        nodeColor="#f7f0df"
+        lineColor="#c7f36b"
+        nodeOpacity={0.34}
+        lineOpacity={0.14}
+        speed={0.3}
+        connectionDistance={118}
+      />
       <div className="landing-bubble-wash" />
     </div>
   );
@@ -913,6 +925,15 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
   const [feedbackEmail, setFeedbackEmail] = useState('');
   const [feedbackErrors, setFeedbackErrors] = useState({ name: false, email: false, message: false });
   const [feedbackStatus, setFeedbackStatus] = useState('');
+  const [landingTheme, setLandingTheme] = useState<'dark' | 'light' | 'neon'>('dark');
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantPanel, setAssistantPanel] = useState<AssistantPanel>('overview');
+  const [assistantDiagnostics, setAssistantDiagnostics] = useState<DiagnosticItem[]>([]);
+  const [assistantDiagnosticsLoading, setAssistantDiagnosticsLoading] = useState(false);
+  const [assistantChatDraft, setAssistantChatDraft] = useState('');
+  const [assistantMessages, setAssistantMessages] = useState<AssistantChatMessage[]>([
+    { id: 'landing-welcome', role: 'assistant', content: 'I can help you choose a scene, check browser rendering support, or open the protected studio flow.' },
+  ]);
   const landingRootRef = useRef<HTMLDivElement>(null);
   const insightCarouselRef = useRef<HTMLDivElement>(null);
   const insightDragRef = useRef({ startX: 0, startScrollLeft: 0, dragging: false });
@@ -934,6 +955,57 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
     },
   });
   const feedbackEntries = Array.isArray(feedbackQuery.data) ? feedbackQuery.data : [];
+  const runLandingDiagnostics = async () => {
+    setAssistantDiagnosticsLoading(true);
+    setAssistantDiagnostics([]);
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+    let webglReady = false;
+    try {
+      const canvas = document.createElement('canvas');
+      webglReady = Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'));
+    } catch {
+      webglReady = false;
+    }
+    setAssistantDiagnostics([
+      { id: 'landing-preview', label: 'Landing previews', status: 'ok', detail: 'Live examples are available to open in Studio.', timestamp: 'now' },
+      { id: 'landing-webgl', label: 'WebGL enhancement', status: webglReady ? 'ok' : 'warning', detail: webglReady ? 'Browser supports enhanced preview canvases.' : 'Previews can use their CPU-safe path.', timestamp: 'now' },
+      { id: 'landing-feedback', label: 'Community feedback', status: feedbackQuery.isError ? 'warning' : 'ok', detail: feedbackQuery.isError ? 'Feedback service is unavailable; the landing page remains usable.' : `${feedbackEntries.length} shared notes are available.`, timestamp: 'now' },
+      { id: 'landing-auth', label: 'Authentication', status: isDeveloper ? 'ok' : 'warning', detail: isDeveloper ? 'Developer session is active.' : 'Guest mode is active; sign in when you want protected workspace actions.', timestamp: 'now' },
+    ]);
+    setAssistantDiagnosticsLoading(false);
+  };
+  const handleLandingChat = (value: string) => {
+    const prompt = value.trim();
+    if (!prompt) return;
+    const lower = prompt.toLowerCase();
+    const response = lower.includes('example') || lower.includes('scene')
+      ? 'Try the interactive examples below. Each one opens directly in the matching Studio mode.'
+      : lower.includes('login') || lower.includes('auth')
+        ? 'Use Authenticated login to open the secure sign-in or sign-up flow.'
+        : lower.includes('bug') || lower.includes('render')
+          ? 'Run Bug check to inspect preview support, WebGL, feedback connectivity, and the current session.'
+          : 'Ask me about examples, rendering support, authentication, themes, or entering the Studio.';
+    setAssistantMessages((current) => [
+      ...current,
+      { id: `landing-user-${Date.now()}`, role: 'user', content: prompt },
+      { id: `landing-assistant-${Date.now() + 1}`, role: 'assistant', content: response },
+    ]);
+    setAssistantChatDraft('');
+  };
+  const handleLandingQuickAction = (action: 'bug-check' | 'payment-setup' | 'chat' | 'customization' | 'database-sync' | 'authenticated-login') => {
+    if (action === 'bug-check') void runLandingDiagnostics();
+    if (action === 'authenticated-login') onAuth('sign-in');
+    if (action === 'database-sync') {
+      setAssistantDiagnostics([{
+        id: 'landing-local-state',
+        label: 'Landing state',
+        status: 'ok',
+        detail: 'Local browser state is ready; Studio scenes use encrypted local persistence.',
+        timestamp: 'now',
+      }]);
+      setAssistantPanel('diagnostics');
+    }
+  };
 
   const startStudio = (example?: LandingExample) => {
     onStart(example);
@@ -970,7 +1042,7 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
   };
 
   return (
-    <div ref={landingRootRef} className="landing-page">
+    <div ref={landingRootRef} className={`landing-page landing-theme-${landingTheme}`}>
       <header className="landing-nav">
         <a className="landing-brand" href="/" aria-label="Second Solution Studio home">
           <span className="landing-brand-mark"><Aperture className="icon" /></span>
@@ -1059,7 +1131,7 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
           </div>
         </section>
 
-        <LandingBubbleBackground />
+         <LandingBubbleBackground />
 
          {showLandingFeatures && <section className="landing-section" id="features">
           <div className="landing-section-heading">
@@ -1246,6 +1318,34 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
       </main>
 
       <footer className="landing-footer"><span>Second Solution Studio</span><span>Visualize Mathematics Like Never Before.</span><span className="mono">MATH / MOTION / MEANING</span></footer>
+      <DeveloperAiAssistant
+        open={assistantOpen}
+        onToggle={() => setAssistantOpen(true)}
+        onClose={() => setAssistantOpen(false)}
+        activePanel={assistantPanel}
+        onPanelChange={setAssistantPanel}
+        onQuickAction={handleLandingQuickAction}
+        isAuthenticated={isDeveloper}
+        accountLabel={isDeveloper ? 'Developer session' : 'Guest session'}
+        diagnostics={assistantDiagnostics}
+        diagnosticsLoading={assistantDiagnosticsLoading}
+        onRefreshDiagnostics={() => void runLandingDiagnostics()}
+        messages={assistantMessages}
+        chatDraft={assistantChatDraft}
+        onChatDraftChange={setAssistantChatDraft}
+        onSendMessage={handleLandingChat}
+        paymentMessage="Stripe is not connected, so checkout is disabled until a billing account is added."
+        themeOptions={[
+          { id: 'dark', label: 'Studio', description: 'Deep canvas, lime signal', swatch: '#202635', accent: '#c7f36b' },
+          { id: 'neon', label: 'Midnight', description: 'Electric contrast', swatch: '#101728', accent: '#72d8ff' },
+          { id: 'light', label: 'Paper', description: 'Quiet surface, coral ink', swatch: '#f5f0e7', accent: '#ff8b6d' },
+        ]}
+        selectedTheme={landingTheme}
+        onThemeChange={(themeId) => {
+          if (themeId === 'dark' || themeId === 'light' || themeId === 'neon') setLandingTheme(themeId);
+        }}
+        onAuthenticate={onAuth}
+      />
       <DeveloperTextEditor rootRef={landingRootRef} isDeveloper={isDeveloper} />
     </div>
   );
