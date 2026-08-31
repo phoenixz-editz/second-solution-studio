@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import {
   Activity,
   Aperture,
@@ -150,6 +150,8 @@ type AudioEngine = {
   context: AudioContext;
   master: GainNode;
   destination: MediaStreamAudioDestinationNode;
+  tracerOscillator: OscillatorNode;
+  tracerGain: GainNode;
 };
 
 function getAudioContextConstructor() {
@@ -158,27 +160,12 @@ function getAudioContextConstructor() {
     ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
 }
 
-function scheduleAudioTone(engine: AudioEngine, frequency: number, duration = 0.085, volume = 0.12, when?: number) {
-  const now = Math.max(engine.context.currentTime, when ?? engine.context.currentTime);
-  const oscillator = engine.context.createOscillator();
-  const envelope = engine.context.createGain();
-  oscillator.type = 'sine';
-  oscillator.frequency.setValueAtTime(Math.max(AUDIO_MIN_HZ, Math.min(AUDIO_MAX_HZ, frequency)), now);
-  envelope.gain.setValueAtTime(0.0001, now);
-  envelope.gain.exponentialRampToValueAtTime(volume, now + 0.012);
-  envelope.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-  oscillator.connect(envelope);
-  envelope.connect(engine.master);
-  oscillator.start(now);
-  oscillator.stop(now + duration + 0.02);
-}
-
-function scheduleAudioBeat(engine: AudioEngine, strength = 1, when?: number) {
+function scheduleAudioBeat(engine: AudioEngine, frequency: number, strength = 1, when?: number) {
   const now = Math.max(engine.context.currentTime, when ?? engine.context.currentTime);
   const oscillator = engine.context.createOscillator();
   const envelope = engine.context.createGain();
   oscillator.type = 'triangle';
-  oscillator.frequency.setValueAtTime(135, now);
+  oscillator.frequency.setValueAtTime(Math.max(70, Math.min(260, frequency)), now);
   oscillator.frequency.exponentialRampToValueAtTime(55, now + 0.12);
   envelope.gain.setValueAtTime(0.0001, now);
   envelope.gain.exponentialRampToValueAtTime(0.22 * strength, now + 0.006);
@@ -2229,7 +2216,6 @@ function MainStudio() {
   const audioLastProgressRef = useRef(-1);
   const audioLastYRef = useRef<number | null>(null);
   const audioLastDirectionRef = useRef(0);
-  const audioLastToneTimeRef = useRef(0);
   const audioLastBeatTimeRef = useRef(0);
   const audioLastBeatIndexRef = useRef(-1);
   const allowUnloadRef = useRef(false);
@@ -2420,11 +2406,19 @@ function MainStudio() {
       const context = new AudioContextConstructor();
       const master = context.createGain();
       const destination = context.createMediaStreamDestination();
+      const tracerOscillator = context.createOscillator();
+      const tracerGain = context.createGain();
       master.gain.value = audioEnabled ? 0.72 : 0;
       master.connect(context.destination);
       master.connect(destination);
+      tracerOscillator.type = 'sine';
+      tracerOscillator.frequency.value = AUDIO_MIN_HZ;
+      tracerGain.gain.value = 0.0001;
+      tracerOscillator.connect(tracerGain);
+      tracerGain.connect(master);
+      tracerOscillator.start();
       await context.resume();
-      const engine = { context, master, destination };
+      const engine = { context, master, destination, tracerOscillator, tracerGain };
       audioEngineRef.current = engine;
       return engine;
     } catch {
@@ -2433,14 +2427,15 @@ function MainStudio() {
   }, [audioEnabled]);
   const audioPosition = useCallback((currentProgress: number) => {
     if (!audioEvaluator) return { height: 0, slope: 0 };
+    const traceProgress = easeInOutCubic(currentProgress);
     const phase = currentProgress * Math.PI * 2 * speed;
-    const x = activeRange.xMin + currentProgress * (activeRange.xMax - activeRange.xMin);
-    const parameter = activeRange.tMin + currentProgress * (activeRange.tMax - activeRange.tMin);
+    const x = activeRange.xMin + traceProgress * (activeRange.xMax - activeRange.xMin);
+    const parameter = activeRange.tMin + traceProgress * (activeRange.tMax - activeRange.tMin);
     const scope = {
       x,
       y: 0,
       z: 0,
-      t: parameter,
+      t: phase,
       u: parameter,
       theta: parameter,
       v: phase,
@@ -2455,12 +2450,11 @@ function MainStudio() {
         return { height, slope: 0 };
       }
       if (audioEvaluator.kind === 'parametric') {
-        const y = Number(audioEvaluator.y.evaluate(scope)) || 0;
-        const z = audioEvaluator.z ? Number(audioEvaluator.z.evaluate(scope)) || 0 : Number.NaN;
-        return { height: Number.isFinite(z) ? z : y, slope: 0 };
+        const y = Number(audioEvaluator.y.evaluate({ ...scope, t: parameter })) || 0;
+        return { height: y, slope: 0 };
       }
       if (audioEvaluator.kind === 'polar') {
-        const radius = Number(audioEvaluator.expression.evaluate(scope)) || 0;
+        const radius = Number(audioEvaluator.expression.evaluate({ ...scope, t: phase })) || 0;
         return { height: radius * Math.sin(parameter), slope: 0 };
       }
       if (audioEvaluator.kind === 'vector') {
@@ -2469,7 +2463,7 @@ function MainStudio() {
       if (audioEvaluator.kind === 'points') {
         const points = evaluatePointSet(audioEvaluator.points, phase, speed);
         return {
-          height: points[Math.min(points.length - 1, Math.floor(currentProgress * points.length))]?.y ?? 0,
+          height: points[Math.min(points.length - 1, Math.floor(traceProgress * points.length))]?.y ?? 0,
           slope: 0,
         };
       }
@@ -2499,22 +2493,19 @@ function MainStudio() {
     audioLastProgressRef.current = -1;
     audioLastYRef.current = null;
     audioLastDirectionRef.current = 0;
-    audioLastToneTimeRef.current = 0;
     audioLastBeatTimeRef.current = 0;
     audioLastBeatIndexRef.current = -1;
   }, [audioEnabled, renderEquation, resolvedMode]);
 
-  useEffect(() => {
-    if (!audioEnabled || !playing || !audioEngineRef.current) return;
+  const syncAudioToProgress = useCallback((currentProgress: number) => {
+    if (!audioEnabled || !audioEngineRef.current) return;
     const engine = audioEngineRef.current;
-    const currentProgress = progressRef.current;
-    if (currentProgress === audioLastProgressRef.current) return;
     const position = audioPosition(currentProgress);
     const height = position.height;
     if (!Number.isFinite(height)) return;
     const previousY = audioLastYRef.current;
     const previousProgress = audioLastProgressRef.current;
-    const progressDelta = previousProgress >= 0 ? Math.max(0.001, currentProgress - previousProgress) : 0;
+    const progressDelta = previousProgress >= 0 ? currentProgress - previousProgress : 0;
     const slope = previousY === null || progressDelta === 0
       ? 0
       : Math.max(-12, Math.min(12, (height - previousY) / progressDelta));
@@ -2527,32 +2518,43 @@ function MainStudio() {
       && direction !== previousDirection;
     const beatIndex = Math.floor(Math.max(0, Math.min(1, currentProgress)) * 16);
     const fixedBeat = beatIndex > audioLastBeatIndexRef.current;
-    if (now - audioLastToneTimeRef.current > minInterval) {
-      const normalizedHeight = Math.max(0, Math.min(1, (height + 4) / 8));
-      const normalizedSlope = Math.max(-1, Math.min(1, slope / 6));
-      const frequency = AUDIO_MIN_HZ
-        + normalizedHeight * (AUDIO_MAX_HZ - AUDIO_MIN_HZ) * 0.78
-        + (normalizedSlope + 1) * 0.11 * (AUDIO_MAX_HZ - AUDIO_MIN_HZ);
-      // Keep the tone and beat on the same audio-clock timestamp so the
-      // tracer's height and motion stay locked to the rhythmic accent.
-      const scheduledAt = now + 0.012;
-      try {
-        scheduleAudioTone(engine, frequency, 0.085, 0.12, scheduledAt);
-        audioLastToneTimeRef.current = now;
-        if ((changedDirection || fixedBeat) && now - audioLastBeatTimeRef.current > minInterval) {
-          const beatStrength = Math.max(0.45, Math.min(1.35, 0.6 + Math.abs(normalizedSlope) * 0.75 + normalizedHeight * 0.35));
-          scheduleAudioBeat(engine, beatStrength, scheduledAt);
-          audioLastBeatTimeRef.current = now;
-        }
-      } catch {
-        // Web Audio is progressive enhancement and must not interrupt rendering.
+    const normalizedHeight = Math.max(0, Math.min(1, (height + 4) / 8));
+    const normalizedSlope = Math.max(-1, Math.min(1, slope / 6));
+    const frequency = AUDIO_MIN_HZ
+      + normalizedHeight * (AUDIO_MAX_HZ - AUDIO_MIN_HZ) * 0.78
+      + (normalizedSlope + 1) * 0.11 * (AUDIO_MAX_HZ - AUDIO_MIN_HZ);
+    try {
+      // The graph and this callback receive the same progress value. Updating
+      // one long-lived oscillator avoids a one-shot scheduling delay between
+      // the tracer and its pitch.
+      engine.tracerOscillator.frequency.setTargetAtTime(
+        Math.max(AUDIO_MIN_HZ, Math.min(AUDIO_MAX_HZ, frequency)),
+        now,
+        0.018,
+      );
+      engine.tracerGain.gain.setTargetAtTime(
+        playing ? 0.055 + Math.abs(normalizedSlope) * 0.035 : 0.0001,
+        now,
+        0.018,
+      );
+      if (playing && (changedDirection || fixedBeat) && now - audioLastBeatTimeRef.current > minInterval) {
+        const beatStrength = Math.max(0.45, Math.min(1.35, 0.6 + Math.abs(normalizedSlope) * 0.75 + normalizedHeight * 0.35));
+        const beatFrequency = 80 + normalizedHeight * 130 + Math.abs(normalizedSlope) * 35;
+        scheduleAudioBeat(engine, beatFrequency, beatStrength, now);
+        audioLastBeatTimeRef.current = now;
       }
+    } catch {
+      // Web Audio is progressive enhancement and must not interrupt rendering.
     }
     if (direction !== 0) audioLastDirectionRef.current = direction;
     audioLastBeatIndexRef.current = beatIndex;
     audioLastYRef.current = height;
     audioLastProgressRef.current = currentProgress;
-  }, [audioEnabled, audioPosition, playing, progress, speed]);
+  }, [audioEnabled, audioPosition, playing, speed]);
+
+  useLayoutEffect(() => {
+    syncAudioToProgress(progress);
+  }, [progress, syncAudioToProgress]);
 
   useEffect(() => {
     if (!audioEnabled || typeof window === 'undefined') return;
@@ -2649,6 +2651,7 @@ function MainStudio() {
     const tick = (now: number) => {
       const nextProgress = Math.min(1, (now - startedAt) / (duration * 1000));
       progressRef.current = nextProgress;
+      syncAudioToProgress(nextProgress);
       setProgress(nextProgress);
       if (nextProgress >= 1) {
         setPlaying(false);
@@ -2658,7 +2661,7 @@ function MainStudio() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [duration, playing, sessionReady]);
+  }, [duration, playing, sessionReady, syncAudioToProgress]);
 
   useEffect(() => {
     if (localResult?.valid && renderEquation.trim()) {
@@ -3179,7 +3182,9 @@ function MainStudio() {
             <span className="zoom-value mono">{Math.round(pageZoom * 100)}%</span>
             <button className="icon-btn" type="button" onClick={() => zoomPage(0.1)} data-testid="button-page-zoom-in" aria-label="Zoom page in"><Plus className="icon" /></button>
           </div>
-          <button className="icon-btn studio-help-btn" type="button" onClick={() => setShowGuide(true)} data-testid="button-open-help" aria-label="Open help and keyboard shortcuts" title="Help and shortcuts">?</button>
+          <button className="icon-btn studio-help-btn" type="button" onClick={() => setShowGuide(true)} data-testid="button-open-help" aria-label="Open help and keyboard shortcuts" title="Help and shortcuts">
+            <CircleHelp className="icon" />
+          </button>
           <button className="icon-btn" type="button" onClick={() => setTopNotice('Inspector controls are live on the right')} data-testid="button-settings" aria-label="Open studio settings"><Settings2 className="icon" /></button>
         </div>
         <span className="creator-credit creator-credit-studio">Made by SOHAIB KHAN</span>
