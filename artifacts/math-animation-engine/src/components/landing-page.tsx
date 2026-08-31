@@ -31,12 +31,17 @@ type LandingExample = {
   accent: string;
 };
 
+type InsightSection = {
+  heading: string;
+  copy: string;
+};
+
 type BlogInsight = {
   title: string;
   category: string;
   readTime: string;
   excerpt: string;
-  body: string;
+  body: InsightSection[];
   equation: string;
   mode: StudioMode;
   accent: string;
@@ -59,9 +64,14 @@ const insights: BlogInsight[] = [
   {
     title: 'How Fourier Transforms Make Music Visible',
     category: 'Sound & signals',
-    readTime: '6 min read',
+    readTime: '8 min read',
     excerpt: 'See how a song becomes a moving landscape of frequencies, harmonics, and rhythm.',
-    body: 'A microphone records music as a changing signal in time, but our ears also recognize its frequency structure: a fundamental pitch surrounded by harmonics. A Fourier transform decomposes that signal into sine-wave oscillators, showing how much energy lives at each frequency. The tallest peaks reveal notes and overtones; a moving spectrum shows rhythm as energy sweeping through bands. In practice, windowing a short slice of audio balances time precision against frequency precision. Animate the waveform and its spectrum together, and a recording becomes a living map of oscillators, resonance, and timbre.',
+    body: [
+      { heading: 'From time to frequency', copy: 'A microphone records amplitude x(t) over time: a one-dimensional trace that tells us what the speaker cone did at each instant. The Fourier transform asks a different question: how much of each pure sinusoid is hidden inside that trace? In its continuous form, X(f) = ∫ x(t)e^(-i2πft) dt. The magnitude |X(f)| is a spectrum, and its peaks are the frequencies carrying the most energy.' },
+      { heading: 'Harmonics reveal timbre', copy: 'A steady instrument note usually contains a fundamental frequency f plus harmonics at 2f, 3f, and beyond. The fundamental controls perceived pitch, while the relative strength of the harmonics gives a violin, voice, or square wave its character. A spectrum therefore turns “bright” or “warm” into visible energy distributions. Animate the waveform above a frequency plot to connect the repeating shape in time with the peaks it creates.' },
+      { heading: 'The FFT in practice', copy: 'Digital audio is sampled at a fixed rate, so a computer works with a finite block of N samples. The fast Fourier transform (FFT) reduces the direct O(N²) discrete transform to O(N log N) by recursively splitting even and odd samples, then combining them with rotating twiddle factors. A 1,024-sample window at 48 kHz gives bins about 46.9 Hz apart. Larger windows improve frequency resolution but blur short transients.' },
+      { heading: 'A useful workflow', copy: 'To build a live visualizer, multiply each audio slice by a Hann window to reduce edge discontinuities, run the FFT, convert magnitudes to decibels, and draw the result with logarithmic frequency spacing. Use the waveform for timing and the spectrum for tone color: kicks concentrate low energy, consonants spread energy upward, and a melody leaves moving harmonic ladders.' },
+    ],
     equation: 'sin(x + t) + 0.35 * sin(3*x - t)',
     mode: 'function',
     accent: '#c7f36b',
@@ -69,9 +79,15 @@ const insights: BlogInsight[] = [
   {
     title: 'Exploring 3D Quadric Surfaces in Real-Time',
     category: '3D geometry',
-    readTime: '8 min read',
+    readTime: '10 min read',
     excerpt: 'Rotate spheres, saddles, and hyperboloids while the equation stays in view.',
-    body: 'Quadric surfaces are the three-dimensional relatives of conic sections, defined by a second-degree equation in x, y, and z. Positive terms on every squared variable produce a closed ellipsoid; changing one sign opens a hyperboloid of one or two sheets. A zero coefficient can create a paraboloid, where slices reveal parabolas and ellipses at once. The coefficients control scale along each axis, so normalization matters when rendering. Rotating the mesh in real time makes the algebra legible: topology, cross-sections, and curvature become visible rather than abstract.',
+    body: [
+      { heading: 'Read the signs first', copy: 'A quadric is a surface described by a second-degree equation such as Ax² + By² + Cz² + Dx + Ey + Fz + G = 0. Complete the square to move the center, then divide by the remaining constant to expose the canonical form. The signs determine topology; the denominators determine scale. This is the three-dimensional version of classifying ellipses, parabolas, and hyperbolas.' },
+      { heading: 'Ellipsoids and hyperboloids', copy: 'An ellipsoid has x²/a² + y²/b² + z²/c² = 1: every squared term is positive, so the surface closes in every direction. A hyperboloid of one sheet, x²/a² + y²/b² - z²/c² = 1, has a connected waist and opens along the negative-sign axis. A hyperboloid of two sheets, -x²/a² - y²/b² + z²/c² = 1, splits into two disconnected caps. Horizontal and vertical slices make these differences immediate.' },
+      { heading: 'Paraboloids and saddle points', copy: 'An elliptic paraboloid, z = x²/a² + y²/b², has elliptical level curves and opens like a bowl. A hyperbolic paraboloid, z = x²/a² - y²/b², has hyperbolic level curves and a saddle at the origin: it rises in one direction and falls in the perpendicular direction. The saddle is not a local maximum or minimum, because every neighborhood contains points above and below z = 0.' },
+      { heading: 'Coordinate transformations', copy: 'Translation replaces x with X + h and rotation replaces the vector x with QX, where Q is an orthogonal matrix. In the general quadratic form xᵀAx + bᵀx + c = 0, diagonalizing the symmetric matrix A gives principal axes and removes cross terms such as xy. In a renderer, apply the same transform to sampled vertices and normals, then normalize the camera scale so thin and wide surfaces remain legible.' },
+      { heading: 'Use it as a geometry lab', copy: 'Change one coefficient at a time and watch a sphere stretch into an ellipsoid or a connected sheet split into two. Color by height or Gaussian curvature, add contour rings for fixed z, and rotate slowly enough to compare opposite sides. These cues turn an equation into evidence about symmetry, connectivity, and cross-sections.' },
+    ],
     equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1',
     mode: 'implicit3d',
     accent: '#72d8ff',
@@ -79,9 +95,15 @@ const insights: BlogInsight[] = [
   {
     title: 'Polar Roses & Parametric Motion',
     category: 'Curves & motion',
-    readTime: '5 min read',
+    readTime: '9 min read',
     excerpt: 'Discover why radius and angle can describe patterns that Cartesian graphs hide.',
-    body: 'Cartesian coordinates ask for y as a function of x, but polar coordinates let distance from the origin depend directly on angle. That small shift makes spirals, circles, and rose curves natural: r = a cos(nθ) creates petals whose symmetry is encoded in n. Parametric curves go further by letting x(t) and y(t) move independently, which is why Lissajous figures can show phase relationships so clearly. Animate θ or t and the trace becomes a lesson in periodicity, symmetry, and how a parameter controls both position and speed.',
+    body: [
+      { heading: 'A better coordinate system for rotation', copy: 'Polar coordinates describe a point by radius r and angle θ, with x = r cos θ and y = r sin θ. Instead of solving for y at every x, we can let r depend on θ and trace the curve naturally. Negative r is meaningful: it points in the direction θ + π, which explains some of the looping and symmetry in rose curves.' },
+      { heading: 'Roses and spirals', copy: 'The rose r = a cos(nθ) has n petals when n is odd and 2n petals when n is even. The amplitude a controls petal length, while a phase shift r = a cos(nθ + φ) rotates the whole pattern by -φ/n. The Archimedean spiral r = a + bθ grows by the same radial amount each turn, so its spacing is constant; this makes it useful for scan paths, coiled springs, and radar-like sweeps.' },
+      { heading: 'Parametric speed is part of the story', copy: 'Parametric motion supplies x(t) and y(t) independently. Velocity is v(t) = (x′(t), y′(t)), and speed is its magnitude ||v|| = √(x′² + y′²). Equal steps in t do not always produce equal distances, so a dot can appear to accelerate even on a visually uniform curve. Reparameterizing by arc length or using velocity to size the tracer separates geometry from pacing.' },
+      { heading: 'Lissajous figures and phase', copy: 'A Lissajous curve uses x(t) = A sin(at + δ) and y(t) = B sin(bt). The frequency ratio a:b controls the number of lobes, while δ is a phase shift that changes the tilt and symmetry. When the ratio is rational the curve closes; when it is irrational it keeps filling a region without exactly repeating. This is a precise visual way to compare two oscillators.' },
+      { heading: 'Practical animation guide', copy: 'Sample enough θ or t values to avoid sharp corners, draw the full path faintly, then reveal a moving prefix and tracer. Display the current angle, radius, and velocity beside the plot. For a hands-on experiment, change n, φ, or the frequency ratio one at a time and predict the symmetry before pressing play.' },
+    ],
     equation: '4 * cos(3 * theta)',
     mode: 'polar',
     accent: '#d6a8ff',
@@ -89,9 +111,15 @@ const insights: BlogInsight[] = [
   {
     title: 'Vector Fields and Fluid Flow Animations',
     category: 'Fields & motion',
-    readTime: '7 min read',
+    readTime: '10 min read',
     excerpt: 'Read direction, divergence, and curl as particles travel through a field.',
-    body: 'A vector field assigns a direction and magnitude to every point in a plane, like a tiny arrow describing wind or water flow. Streamlines follow those arrows and reveal the field’s global structure. Divergence measures whether nearby trajectories spread apart or converge, while curl measures local rotation around a point. A particle animation makes both ideas intuitive: expanding paths suggest a source, compressing paths suggest a sink, and looping paths expose circulation. Sampling the field carefully keeps arrows readable while preserving the continuous motion between them.',
+    body: [
+      { heading: 'A field is a rule at every point', copy: 'A two-dimensional vector field F(x,y) = (P(x,y), Q(x,y)) assigns a velocity arrow to each location. A particle follows the differential equation dx/dt = P(x,y), dy/dt = Q(x,y). Arrows show the local instruction; a flow line is the path produced by repeatedly applying that instruction. In three dimensions, add R(x,y,z) and integrate a third coordinate.' },
+      { heading: 'Divergence measures spreading', copy: 'The divergence is ∇·F = ∂P/∂x + ∂Q/∂y. Positive divergence marks a source-like region where a tiny balloon of particles expands; negative divergence marks a sink where it contracts. Zero divergence means local volume is preserved, though the flow may still shear or rotate. A heatmap under the arrows gives this invisible derivative a visible sign and intensity.' },
+      { heading: 'Curl measures local rotation', copy: 'In the plane, the scalar curl is ∂Q/∂x - ∂P/∂y, the z-component of the three-dimensional curl ∇×F. Imagine placing a tiny paddle wheel in the flow: curl predicts whether it spins and in which direction. A circular field can have strong curl, while a purely radial source can have divergence without local rotation.' },
+      { heading: 'Line integrals and work', copy: 'For a path C, the line integral ∫C F·dr adds the component of the field tangent to motion. It measures work done by a force or accumulated transport along a curve. If F is conservative, F = ∇φ, the integral depends only on the endpoints and closed-loop integrals vanish. Drawing the path and coloring it by F·dr makes the sign changes understandable.' },
+      { heading: 'Build a fluid-like scene', copy: 'Seed particles at a grid or along an edge, integrate with a small Euler or Runge–Kutta step, and fade trails over time. Clamp extreme speeds so a single singularity does not dominate the frame, and sample the field on a coarse grid for readable arrows. Try a vortex, a source-sink pair, or a divergence-free flow to connect the animation to smoke, weather, and incompressible fluids.' },
+    ],
     equation: '[cos(y), sin(x)]',
     mode: 'vector',
     accent: '#72d8ff',
@@ -99,9 +127,15 @@ const insights: BlogInsight[] = [
   {
     title: 'Differential Calculus: Derivatives & Integrals',
     category: 'Calculus',
-    readTime: '6 min read',
+    readTime: '9 min read',
     excerpt: 'Watch a tangent estimate slope while accumulated area builds beneath a curve.',
-    body: 'The derivative is the instantaneous slope of a curve, so a moving tangent line turns a limit into something you can see. As the sample point travels, the tangent rotates according to local change rather than height. An integral tells a complementary story: thin rectangles accumulate signed area beneath the graph, with their total approaching the exact area as width shrinks. Showing the tangent and the growing Riemann sum together connects rate of change with accumulation, two views of the same function that the Fundamental Theorem of Calculus unifies.',
+    body: [
+      { heading: 'A derivative is a local experiment', copy: 'The derivative f′(a) = lim[h→0] (f(a+h) - f(a))/h is the slope that remains when the secant interval collapses. On a moving graph, draw a secant through x and x + h, then shrink h toward zero until it becomes the tangent. The tangent’s angle changes with f′(x), not with the height of the curve, so a high flat point can have slope zero.' },
+      { heading: 'Instantaneous rate of change', copy: 'If position is s(t), then velocity is s′(t) and acceleration is s″(t). This is why a tracer with a changing x-coordinate can carry more information than a static plot: the same path can describe motion, growth, or a signal depending on the parameter. Use a small readout for x, f(x), and f′(x) to connect the picture to the limit definition.' },
+      { heading: 'Riemann sums accumulate area', copy: 'A definite integral is the limit of rectangle sums: ∫aᵇ f(x)dx = lim[n→∞] Σ f(xᵢ*)Δx. Left, right, and midpoint rules choose different sample heights, but all converge when the function is well behaved and Δx shrinks. Rectangles below the axis contribute negative signed area, which is different from total geometric area.' },
+      { heading: 'The Fundamental Theorem', copy: 'If A(x) = ∫aˣ f(u)du, then A′(x) = f(x). Integration builds an accumulation function, and differentiation recovers the instantaneous rate that created it. Conversely, ∫aᵇ f(x)dx = F(b) - F(a) when F′ = f. Showing a growing area and its slope together makes this two-way relationship tangible.' },
+      { heading: 'A practical motion lab', copy: 'Start with f(x) = x²/4, animate the tangent point from left to right, and increase the rectangle count while keeping the curve fixed. Compare the numerical slope with a centered finite difference and watch the approximation improve. Then substitute a sharp corner or an oscillatory function to see where differentiability and numerical resolution become important.' },
+    ],
     equation: 'x^2 / 4',
     mode: 'function',
     accent: '#ff8b6d',
@@ -757,13 +791,25 @@ function LandingBubbleBackground() {
     const context = canvas?.getContext('2d');
     if (!canvas || !context || typeof window === 'undefined') return;
 
-    const bubbles = [
-      { x: 0.12, y: 0.18, radius: 0.2, color: [199, 243, 107], speed: 0.34, phase: 0.2 },
-      { x: 0.78, y: 0.12, radius: 0.24, color: [114, 216, 255], speed: 0.27, phase: 1.8 },
-      { x: 0.56, y: 0.46, radius: 0.18, color: [214, 168, 255], speed: 0.42, phase: 3.2 },
-      { x: 0.2, y: 0.72, radius: 0.27, color: [255, 139, 109], speed: 0.22, phase: 4.4 },
-      { x: 0.9, y: 0.8, radius: 0.2, color: [140, 231, 207], speed: 0.3, phase: 5.5 },
+    const ambientNodes = [
+      { x: 0.08, y: 0.16, radius: 2.8, color: [199, 243, 107], speed: 0.22, phase: 0.2 },
+      { x: 0.31, y: 0.08, radius: 2.1, color: [114, 216, 255], speed: 0.27, phase: 1.8 },
+      { x: 0.58, y: 0.2, radius: 2.5, color: [214, 168, 255], speed: 0.18, phase: 3.2 },
+      { x: 0.86, y: 0.12, radius: 2.2, color: [114, 216, 255], speed: 0.24, phase: 4.4 },
+      { x: 0.18, y: 0.47, radius: 2.1, color: [255, 139, 109], speed: 0.2, phase: 5.5 },
+      { x: 0.47, y: 0.62, radius: 2.7, color: [199, 243, 107], speed: 0.16, phase: 0.9 },
+      { x: 0.76, y: 0.5, radius: 2.4, color: [140, 231, 207], speed: 0.25, phase: 2.4 },
+      { x: 0.92, y: 0.82, radius: 2.2, color: [214, 168, 255], speed: 0.19, phase: 4.9 },
+      { x: 0.23, y: 0.88, radius: 2.3, color: [114, 216, 255], speed: 0.23, phase: 6.1 },
     ];
+    const particles = Array.from({ length: 34 }, (_, index) => ({
+      x: (index * 0.173 + 0.07) % 1,
+      y: (index * 0.317 + 0.13) % 1,
+      size: 0.7 + (index % 4) * 0.35,
+      speed: 0.08 + (index % 5) * 0.018,
+      phase: index * 1.71,
+      color: index % 3 === 0 ? [199, 243, 107] : index % 3 === 1 ? [114, 216, 255] : [214, 168, 255],
+    }));
     let frame = 0;
     let width = 1;
     let height = 1;
@@ -782,21 +828,86 @@ function LandingBubbleBackground() {
       const time = reducedMotion ? 0 : now / 1000;
       context.clearRect(0, 0, width, height);
       context.globalCompositeOperation = 'screen';
-      bubbles.forEach((bubble) => {
-        const driftX = Math.sin(time * bubble.speed + bubble.phase) * width * 0.045;
-        const driftY = Math.cos(time * bubble.speed * 0.8 + bubble.phase) * height * 0.06;
-        const x = width * bubble.x + driftX;
-        const y = height * bubble.y + driftY;
-        const radius = Math.min(width, height) * bubble.radius;
-        const gradient = context.createRadialGradient(x, y, 0, x, y, radius);
-        const [red, green, blue] = bubble.color;
-        gradient.addColorStop(0, `rgba(${red},${green},${blue},.22)`);
-        gradient.addColorStop(0.42, `rgba(${red},${green},${blue},.09)`);
-        gradient.addColorStop(1, `rgba(${red},${green},${blue},0)`);
-        context.fillStyle = gradient;
+
+      // A fine, warped mesh gives the page the mathematical depth of the
+      // reference while keeping all geometry in one inexpensive 2D canvas.
+      const gridStep = Math.max(54, Math.min(82, width / 13));
+      context.lineWidth = 0.55;
+      context.strokeStyle = 'rgba(114,216,255,.075)';
+      for (let column = -1; column < width / gridStep + 2; column += 1) {
         context.beginPath();
-        context.arc(x, y, radius, 0, Math.PI * 2);
+        for (let row = -1; row <= height / gridStep + 1; row += 1) {
+          const baseX = column * gridStep;
+          const baseY = row * gridStep;
+          const wave = Math.sin(row * 0.76 + time * 0.22) * 8 + Math.cos(column * 0.52 - time * 0.18) * 5;
+          const x = baseX + Math.sin(baseY / 190 + time * 0.16) * 15 + wave * 0.22;
+          const y = baseY + Math.cos(baseX / 220 - time * 0.14) * 12 + wave * 0.12;
+          if (row === -1) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        }
+        context.stroke();
+      }
+      context.strokeStyle = 'rgba(214,168,255,.06)';
+      for (let row = -1; row < height / gridStep + 2; row += 1) {
+        context.beginPath();
+        for (let column = -1; column <= width / gridStep + 1; column += 1) {
+          const baseX = column * gridStep;
+          const baseY = row * gridStep;
+          const wave = Math.sin(column * 0.76 + time * 0.19) * 8 + Math.cos(row * 0.52 - time * 0.15) * 5;
+          const x = baseX + Math.sin(baseY / 190 + time * 0.16) * 15 + wave * 0.12;
+          const y = baseY + Math.cos(baseX / 220 - time * 0.14) * 12 + wave * 0.22;
+          if (column === -1) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        }
+        context.stroke();
+      }
+
+      particles.forEach((particle) => {
+        const x = width * particle.x + Math.sin(time * particle.speed + particle.phase) * width * 0.025;
+        const y = height * particle.y + Math.cos(time * particle.speed * 0.8 + particle.phase) * height * 0.045;
+        const [red, green, blue] = particle.color;
+        context.fillStyle = `rgba(${red},${green},${blue},.5)`;
+        context.beginPath();
+        context.arc(x, y, particle.size, 0, Math.PI * 2);
         context.fill();
+      });
+
+      const nodePositions = ambientNodes.map((node) => ({
+        x: width * node.x + Math.sin(time * node.speed + node.phase) * width * 0.038,
+        y: height * node.y + Math.cos(time * node.speed * 0.83 + node.phase) * height * 0.055,
+      }));
+      for (let first = 0; first < nodePositions.length; first += 1) {
+        for (let second = first + 1; second < nodePositions.length; second += 1) {
+          const start = nodePositions[first];
+          const end = nodePositions[second];
+          const distance = Math.hypot(end.x - start.x, end.y - start.y);
+          if (distance > Math.min(width, height) * 0.42) continue;
+          context.strokeStyle = `rgba(140,231,207,${Math.max(0, 0.12 - distance / Math.min(width, height) * 0.12)})`;
+          context.lineWidth = 0.7;
+          context.beginPath();
+          context.moveTo(start.x, start.y);
+          context.lineTo(end.x, end.y);
+          context.stroke();
+        }
+      }
+      ambientNodes.forEach((node, index) => {
+        const { x, y } = nodePositions[index];
+        const [red, green, blue] = node.color;
+        const glow = context.createRadialGradient(x, y, 0, x, y, 45);
+        glow.addColorStop(0, `rgba(${red},${green},${blue},.22)`);
+        glow.addColorStop(0.35, `rgba(${red},${green},${blue},.06)`);
+        glow.addColorStop(1, `rgba(${red},${green},${blue},0)`);
+        context.fillStyle = glow;
+        context.beginPath();
+        context.arc(x, y, 45, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = `rgba(${red},${green},${blue},.92)`;
+        context.shadowColor = `rgba(${red},${green},${blue},.8)`;
+        context.shadowBlur = 12;
+        context.beginPath();
+        context.arc(x, y, node.radius, 0, Math.PI * 2);
+        context.fill();
+        context.shadowBlur = 0;
       });
       context.globalCompositeOperation = 'source-over';
       if (!reducedMotion) frame = window.requestAnimationFrame(draw);
@@ -1039,7 +1150,15 @@ export function LandingPage({ onStart, onAuth }: LandingPageProps) {
                 </button>
                 {activeInsight === index && (
                   <div className="insight-expanded">
-                    <p>{insight.body}</p>
+                    <div className="insight-equation mono">{insight.equation}</div>
+                    <div className="insight-reading">
+                      {insight.body.map((section) => (
+                        <section key={section.heading}>
+                          <h3>{section.heading}</h3>
+                          <p>{section.copy}</p>
+                        </section>
+                      ))}
+                    </div>
                     <button className="insight-cta" type="button" onClick={() => startStudio(insight)}>
                       Explore in Studio <ArrowUpRight className="icon" />
                     </button>

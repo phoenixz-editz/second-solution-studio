@@ -2518,19 +2518,20 @@ function MainStudio() {
       && direction !== previousDirection;
     const beatIndex = Math.floor(Math.max(0, Math.min(1, currentProgress)) * 16);
     const fixedBeat = beatIndex > audioLastBeatIndexRef.current;
+    // Keep pitch tied to the tracer's instantaneous vertical coordinate. The
+    // slope still shapes the transient/gain, but never shifts the pitch away
+    // from the point currently drawn on the graph.
     const normalizedHeight = Math.max(0, Math.min(1, (height + 4) / 8));
     const normalizedSlope = Math.max(-1, Math.min(1, slope / 6));
     const frequency = AUDIO_MIN_HZ
-      + normalizedHeight * (AUDIO_MAX_HZ - AUDIO_MIN_HZ) * 0.78
-      + (normalizedSlope + 1) * 0.11 * (AUDIO_MAX_HZ - AUDIO_MIN_HZ);
+      + normalizedHeight * (AUDIO_MAX_HZ - AUDIO_MIN_HZ);
     try {
       // The graph and this callback receive the same progress value. Updating
-      // one long-lived oscillator avoids a one-shot scheduling delay between
-      // the tracer and its pitch.
-      engine.tracerOscillator.frequency.setTargetAtTime(
+      // one long-lived oscillator at the current AudioContext time avoids a
+      // scheduled tone or smoothing tail getting ahead of the visible tracer.
+      engine.tracerOscillator.frequency.setValueAtTime(
         Math.max(AUDIO_MIN_HZ, Math.min(AUDIO_MAX_HZ, frequency)),
         now,
-        0.018,
       );
       engine.tracerGain.gain.setTargetAtTime(
         playing ? 0.055 + Math.abs(normalizedSlope) * 0.035 : 0.0001,
