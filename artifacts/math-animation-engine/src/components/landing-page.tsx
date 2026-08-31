@@ -77,7 +77,7 @@ const insights: BlogInsight[] = [
     accent: '#72d8ff',
   },
   {
-    title: 'The Beauty of Polar Coordinates and Parametric Motion',
+    title: 'Polar Roses & Parametric Motion',
     category: 'Curves & motion',
     readTime: '5 min read',
     excerpt: 'Discover why radius and angle can describe patterns that Cartesian graphs hide.',
@@ -97,7 +97,7 @@ const insights: BlogInsight[] = [
     accent: '#72d8ff',
   },
   {
-    title: 'Calculus in Motion: Visualizing Derivatives & Integrals',
+    title: 'Differential Calculus: Derivatives & Integrals',
     category: 'Calculus',
     readTime: '6 min read',
     excerpt: 'Watch a tangent estimate slope while accumulated area builds beneath a curve.',

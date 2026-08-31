@@ -3428,21 +3428,23 @@ function MainStudio() {
              <div className="transport-progress" role="progressbar" aria-label="Drawing progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}><span style={{ width: `${progress * 100}%` }} /></div>
              <span className="transport-percent mono">{Math.round(progress * 100)}%</span>
             <span className="transport-speed mono">{speed.toFixed(1)}×</span>
-            <button
-              className={`audio-toggle ${audioEnabled ? 'is-on' : ''}`}
-              type="button"
-              onClick={toggleAudio}
-              aria-pressed={audioEnabled}
-              aria-label={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
-              title={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
-              data-testid="button-audio-toggle"
-            >
-              {audioEnabled ? <Volume2 className="icon" /> : <VolumeX className="icon" />}
-              <span>{audioEnabled ? 'Audio ON' : 'Audio muted'}</span>
-            </button>
-             <button className="transport-help" type="button" onClick={() => setShowGuide(true)} aria-label="Open math mode guide and troubleshooting" data-testid="button-open-guide">
-               <CircleHelp className="icon" />
-             </button>
+            <div className="transport-audio-actions">
+              <button
+                className={`audio-toggle ${audioEnabled ? 'is-on' : ''}`}
+                type="button"
+                onClick={toggleAudio}
+                aria-pressed={audioEnabled}
+                aria-label={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
+                title={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
+                data-testid="button-audio-toggle"
+              >
+                {audioEnabled ? <Volume2 className="icon" /> : <VolumeX className="icon" />}
+                <span>{audioEnabled ? 'Audio ON' : 'Audio muted'}</span>
+              </button>
+              <button className="transport-help" type="button" onClick={() => setShowGuide(true)} aria-label="Open math mode guide and troubleshooting" data-testid="button-open-guide">
+                <CircleHelp className="icon" />
+              </button>
+            </div>
           </div>
         </section>
 
