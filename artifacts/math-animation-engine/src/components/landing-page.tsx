@@ -8,6 +8,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { DeveloperTextEditor } from '@/components/developer-text-editor';
 import { AmbientParticles } from '@/components/ambient-particles';
 import { DeveloperAiAssistant, type AssistantChatMessage, type AssistantPanel, type DiagnosticItem } from '@/components/developer-ai-assistant';
+import { AccountMenu, type AccountIdentity } from '@/components/account-menu';
 import {
   Aperture,
   ArrowRight,
@@ -57,6 +58,7 @@ type LandingPageProps = {
   onStart: (example?: LandingExample) => void;
   onAuth: (mode: 'sign-in' | 'sign-up') => void;
   isDeveloper: boolean;
+  account: AccountIdentity;
 };
 
 const examples: LandingExample[] = [
@@ -911,7 +913,7 @@ function LandingBubbleBackground() {
   );
 }
 
-export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) {
+export function LandingPage({ onStart, onAuth, isDeveloper, account }: LandingPageProps) {
   const [activeFlow, setActiveFlow] = useState(0);
   const [activeInsight, setActiveInsight] = useState(0);
   const [previewMotionSpeed, setPreviewMotionSpeed] = useState(1);
@@ -1060,8 +1062,14 @@ export function LandingPage({ onStart, onAuth, isDeveloper }: LandingPageProps) 
         </nav>
         <div className="landing-auth-actions">
           {isDeveloper && <span className="developer-active-tag"><span className="developer-active-dot" /> Developer Active</span>}
-          <button className="landing-auth-btn" type="button" onClick={() => onAuth('sign-in')}>Login</button>
-          <button className="landing-auth-btn emphasis" type="button" onClick={() => onAuth('sign-up')}>Sign up</button>
+          {account.isSignedIn ? (
+            <AccountMenu identity={account} onAuth={onAuth} />
+          ) : (
+            <>
+              <button className="landing-auth-btn" type="button" onClick={() => onAuth('sign-in')}>Login</button>
+              <button className="landing-auth-btn emphasis" type="button" onClick={() => onAuth('sign-up')}>Sign up</button>
+            </>
+          )}
           <button className="landing-nav-cta" type="button" onClick={() => startStudio()}>
             Get started <ArrowRight className="icon" />
           </button>

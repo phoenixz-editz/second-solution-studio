@@ -633,6 +633,8 @@ export function DeveloperAiAssistant({
   authError,
   className = '',
 }: DeveloperAiAssistantProps) {
+  if (!isAuthenticated) return null;
+
   const assistantClassName = `developer-ai-assistant ${className}`.trim();
 
   const handleQuickAction = (action: QuickActionDefinition) => {

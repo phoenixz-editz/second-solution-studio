@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   Activity,
   Aperture,
@@ -30,12 +30,13 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { ClerkProvider, SignIn, SignUp } from '@clerk/react';
+import { ClerkProvider, SignIn, SignUp, useAuth } from '@clerk/react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { LandingPage } from '@/components/landing-page';
-import { DEVELOPER_EMAIL, DEVELOPER_PASSWORD, DeveloperAccessSequence } from '@/components/developer-access-form';
+import { DEVELOPER_EMAIL, DeveloperAccessSequence } from '@/components/developer-access-form';
 import { DeveloperTextEditor } from '@/components/developer-text-editor';
 import { DeveloperAiAssistant, type AssistantChatMessage, type AssistantPanel, type DiagnosticItem } from '@/components/developer-ai-assistant';
+import { AccountMenu, type AccountIdentity, useAccountIdentity } from '@/components/account-menu';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
@@ -59,12 +60,22 @@ import { clearStoredSession, loadEncryptedJson, saveEncryptedJson } from '@/lib/
 const queryClient = new QueryClient();
 type DeveloperSessionContextValue = {
   isDeveloper: boolean;
+  account: AccountIdentity;
   grantDeveloperSession: () => void;
   resetDeveloperSession: () => void;
 };
 
 const DeveloperSessionContext = createContext<DeveloperSessionContextValue>({
   isDeveloper: false,
+  account: {
+    isLoaded: false,
+    isSignedIn: false,
+    isPrivileged: false,
+    username: '',
+    email: '',
+    roleLabel: 'Member',
+    initials: '',
+  },
   grantDeveloperSession: () => undefined,
   resetDeveloperSession: () => undefined,
 });
@@ -2280,7 +2291,7 @@ function GraphCanvas({
 }
 
 function MainStudio() {
-  const { grantDeveloperSession, isDeveloper } = useDeveloperSession();
+  const { account, isDeveloper } = useDeveloperSession();
   const [, setLocation] = useLocation();
   const studioRootRef = useRef<HTMLDivElement>(null);
   const launchParams = useMemo(
@@ -2352,6 +2363,7 @@ function MainStudio() {
   const [assistantPaymentStatus, setAssistantPaymentStatus] = useState<'idle' | 'connecting' | 'ready' | 'error'>('idle');
   const [assistantPaymentMessage, setAssistantPaymentMessage] = useState('Stripe is not connected. You can connect it later from the workspace integration panel.');
   const [assistantAuthModal, setAssistantAuthModal] = useState<'sign-in' | 'sign-up' | null>(null);
+  const [studioAuthModal, setStudioAuthModal] = useState<'sign-in' | 'sign-up' | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       if (typeof window === 'undefined') return [];
@@ -3477,6 +3489,7 @@ function MainStudio() {
             <CircleHelp className="icon" />
           </button>
           <button className="icon-btn" type="button" onClick={() => setTopNotice('Inspector controls are live on the right')} data-testid="button-settings" aria-label="Open studio settings"><Settings2 className="icon" /></button>
+          <AccountMenu identity={account} onAuth={setStudioAuthModal} />
         </div>
         <span className="creator-credit creator-credit-studio">Made by SOHAIB KHAN</span>
       </header>
@@ -3568,7 +3581,7 @@ function MainStudio() {
             </select>
           </section>
 
-           <section className="panel-section">
+           <section className="panel-section" id="saved-graphs">
              <div className="panel-heading">
                <h2>Visible layers</h2>
                <span className="eyebrow">{layers.filter((layer) => layer.visible).length} on</span>
@@ -3920,7 +3933,7 @@ function MainStudio() {
          onPanelChange={setAssistantPanel}
          onQuickAction={handleAssistantQuickAction}
          isAuthenticated={isDeveloper}
-         accountLabel={isDeveloper ? 'Developer session' : 'Guest session'}
+         accountLabel={account.username || 'Developer session'}
          diagnostics={assistantDiagnostics}
          diagnosticsLoading={assistantDiagnosticsLoading}
          onRefreshDiagnostics={() => void runAssistantDiagnostics()}
@@ -3949,13 +3962,23 @@ function MainStudio() {
            mode={assistantAuthModal}
            onClose={() => setAssistantAuthModal(null)}
            onModeChange={setAssistantAuthModal}
-           onDeveloperUnlock={() => {
-             grantDeveloperSession();
+            onDeveloperUnlock={() => {
              setAssistantAuthModal(null);
              setAssistantPanel('auth');
            }}
          />
        )}
+        {studioAuthModal && (
+          <AuthModalRoute
+            mode={studioAuthModal}
+            onClose={() => setStudioAuthModal(null)}
+            onModeChange={setStudioAuthModal}
+            onDeveloperUnlock={() => {
+              setStudioAuthModal(null);
+              setTopNotice('Account authenticated');
+            }}
+          />
+        )}
       <DeveloperTextEditor rootRef={studioRootRef} isDeveloper={isDeveloper} />
     </div>
   );
@@ -3963,12 +3986,13 @@ function MainStudio() {
 
 function LandingRoute() {
   const [, setLocation] = useLocation();
-  const { grantDeveloperSession, isDeveloper } = useDeveloperSession();
+  const { isDeveloper, account } = useDeveloperSession();
   const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up' | null>(null);
   return (
     <>
       <LandingPage
         isDeveloper={isDeveloper}
+        account={account}
         onAuth={(nextMode) => setAuthMode(nextMode)}
       onStart={(example) => {
         if (!example) {
@@ -3978,7 +4002,7 @@ function LandingRoute() {
         setLocation(`/studio?mode=${encodeURIComponent(example.mode)}&equation=${encodeURIComponent(example.equation)}`);
       }}
       />
-      {authMode && <AuthModalRoute mode={authMode} onClose={() => setAuthMode(null)} onModeChange={setAuthMode} onDeveloperUnlock={() => { grantDeveloperSession(); setAuthMode(null); setLocation('/studio'); }} />}
+      {authMode && <AuthModalRoute mode={authMode} onClose={() => setAuthMode(null)} onModeChange={setAuthMode} onDeveloperUnlock={() => { setAuthMode(null); setLocation('/studio'); }} />}
     </>
   );
 }
@@ -3994,20 +4018,34 @@ function AuthModalRoute({
   onClose: () => void;
   onDeveloperUnlock: () => void;
 }) {
+  const { isLoaded, isSignedIn, signOut } = useAuth();
+  const account = useAccountIdentity(DEVELOPER_EMAIL);
+  const [preparing, setPreparing] = useState(true);
   const [developerSequenceActive, setDeveloperSequenceActive] = useState(false);
-  const handleAuthSubmit = (event: FormEvent<HTMLDivElement>) => {
-    if (developerSequenceActive || !(event.target instanceof HTMLFormElement)) return;
-    const email = event.target.querySelector<HTMLInputElement>('input[name="identifier"], input[name="emailAddress"], input[type="email"]')?.value.trim();
-    const password = event.target.querySelector<HTMLInputElement>('input[name="password"], input[type="password"]')?.value;
-    if (email === DEVELOPER_EMAIL && password === DEVELOPER_PASSWORD) {
-      event.preventDefault();
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (!isSignedIn) {
+      setPreparing(false);
+      return;
+    }
+    let cancelled = false;
+    setPreparing(true);
+    void signOut()
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setPreparing(false);
+      });
+    return () => { cancelled = true; };
+  }, [isLoaded, isSignedIn, signOut]);
+  useEffect(() => {
+    if (account.isSignedIn && account.isPrivileged && !developerSequenceActive) {
       setDeveloperSequenceActive(true);
     }
-  };
+  }, [account.isPrivileged, account.isSignedIn, developerSequenceActive]);
 
   return (
     <div className="auth-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" onSubmitCapture={handleAuthSubmit}>
+      <div className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
         <div className="auth-modal-heading">
           <div><span className="landing-eyebrow">Second Solution Studio account</span><h2 id="auth-modal-title">{mode === 'sign-in' ? 'Welcome back.' : 'Start your next proof.'}</h2><p>Email/password and configured social sign-in are supported.</p></div>
           <button className="icon-btn" type="button" onClick={onClose} aria-label="Close authentication dialog"><X className="icon" /></button>
@@ -4017,7 +4055,13 @@ function AuthModalRoute({
           <button type="button" role="tab" aria-selected={mode === 'sign-up'} className={mode === 'sign-up' ? 'active' : ''} onClick={() => onModeChange('sign-up')}>Sign up</button>
         </div>
         <div className="auth-component-wrap">
-          {mode === 'sign-in' ? <SignIn routing="hash" appearance={clerkAppearance} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/studio`} /> : <SignUp routing="hash" appearance={clerkAppearance} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/studio`} />}
+          {preparing ? (
+            <div className="auth-switching-state" role="status">Preparing a fresh account session…</div>
+          ) : mode === 'sign-in' ? (
+            <SignIn routing="hash" appearance={clerkAppearance} signUpUrl={`${basePath}/sign-up`} forceRedirectUrl={`${basePath}/studio`} />
+          ) : (
+            <SignUp routing="hash" appearance={clerkAppearance} signInUrl={`${basePath}/sign-in`} forceRedirectUrl={`${basePath}/studio`} />
+          )}
         </div>
         <DeveloperAccessSequence active={developerSequenceActive} onUnlock={onDeveloperUnlock} />
       </div>
@@ -4026,11 +4070,44 @@ function AuthModalRoute({
 }
 
 function SignInPage() {
-  return <div className="auth-page-shell"><SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} appearance={clerkAppearance} forceRedirectUrl={`${basePath}/studio`} /></div>;
+  return <FreshAuthPage mode="sign-in" />;
 }
 
 function SignUpPage() {
-  return <div className="auth-page-shell"><SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} appearance={clerkAppearance} forceRedirectUrl={`${basePath}/studio`} /></div>;
+  return <FreshAuthPage mode="sign-up" />;
+}
+
+function FreshAuthPage({ mode }: { mode: 'sign-in' | 'sign-up' }) {
+  const { isLoaded, isSignedIn, signOut } = useAuth();
+  const [preparing, setPreparing] = useState(true);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (!isSignedIn) {
+      setPreparing(false);
+      return;
+    }
+    let cancelled = false;
+    setPreparing(true);
+    void signOut()
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setPreparing(false);
+      });
+    return () => { cancelled = true; };
+  }, [isLoaded, isSignedIn, signOut]);
+
+  return (
+    <div className="auth-page-shell">
+      {preparing ? (
+        <div className="auth-switching-state" role="status">Preparing a fresh account session…</div>
+      ) : mode === 'sign-in' ? (
+        <SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} appearance={clerkAppearance} forceRedirectUrl={`${basePath}/studio`} />
+      ) : (
+        <SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} appearance={clerkAppearance} forceRedirectUrl={`${basePath}/studio`} />
+      )}
+    </div>
+  );
 }
 
 function Router() {
@@ -4054,9 +4131,23 @@ function stripBase(path: string) {
   return basePath && path.startsWith(basePath) ? path.slice(basePath.length) || '/' : path;
 }
 
+function ClerkSessionBridge() {
+  const account = useAccountIdentity(DEVELOPER_EMAIL);
+  const isDeveloper = account.isSignedIn && account.isPrivileged;
+  return (
+    <DeveloperSessionContext.Provider value={{ isDeveloper, account, grantDeveloperSession: () => undefined, resetDeveloperSession: () => undefined }}>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <RoutedErrorBoundary><Router /></RoutedErrorBoundary>
+          <Toaster />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </DeveloperSessionContext.Provider>
+  );
+}
+
 function ClerkApp() {
   const [, setLocation] = useLocation();
-  const [isDeveloper, setIsDeveloper] = useState(false);
 
   return (
     <ClerkProvider
@@ -4068,14 +4159,7 @@ function ClerkApp() {
       routerPush={(to) => setLocation(stripBase(to))}
       routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
     >
-      <DeveloperSessionContext.Provider value={{ isDeveloper, grantDeveloperSession: () => setIsDeveloper(true), resetDeveloperSession: () => setIsDeveloper(false) }}>
-        <QueryClientProvider client={queryClient}>
-          <TooltipProvider>
-            <RoutedErrorBoundary><Router /></RoutedErrorBoundary>
-            <Toaster />
-          </TooltipProvider>
-        </QueryClientProvider>
-      </DeveloperSessionContext.Provider>
+      <ClerkSessionBridge />
     </ClerkProvider>
   );
 }

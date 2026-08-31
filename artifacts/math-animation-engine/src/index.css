@@ -166,6 +166,34 @@
 .topbar-center { display: flex; gap: 8px; align-items: center; color: hsl(var(--muted-foreground)); font-size: 12px; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--accent)); animation: pulse-dot 1.8s ease-in-out infinite; box-shadow: 0 0 0 3px rgba(199,243,107,.18); }
 .top-actions { display: flex; align-items: center; gap: 8px; }
+.account-menu, .account-auth-actions { position: relative; display: flex; align-items: center; gap: 7px; }
+.account-avatar-button { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; max-width: 190px; padding: 3px 8px 3px 4px; border: 1px solid rgba(199,243,107,.38); border-radius: 9px; background: rgba(199,243,107,.08); color: hsl(var(--foreground)); font: 10px var(--app-font-mono); cursor: pointer; }
+.account-avatar-button:hover, .account-avatar-button:focus-visible { border-color: #c7f36b; background: rgba(199,243,107,.14); }
+.account-avatar-mark, .account-menu-summary-mark { display: grid; place-items: center; flex: 0 0 auto; border: 1px solid #c7f36b; border-radius: 7px 7px 7px 2px; background: #c7f36b; color: #0b1018; font: 700 10px var(--app-font-mono); }
+.account-avatar-mark { width: 25px; height: 25px; }
+.account-avatar-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-avatar-chevron, .account-menu-item-chevron { transition: transform .2s ease; }
+.account-avatar-chevron.is-open, .account-menu-item-chevron.is-open { transform: rotate(180deg); }
+.account-menu-popover { position: absolute; top: calc(100% + 10px); right: 0; z-index: 70; width: min(280px, calc(100vw - 28px)); padding: 10px; border: 1px solid rgba(199,243,107,.3); border-radius: 12px 12px 4px 12px; background: #101a22; color: #eef4f1; box-shadow: 0 22px 55px rgba(0,0,0,.38); }
+.account-menu-summary { display: flex; align-items: center; gap: 9px; padding: 7px 8px 11px; border-bottom: 1px solid rgba(238,244,241,.12); }
+.account-menu-summary-mark { width: 30px; height: 30px; }
+.account-menu-summary-mark svg { width: 16px; height: 16px; }
+.account-menu-summary span:last-child { display: grid; min-width: 0; gap: 2px; }
+.account-menu-summary strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.account-menu-summary small, .account-menu-summary em { color: rgba(238,244,241,.58); font-size: 9px; font-style: normal; }
+.account-menu-summary em { color: #c7f36b; text-transform: uppercase; letter-spacing: .1em; }
+.account-menu-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; padding: 8px; border: 0; border-radius: 7px; background: transparent; color: #eef4f1; font: 10px var(--app-font-mono); text-decoration: none; text-align: left; cursor: pointer; }
+.account-menu-item:hover, .account-menu-item:focus-visible { background: rgba(199,243,107,.1); color: #c7f36b; }
+.account-menu-item svg { width: 14px; height: 14px; }
+.account-menu-item-chevron { margin-left: auto; }
+.account-profile-detail { display: grid; grid-template-columns: 1fr auto; gap: 5px 10px; margin: -2px 8px 7px 30px; padding: 8px; border-left: 1px solid rgba(199,243,107,.35); color: rgba(238,244,241,.55); font-size: 9px; }
+.account-profile-detail strong { color: #eef4f1; font-weight: 500; }
+.account-menu-logout { color: #ffab94; }
+.account-menu-dismiss { position: absolute; top: 7px; right: 7px; display: grid; place-items: center; width: 20px; height: 20px; border: 0; background: transparent; color: rgba(238,244,241,.48); cursor: pointer; }
+.account-menu-dismiss svg { width: 12px; height: 12px; }
+.account-auth-button { display: inline-flex; align-items: center; gap: 5px; height: 32px; padding: 0 9px; border: 1px solid rgba(224,239,232,.22); border-radius: 7px; background: transparent; color: rgba(238,244,241,.75); font: 10px var(--app-font-mono); cursor: pointer; }
+.account-auth-button:hover, .account-auth-button.emphasis { border-color: rgba(199,243,107,.65); color: #c7f36b; background: rgba(199,243,107,.08); }
+.account-auth-button .icon { width: 13px; height: 13px; }
 .studio-help-btn { width: 28px; height: 28px; color: hsl(var(--accent)); font: 700 14px var(--app-font-mono); }
 .studio-help-btn:hover { border-color: hsl(var(--accent)); background: rgba(199,243,107,.1); }
 .creator-credit { position: absolute; top: 7px; right: clamp(18px, 5vw, 74px); color: rgba(238,244,241,.42); font: 8px var(--app-font-mono); letter-spacing: .11em; text-transform: uppercase; white-space: nowrap; pointer-events: none; }
@@ -711,6 +739,7 @@
 .auth-mode-tabs button { height: 30px; border: 0; border-radius: 5px; background: transparent; color: rgba(238,244,241,.55); font: 10px var(--app-font-mono); }
 .auth-mode-tabs button.active { background: #c7f36b; color: #0b1018; }
 .auth-component-wrap { padding: 0 12px 12px; }
+.auth-switching-state { display: grid; place-items: center; min-height: 180px; padding: 24px; color: rgba(238,244,241,.68); font: 11px var(--app-font-mono); text-align: center; }
 .auth-page-shell { display: grid; place-items: center; min-height: 100dvh; padding: 24px; background: #0b1018; }
 .auth-page-shell > * { width: min(440px, 100%); }
 .top-actions .zoom-control .icon-btn { width: 24px; height: 24px; }
@@ -731,6 +760,9 @@
   .creator-credit-studio { right: 15px; }
   .landing-auth-btn { padding: 0 8px; }
   .landing-nav-cta { margin-left: auto; }
+  .account-avatar-name { max-width: 104px; }
+  .account-menu-popover { right: -4px; }
+  .account-auth-button { padding: 0 7px; }
   .hero-copy h1 { font-size: 58px; }
   .hero-actions { align-items: stretch; flex-direction: column; }
   .landing-section-heading { align-items: start; flex-direction: column; gap: 14px; }
