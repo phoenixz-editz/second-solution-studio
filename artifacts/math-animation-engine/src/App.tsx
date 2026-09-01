@@ -52,6 +52,7 @@ import {
   isImplicit3dHeightmapExpression,
   normalizeForPreview as parserNormalizeForPreview,
   splitEquationExpressions as parserSplitEquationExpressions,
+  resolveDynamicDomain,
   detectSmartMode,
   type ResolvedStudioMode,
   type CompiledExpression,
@@ -90,7 +91,7 @@ function useDeveloperSession() {
 type ScreenPoint = [number, number];
 type ContourSegment = { start: ScreenPoint; end: ScreenPoint };
 type ContourPolyline = ScreenPoint[];
-type GraphRange = { xMin: number; xMax: number; tMin: number; tMax: number; worldExtent?: number };
+type GraphRange = { xMin: number; xMax: number; yMin?: number; yMax?: number; tMin: number; tMax: number; worldExtent?: number };
 type CachedVectorArrow = { x: number; y: number; endX: number; endY: number };
 type WorldContourPolyline = ScreenPoint[];
 type CachedFrame = {
@@ -107,10 +108,8 @@ type CachedFrame = {
 const IMPLICIT_GRID_RESOLUTION = 96;
 const IMPLICIT_CACHE_LIMIT = 24;
 const FRAME_CACHE_SIZE = 60;
-const IMPLICIT_WORLD_EXTENT = 10;
 const IMPLICIT_3D_DRAFT_GRID_RESOLUTION = 32;
 const IMPLICIT_3D_FINAL_GRID_RESOLUTION = 88;
-const IMPLICIT_3D_WORLD_EXTENT = 8;
 const GRAPH_ZOOM_MIN = 0.05;
 const GRAPH_ZOOM_MAX = 20;
 const GRAPH_ZOOM_BUTTON_FACTOR = 1.25;
@@ -243,24 +242,36 @@ function easeInOutCubic(value: number) {
 }
 
 function detectSmartRange(equation: string, mode: StudioMode): GraphRange {
-  const input = normalizeForPreview(equation).toLowerCase();
-  const denominatorPeak = [...input.matchAll(/\/\s*(\d+(?:\.\d+)?)/g)]
-    .map((match) => Number(match[1]))
-    .filter(Number.isFinite)
-    .reduce((maximum, value) => Math.max(maximum, value), 0);
-  const distantCenter = [...input.matchAll(/(?:x|y|z)\s*-\s*(-?\d+(?:\.\d+)?)/g)]
-    .map((match) => Math.abs(Number(match[1])))
-    .filter(Number.isFinite)
-    .reduce((maximum, value) => Math.max(maximum, value), 0);
-  const worldExtent = mode === 'implicit3d' || mode === 'surface3d'
-    ? Math.min(10, Math.max(IMPLICIT_3D_WORLD_EXTENT, denominatorPeak >= 500 ? 8 : 0, distantCenter + 2))
-    : undefined;
-  if (mode === 'parametric' || mode === 'parametric3d') {
-    const isSpiral = /(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(input);
-    return { xMin: -10, xMax: 10, tMin: 0, tMax: isSpiral ? 10 : 2 * Math.PI, worldExtent };
+  return resolveDynamicDomain(equation, mode === 'auto' ? detectSmartMode(equation) : mode);
+}
+
+function rangeWorldExtent(range: GraphRange) {
+  return Math.max(
+    Math.abs(range.xMin),
+    Math.abs(range.xMax),
+    Math.abs(range.yMin ?? range.xMin),
+    Math.abs(range.yMax ?? range.xMax),
+    Math.abs(range.worldExtent ?? 0),
+  );
+}
+
+function mergeGraphRanges(ranges: GraphRange[]): GraphRange {
+  const first = ranges[0];
+  if (!first) {
+    throw new Error('Cannot merge an empty set of graph ranges.');
   }
-  if (mode === 'polar') return { xMin: -6, xMax: 6, tMin: 0, tMax: 2 * Math.PI, worldExtent };
-  return { xMin: -10, xMax: 10, tMin: 0, tMax: 2 * Math.PI, worldExtent };
+  return {
+    xMin: Math.min(...ranges.map((range) => range.xMin)),
+    xMax: Math.max(...ranges.map((range) => range.xMax)),
+    yMin: Math.min(...ranges.map((range) => range.yMin ?? range.xMin)),
+    yMax: Math.max(...ranges.map((range) => range.yMax ?? range.xMax)),
+    tMin: Math.min(...ranges.map((range) => range.tMin)),
+    tMax: Math.max(...ranges.map((range) => range.tMax)),
+    worldExtent: Math.max(
+      rangeWorldExtent(first),
+      ...ranges.map((range) => range.worldExtent ?? rangeWorldExtent(range)),
+    ),
+  };
 }
 
 function contourPointKey(point: ScreenPoint) {
@@ -311,7 +322,7 @@ function createImplicitSurfaceGeometry(
   phase: number,
   speed: number,
   resolution: number,
-  extent = IMPLICIT_3D_WORLD_EXTENT,
+  extent: number,
 ) {
   const size = resolution + 1;
   const values = new Float32Array(size * size * size);
@@ -414,7 +425,7 @@ function createHeightmapSurfaceGeometry(
   phase: number,
   speed: number,
   resolution: number,
-  extent = IMPLICIT_3D_WORLD_EXTENT,
+  extent: number,
   heightScale = 1,
 ) {
   const positions: number[] = [];
@@ -882,11 +893,14 @@ function GraphCanvas({
 
     if (evaluator?.kind === 'vector') {
       const density = 8;
-      const extent = 4.5;
       for (let row = -density; row <= density; row += 1) {
         for (let column = -density; column <= density; column += 1) {
-          const x = (column / density) * extent;
-          const y = (row / density) * extent;
+          const xMin = range.xMin;
+          const xMax = range.xMax;
+          const yMin = range.yMin ?? range.xMin;
+          const yMax = range.yMax ?? range.xMax;
+          const x = xMin + ((column + density) / (density * 2)) * (xMax - xMin);
+          const y = yMin + ((row + density) / (density * 2)) * (yMax - yMin);
           const vx = evaluateExpression(evaluator.x, { x, y, t: phase, a: phase, b: speed, z: 0 });
           const vy = evaluateExpression(evaluator.y, { x, y, t: phase, a: phase, b: speed, z: 0 });
           const magnitude = Math.hypot(vx, vy);
@@ -900,12 +914,17 @@ function GraphCanvas({
     if (evaluator?.kind === 'implicit') {
       const resolution = IMPLICIT_GRID_RESOLUTION;
       const values = new Float32Array((resolution + 1) * (resolution + 1));
-      const step = (IMPLICIT_WORLD_EXTENT * 2) / resolution;
+      const xMin = range.xMin;
+      const xMax = range.xMax;
+      const yMin = range.yMin ?? range.xMin;
+      const yMax = range.yMax ?? range.xMax;
+      const stepX = (xMax - xMin) / resolution;
+      const stepY = (yMax - yMin) / resolution;
       for (let row = 0; row <= resolution; row += 1) {
-        const y = IMPLICIT_WORLD_EXTENT - row * step;
+        const y = yMax - row * stepY;
         const rowOffset = row * (resolution + 1);
         for (let column = 0; column <= resolution; column += 1) {
-          const x = -IMPLICIT_WORLD_EXTENT + column * step;
+          const x = xMin + column * stepX;
           values[rowOffset + column] = evaluateExpression(evaluator.expression, {
             x,
             y,
@@ -934,13 +953,13 @@ function GraphCanvas({
         ];
       };
       for (let row = 0; row < resolution; row += 1) {
-        const topY = IMPLICIT_WORLD_EXTENT - row * step;
-        const bottomY = topY - step;
+        const topY = yMax - row * stepY;
+        const bottomY = topY - stepY;
         const rowOffset = row * (resolution + 1);
         const nextRowOffset = (row + 1) * (resolution + 1);
         for (let column = 0; column < resolution; column += 1) {
-          const leftX = -IMPLICIT_WORLD_EXTENT + column * step;
-          const rightX = leftX + step;
+          const leftX = xMin + column * stepX;
+          const rightX = leftX + stepX;
           const topLeftValue = values[rowOffset + column];
           const topRightValue = values[rowOffset + column + 1];
           const bottomRightValue = values[nextRowOffset + column + 1];
@@ -1492,7 +1511,7 @@ function GraphCanvas({
       return;
     }
 
-    const surfaceInputKey = `${equation}|${mode}|${surfaceQuality}|${playing}|${range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT}|${surfaceHeightScale}`;
+    const surfaceInputKey = `${equation}|${mode}|${surfaceQuality}|${playing}|${rangeWorldExtent(range)}|${surfaceHeightScale}`;
     const inputChanged = surfaceInputKeyRef.current !== surfaceInputKey;
     if (inputChanged) {
       surfaceInputKeyRef.current = surfaceInputKey;
@@ -1514,7 +1533,7 @@ function GraphCanvas({
       resolution: Math.min(96, surfaceQuality === 'final' && !playing
         ? IMPLICIT_3D_FINAL_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 24 : 0)
         : IMPLICIT_3D_DRAFT_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 8 : 0)),
-      extent: range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT,
+      extent: range.worldExtent ?? rangeWorldExtent(range),
       heightScale: surfaceHeightScale,
     };
     surfaceRequestRef.current = request;
@@ -1995,7 +2014,7 @@ function GraphCanvas({
       const positions = positionAttribute.array as ArrayLike<number>;
       const indexAttribute = geometry?.getIndex();
       const triangleCount = indexAttribute ? Math.floor(indexAttribute.count / 3) : Math.floor(positions.length / 9);
-      const fallbackScale = Math.min(w, h) / (IMPLICIT_3D_WORLD_EXTENT * 2.35) * graphZoom;
+      const fallbackScale = Math.min(w, h) / (Math.max(1, rangeWorldExtent(viewportRange)) * 2.35) * graphZoom;
       const fallbackCenterX = w * 0.5;
       const fallbackCenterY = h * 0.53;
       const triangles: Array<{
@@ -2089,9 +2108,12 @@ function GraphCanvas({
 
     const renderVectorField = (field: Extract<GraphEvaluator, { kind: 'vector' }>, stroke = color) => {
       const density = 8;
-      const extent = 4.5;
       const total = (density * 2 + 1) ** 2;
       const visibleCount = Math.max(1, Math.ceil(total * drawProgress));
+      const xMin = viewportRange.xMin;
+      const xMax = viewportRange.xMax;
+      const yMin = viewportRange.yMin ?? viewportRange.xMin;
+      const yMax = viewportRange.yMax ?? viewportRange.xMax;
       let arrowIndex = 0;
       ctx.strokeStyle = stroke;
       ctx.lineWidth = Math.max(1, lineWidth * 0.82);
@@ -2101,8 +2123,8 @@ function GraphCanvas({
         for (let column = -density; column <= density; column += 1) {
           if (arrowIndex >= visibleCount) return;
           arrowIndex += 1;
-          const x = (column / density) * extent;
-          const y = (row / density) * extent;
+          const x = xMin + ((column + density) / (density * 2)) * (xMax - xMin);
+          const y = yMin + ((row + density) / (density * 2)) * (yMax - yMin);
           const vx = evaluate(field.x, { x, y, t: phase, a: phase, b: speed, z: 0 });
           const vy = evaluate(field.y, { x, y, t: phase, a: phase, b: speed, z: 0 });
           const magnitude = Math.hypot(vx, vy);
@@ -2189,8 +2211,9 @@ function GraphCanvas({
         let bestRadius = Number.NaN;
         let bestAbs = Number.POSITIVE_INFINITY;
         let previous = Number.NaN;
+        const radialExtent = Math.max(1, rangeWorldExtent(viewportRange));
         for (let step = 0; step <= 48; step += 1) {
-          const radius = (step / 48) * 4;
+          const radius = (step / 48) * radialExtent;
           const value = evaluate(evaluator.expression, {
             x: radius * Math.cos(u),
             y: radius * Math.sin(u),
@@ -2399,6 +2422,7 @@ function MainStudio() {
   const launchModeParam = launchParams.get('mode');
   const launchMode: StudioMode = isStudioMode(launchModeParam) ? launchModeParam : 'auto';
   const launchResolvedMode: ResolvedStudioMode = launchMode === 'auto' ? detectSmartMode(launchEquation) : launchMode;
+  const launchRange = detectSmartRange(launchEquation, launchResolvedMode);
   const [equation, setEquation] = useState(launchEquation);
   const [mode, setMode] = useState<StudioMode>(launchMode);
   const [layers, setLayers] = useState<EquationLayer[]>([
@@ -2417,10 +2441,10 @@ function MainStudio() {
   const [playing, setPlaying] = useState(true);
   const [progress, setProgress] = useState(0);
   const [autoRange, setAutoRange] = useState(true);
-  const [manualXMin, setManualXMin] = useState(-10);
-  const [manualXMax, setManualXMax] = useState(10);
-  const [manualTMin, setManualTMin] = useState(0);
-  const [manualTMax, setManualTMax] = useState(2 * Math.PI);
+  const [manualXMin, setManualXMin] = useState(launchRange.xMin);
+  const [manualXMax, setManualXMax] = useState(launchRange.xMax);
+  const [manualTMin, setManualTMin] = useState(launchRange.tMin);
+  const [manualTMax, setManualTMax] = useState(launchRange.tMax);
   const [speed, setSpeed] = useState(1);
   const [duration, setDuration] = useState(8);
   const [lineWidth, setLineWidth] = useState(2);
@@ -2631,6 +2655,8 @@ function MainStudio() {
       if (cancelled) return;
       if (saved) {
         const restoredEquation = typeof saved.equation === 'string' ? saved.equation : launchEquation;
+        const restoredMode = isStudioMode(saved.mode) ? saved.mode : launchResolvedMode;
+        const restoredRange = detectSmartRange(restoredEquation, restoredMode);
         setEquation(restoredEquation);
         editHistoryRef.current = [restoredEquation];
         editHistoryIndexRef.current = 0;
@@ -2652,10 +2678,10 @@ function MainStudio() {
         if (typeof saved.playing === 'boolean') setPlaying(saved.playing);
          setProgress(Math.min(1, Math.max(0, finiteNumber(saved.progress, 0))));
         if (typeof saved.autoRange === 'boolean') setAutoRange(saved.autoRange);
-        setManualXMin(finiteNumber(saved.manualXMin, -10));
-        setManualXMax(finiteNumber(saved.manualXMax, 10));
-        setManualTMin(finiteNumber(saved.manualTMin, 0));
-        setManualTMax(finiteNumber(saved.manualTMax, 2 * Math.PI));
+        setManualXMin(finiteNumber(saved.manualXMin, restoredRange.xMin));
+        setManualXMax(finiteNumber(saved.manualXMax, restoredRange.xMax));
+        setManualTMin(finiteNumber(saved.manualTMin, restoredRange.tMin));
+        setManualTMax(finiteNumber(saved.manualTMax, restoredRange.tMax));
         setSpeed(finiteNumber(saved.speed, 1));
         setDuration(finiteNumber(saved.duration, 8));
         setLineWidth(finiteNumber(saved.lineWidth, 2));
@@ -2764,8 +2790,16 @@ function MainStudio() {
     return {
       xMin: Math.min(manualXMin, manualXMax - 0.001),
       xMax: Math.max(manualXMax, manualXMin + 0.001),
+      yMin: Math.min(manualXMin, manualXMax - 0.001),
+      yMax: Math.max(manualXMax, manualXMin + 0.001),
       tMin: Math.min(manualTMin, manualTMax - 0.001),
       tMax: Math.max(manualTMax, manualTMin + 0.001),
+      worldExtent: Math.max(
+        Math.abs(manualXMin),
+        Math.abs(manualXMax),
+        Math.abs(manualTMin),
+        Math.abs(manualTMax),
+      ),
     };
   }, [autoRange, manualTMax, manualTMin, manualXMax, manualXMin, smartRange]);
   const audioEvaluator = useMemo(
@@ -2986,7 +3020,7 @@ function MainStudio() {
         expression: combineImplicitFields(threeDimensionalEntries, surfaceBlendMode),
         color: threeDimensionalEntries[0].color,
         mode: 'implicit3d' as const,
-        range: threeDimensionalEntries[0].range,
+        range: mergeGraphRanges(threeDimensionalEntries.map((entry) => entry.range)),
       }, ...coloredEntries.filter((entry) => entry.mode !== 'implicit3d' && entry.mode !== 'surface3d')];
     }
     return coloredEntries;
@@ -3144,10 +3178,10 @@ function MainStudio() {
     setOriginView(true);
     setGraphZoom(1);
     setAutoRange(false);
-    setManualXMin(-10);
-    setManualXMax(10);
-    setManualTMin(0);
-    setManualTMax(2 * Math.PI);
+    setManualXMin(smartRange.xMin);
+    setManualXMax(smartRange.xMax);
+    setManualTMin(smartRange.tMin);
+    setManualTMax(smartRange.tMax);
     setTopNotice('Viewport centered on origin');
   };
   const cycleTheme = () => {
@@ -3579,6 +3613,11 @@ function MainStudio() {
       input?.setSelectionRange(nextCursor, nextCursor);
     });
   };
+  const domainReadout = resolvedMode === 'function' || resolvedMode === 'piecewise'
+    ? `x ${activeRange.xMin} … ${activeRange.xMax}`
+    : resolvedMode === 'parametric' || resolvedMode === 'polar'
+      ? `${resolvedMode === 'polar' ? 'θ' : 't'} ${activeRange.tMin.toFixed(2)} … ${activeRange.tMax.toFixed(2)}`
+      : `x ${activeRange.xMin} … ${activeRange.xMax} · y ${activeRange.yMin ?? activeRange.xMin} … ${activeRange.yMax ?? activeRange.xMax}`;
 
   return (
       <div ref={studioRootRef} className={`studio-app theme-${theme}`} style={{ '--page-zoom': pageZoom } as CSSProperties}>
@@ -3852,7 +3891,7 @@ function MainStudio() {
                   <div>MODE <strong>{resolvedMode.toUpperCase()}</strong> <span className="muted">· {smartPatternLabel(renderEquation, resolvedMode)}</span>{usingSafeFallback && <span className="fps-readout"> · SAFE</span>}</div>
                 <div>FRAME <strong>{String(Math.round(progress * 240)).padStart(3, '0')}</strong> / 240</div>
                  {showFps && <div className="fps-readout">FPS <strong>{fps}</strong></div>}
-                  <div>{resolvedMode === 'function' || resolvedMode === 'piecewise' ? 'X RANGE' : resolvedMode === 'parametric' ? 'T RANGE' : resolvedMode === 'polar' ? 'Θ RANGE' : 'DOMAIN'} <strong>{resolvedMode === 'function' || resolvedMode === 'piecewise' ? `${activeRange.xMin} … ${activeRange.xMax}` : resolvedMode === 'parametric' || resolvedMode === 'polar' ? `${activeRange.tMin.toFixed(2)} … ${activeRange.tMax.toFixed(2)}` : resolvedMode === 'implicit3d' || resolvedMode === 'surface3d' ? `−${activeRange.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT} … ${activeRange.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT}` : '−π … π'}</strong></div>
+                  <div>DOMAIN <strong>{domainReadout}</strong></div>
               </div>
                  <div className="canvas-legend"><span className="legend-line" /> {canvasEntries.length > 1 ? `${canvasEntries.length} active traces` : canvasEntries.length === 0 ? 'no active traces' : 'active trace'} <span className="muted">·</span> t = {displayTime}s</div>
                   <div className={`canvas-empty ${canvasEntries.length > 0 && (playing || progress >= 1) ? 'is-hidden' : ''}`} aria-hidden={canvasEntries.length > 0 && (playing || progress >= 1)}>
@@ -3982,7 +4021,7 @@ function MainStudio() {
                  {(resolvedMode === 'function' || resolvedMode === 'piecewise') && <>x: {smartRange.xMin} → {smartRange.xMax}</>}
                 {(resolvedMode === 'parametric' || resolvedMode === 'polar') && <>{resolvedMode === 'polar' ? 'θ' : 't'}: {smartRange.tMin.toFixed(2)} → {smartRange.tMax.toFixed(2)}</>}
                 {resolvedMode === 'points' && <>Sequential: first → last point</>}
-                {resolvedMode === 'implicit3d' ? <>Adaptive 3D mesh viewport</> : resolvedMode === 'implicit' ? <>Adaptive contour viewport</> : null}
+                 {(resolvedMode === 'implicit3d' || resolvedMode === 'surface3d' || resolvedMode === 'implicit') && <>x: {smartRange.xMin} → {smartRange.xMax} · y: {smartRange.yMin} → {smartRange.yMax}</>}
                  {resolvedMode === 'vector' && <>Adaptive direction-field viewport</>}
               </div>
              ) : resolvedMode === 'points' || resolvedMode === 'implicit' || resolvedMode === 'implicit3d' || resolvedMode === 'vector' ? (

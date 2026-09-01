@@ -15,6 +15,16 @@ export type GraphEvaluator =
   | { kind: 'points'; points: CompiledPoint[] }
   | null;
 
+export type DynamicDomain = {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+  tMin: number;
+  tMax: number;
+  worldExtent?: number;
+};
+
 const math = create(all, {});
 const mathFunctions = new Set([
   'abs', 'acos', 'acosh', 'acot', 'acoth', 'acsc', 'acsch', 'asec', 'asech',
@@ -139,6 +149,274 @@ export function normalizeImplicitField(input: string, mode: 'implicit' | 'implic
     return `(${program.renderExpression}) - z`;
   }
   return `(${program.renderExpression})`;
+}
+
+function unwrapAstNode(node: any): any {
+  return node?.type === 'ParenthesisNode' ? node.content : node;
+}
+
+type ConstantBindings = Record<string, number>;
+
+function constantAstValue(node: any, bindings: ConstantBindings = {}): number | null {
+  const current = unwrapAstNode(node);
+  if (!current) return null;
+  if (current.type === 'ConstantNode') {
+    const value = Number(current.value);
+    return Number.isFinite(value) ? value : null;
+  }
+  if (current.type === 'SymbolNode') {
+    const name = String(current.name ?? '').toLowerCase();
+    if (name === 'pi') return Math.PI;
+    if (name === 'e') return Math.E;
+    const value = bindings[current.name] ?? bindings[name];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+  if (current.type === 'OperatorNode' && Array.isArray(current.args)) {
+    const values = current.args.map((argument: any) => constantAstValue(argument, bindings));
+    if (values.some((value: number | null) => value === null)) return null;
+    if (values.length === 1 && (current.op === '+' || current.op === '-')) {
+      return current.op === '-' ? -values[0]! : values[0]!;
+    }
+    if (values.length !== 2) return null;
+    const [left, right] = values as [number, number];
+    if (current.op === '+') return left + right;
+    if (current.op === '-') return left - right;
+    if (current.op === '*') return left * right;
+    if (current.op === '/') return Math.abs(right) < Number.EPSILON ? null : left / right;
+    if (current.op === '^') return left ** right;
+    if (current.op === '%') return right === 0 ? null : left % right;
+    return null;
+  }
+  if (current.type === 'FunctionNode') {
+    const name = String(current.fn?.name ?? current.name ?? '').toLowerCase();
+    const values = (current.args ?? []).map((argument: any) => constantAstValue(argument, bindings));
+    if (values.some((value: number | null) => value === null)) return null;
+    const args = values as number[];
+    const functions: Record<string, (...values: number[]) => number> = {
+      abs: Math.abs,
+      cos: Math.cos,
+      exp: Math.exp,
+      log: Math.log,
+      log10: Math.log10,
+      sin: Math.sin,
+      sqrt: Math.sqrt,
+      tan: Math.tan,
+    };
+    const fn = functions[name];
+    if (!fn) return null;
+    const value = fn(...args);
+    return Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+function numericAstValue(node: any, bindings: ConstantBindings = {}) {
+  return constantAstValue(node, bindings);
+}
+
+function axisOffset(node: any, axis: string, bindings: ConstantBindings = {}): number | null {
+  const current = unwrapAstNode(node);
+  if (current?.type === 'SymbolNode' && current.name?.toLowerCase() === axis) return 0;
+  if (current?.type !== 'OperatorNode' || !Array.isArray(current.args) || current.args.length !== 2) return null;
+  const left = unwrapAstNode(current.args[0]);
+  const right = unwrapAstNode(current.args[1]);
+  const leftIsAxis = left?.type === 'SymbolNode' && left.name?.toLowerCase() === axis;
+  const rightIsAxis = right?.type === 'SymbolNode' && right.name?.toLowerCase() === axis;
+  const leftValue = numericAstValue(left, bindings);
+  const rightValue = numericAstValue(right, bindings);
+  if (current.op === '+' && leftIsAxis && rightValue !== null) return rightValue;
+  if (current.op === '+' && rightIsAxis && leftValue !== null) return leftValue;
+  if (current.op === '-' && leftIsAxis && rightValue !== null) return -rightValue;
+  return null;
+}
+
+function squaredAxisOffset(node: any, bindings: ConstantBindings) {
+  const current = unwrapAstNode(node);
+  if (current?.type !== 'OperatorNode' || current.op !== '^' || !Array.isArray(current.args)) return null;
+  const exponent = numericAstValue(current.args[1], bindings);
+  if (exponent === null || Math.abs(exponent) !== 2) return null;
+  for (const axis of ['x', 'y', 'z']) {
+    const offset = axisOffset(current.args[0], axis, bindings);
+    if (offset !== null) return { axis, center: -offset };
+  }
+  return null;
+}
+
+function productFactors(node: any): any[] {
+  const current = unwrapAstNode(node);
+  if (current?.type === 'OperatorNode' && current.op === '*' && Array.isArray(current.args)) {
+    return current.args.flatMap((argument: any) => productFactors(argument));
+  }
+  if (current?.type === 'OperatorNode' && current.op === '-' && Array.isArray(current.args) && current.args.length === 1) {
+    return [{ type: 'ConstantNode', value: -1 }, ...productFactors(current.args[0])];
+  }
+  return [current];
+}
+
+function quadraticProductSignal(node: any, bindings: ConstantBindings) {
+  const factors = productFactors(node);
+  const squared = factors
+    .map((factor) => squaredAxisOffset(factor, bindings))
+    .find((signal): signal is { axis: string; center: number } => Boolean(signal));
+  if (!squared) return null;
+  let coefficient = 1;
+  for (const factor of factors) {
+    const value = constantAstValue(factor, bindings);
+    if (value !== null) coefficient *= value;
+  }
+  return Number.isFinite(coefficient) && coefficient < 0
+    ? { ...squared, decayRate: -coefficient }
+    : null;
+}
+
+function analyzeDynamicDomain(input: string) {
+  const normalized = normalizeForPreview(input);
+  const program = splitProgramStatements(normalized);
+  const renderExpression = program.renderExpression;
+  const bindings: ConstantBindings = { pi: Math.PI, e: Math.E };
+  program.helpers.forEach((helper) => {
+    try {
+      const value = constantAstValue(math.parse(helper.source), bindings);
+      if (value !== null) bindings[helper.name] = value;
+    } catch {
+      // Helper values that depend on graph variables cannot shape the domain.
+    }
+  });
+  const signals = {
+    hasX: /\bx\b/i.test(renderExpression),
+    hasY: /\by\b/i.test(renderExpression),
+    hasZ: /\bz\b/i.test(renderExpression),
+    hasTrig: /\b(?:sin|cos|tan|sec|csc|cot)\b/i.test(renderExpression),
+    xCenters: [] as number[],
+    yCenters: [] as number[],
+    zCenters: [] as number[],
+    quadraticAxes: new Set<string>(),
+    decayRates: { x: 0, y: 0, z: 0 },
+    numericMagnitude: 0,
+  };
+
+  for (const match of renderExpression.matchAll(/(?<![A-Za-z_])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?![A-Za-z_])/g)) {
+    const value = Math.abs(Number(match[0]));
+    if (Number.isFinite(value)) signals.numericMagnitude = Math.max(signals.numericMagnitude, value);
+  }
+
+  try {
+    const root = math.parse(renderExpression);
+    root.traverse((node: any) => {
+      if (node?.type === 'FunctionNode') {
+        const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
+        if (['sin', 'cos', 'tan', 'sec', 'csc', 'cot'].includes(name)) signals.hasTrig = true;
+      }
+      if (node?.type !== 'OperatorNode' || node.op !== '^' || !Array.isArray(node.args)) return;
+      const exponent = numericAstValue(node.args[1], bindings);
+      if (exponent === null || Math.abs(exponent) !== 2) return;
+      for (const axis of ['x', 'y', 'z']) {
+        const offset = axisOffset(node.args[0], axis, bindings);
+        if (offset === null) continue;
+        signals.quadraticAxes.add(axis);
+        // (axis - center)^2 has an AST offset of -center.
+        const center = -offset;
+        if (axis === 'x') signals.xCenters.push(center);
+        if (axis === 'y') signals.yCenters.push(center);
+        if (axis === 'z') signals.zCenters.push(center);
+      }
+    });
+
+    root.traverse((node: any) => {
+      if (node?.type !== 'FunctionNode') return;
+      const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
+      if (name !== 'exp' || !Array.isArray(node.args)) return;
+      const signal = quadraticProductSignal(node.args[0], bindings);
+      if (!signal) return;
+      signals.decayRates[signal.axis as 'x' | 'y' | 'z'] = Math.max(
+        signals.decayRates[signal.axis as 'x' | 'y' | 'z'],
+        signal.decayRate,
+      );
+    });
+  } catch {
+    // Regex-derived signals below keep auto range useful while the input is incomplete.
+  }
+
+  const addCenter = (axis: 'x' | 'y' | 'z', value: number) => {
+    if (!Number.isFinite(value)) return;
+    const centers = axis === 'x' ? signals.xCenters : axis === 'y' ? signals.yCenters : signals.zCenters;
+    if (!centers.some((center) => Math.abs(center - value) < 1e-6)) centers.push(value);
+  };
+  for (const axis of ['x', 'y', 'z'] as const) {
+    const decayPattern = new RegExp(`-\\s*(\\d+(?:\\.\\d*)?|\\.\\d+)\\s*\\*[^;\\n]*\\b${axis}\\b`, 'gi');
+    for (const match of renderExpression.matchAll(decayPattern)) {
+      const rate = Number(match[1]);
+      if (Number.isFinite(rate)) signals.decayRates[axis] = Math.max(signals.decayRates[axis], rate);
+    }
+  }
+  for (const axis of ['x', 'y', 'z'] as const) {
+    const centerPattern = new RegExp(`\\b${axis}\\s*([+-])\\s*(\\d+(?:\\.\\d*)?|\\.\\d+)`, 'gi');
+    for (const match of renderExpression.matchAll(centerPattern)) {
+      const value = Number(match[2]) * (match[1] === '-' ? 1 : -1);
+      addCenter(axis, value);
+    }
+  }
+  signals.xCenters.forEach((value) => addCenter('x', value));
+  signals.yCenters.forEach((value) => addCenter('y', value));
+  signals.zCenters.forEach((value) => addCenter('z', value));
+  return signals;
+}
+
+function dynamicAxisBounds(
+  centers: number[],
+  hasTrig: boolean,
+  hasQuadratic: boolean,
+  decayRate: number,
+  numericMagnitude: number,
+) {
+  // A wave's natural two-period view is derived from its characteristic period.
+  if (hasTrig) return { min: -2 * Math.PI, max: 2 * Math.PI };
+
+  const center = centers.length > 0
+    ? centers.reduce((sum, value) => sum + value, 0) / centers.length
+    : 0;
+  const decaySpan = decayRate > 0 ? 3 / Math.sqrt(decayRate) : 0;
+  const algebraicSpan = hasQuadratic && decayRate === 0 ? 2.5 : 0;
+  const magnitudeSpan = decayRate === 0 && numericMagnitude > 1 ? Math.sqrt(numericMagnitude) : 0;
+  const span = Math.max(1.5, decaySpan, algebraicSpan, magnitudeSpan);
+  const extent = Math.max(2, Math.ceil((Math.abs(center) + span) / 4) * 4);
+  return { min: -extent, max: extent };
+}
+
+export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): DynamicDomain {
+  const signals = analyzeDynamicDomain(input);
+  const xBounds = dynamicAxisBounds(
+    signals.xCenters,
+    signals.hasTrig,
+    signals.quadraticAxes.has('x'),
+    signals.decayRates.x,
+    signals.numericMagnitude,
+  );
+  const yBounds = dynamicAxisBounds(
+    signals.yCenters,
+    signals.hasTrig,
+    signals.quadraticAxes.has('y'),
+    signals.decayRates.y,
+    signals.numericMagnitude,
+  );
+  const zBounds = dynamicAxisBounds(
+    signals.zCenters,
+    false,
+    signals.quadraticAxes.has('z'),
+    signals.decayRates.z,
+    signals.numericMagnitude,
+  );
+  const tMax = mode === 'parametric' || mode === 'parametric3d'
+    ? (/(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/i.test(input) ? 10 : 2 * Math.PI)
+    : 2 * Math.PI;
+  const xMin = signals.hasX || mode === 'polar' ? xBounds.min : -xBounds.max;
+  const xMax = signals.hasX || mode === 'polar' ? xBounds.max : -xBounds.min;
+  const yMin = signals.hasY ? yBounds.min : -yBounds.max;
+  const yMax = signals.hasY ? yBounds.max : -yBounds.min;
+  const worldExtent = mode === 'implicit3d' || mode === 'surface3d'
+    ? Math.max(Math.abs(xMin), Math.abs(xMax), Math.abs(yMin), Math.abs(yMax), Math.abs(zBounds.min), Math.abs(zBounds.max))
+    : undefined;
+  return { xMin, xMax, yMin, yMax, tMin: 0, tMax, worldExtent };
 }
 
 export function isImplicit3dHeightmapExpression(input: string) {
