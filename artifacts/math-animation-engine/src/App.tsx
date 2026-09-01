@@ -109,8 +109,6 @@ type CachedFrame = {
 const IMPLICIT_GRID_RESOLUTION = 96;
 const IMPLICIT_CACHE_LIMIT = 24;
 const FRAME_CACHE_SIZE = 60;
-const IMPLICIT_3D_DRAFT_GRID_RESOLUTION = 32;
-const IMPLICIT_3D_FINAL_GRID_RESOLUTION = 88;
 const GRAPH_ZOOM_MIN = 0.05;
 const GRAPH_ZOOM_MAX = 20;
 const GRAPH_ZOOM_BUTTON_FACTOR = 1.25;
@@ -596,15 +594,16 @@ const getRaymarchPreviewSteps = (fullSteps: number) => fullSteps >= 256 ? 48 : 3
 
 const shaderMath = create(all);
 
-function compileGlslNode(node: any): string | null {
+function compileGlslNode(node: any, bindings: Record<string, string> = {}): string | null {
   if (!node) return null;
-  if (node.type === 'ParenthesisNode') return compileGlslNode(node.content);
+  if (node.type === 'ParenthesisNode') return compileGlslNode(node.content, bindings);
   if (node.type === 'ConstantNode') {
     const value = Number(node.value);
     return Number.isFinite(value) ? value.toFixed(8) : null;
   }
   if (node.type === 'SymbolNode') {
     const symbol = String(node.name ?? '').toLowerCase();
+    if (bindings[symbol]) return `(${bindings[symbol]})`;
     if (symbol === 'x') return 'p.x';
     if (symbol === 'y') return 'p.y';
     if (symbol === 'z') return 'p.z';
@@ -612,10 +611,12 @@ function compileGlslNode(node: any): string | null {
     if (symbol === 'v' || symbol === 'r' || symbol === 'phi' || symbol === 'b') return 'uSpeed';
     if (symbol === 'pi') return 'PI';
     if (symbol === 'e') return 'E';
+    if (symbol === 'usurfaceheightscale') return 'uSurfaceHeightScale';
+    if (symbol === 'udomainextent') return 'uDomainExtent';
     return null;
   }
   if (node.type === 'OperatorNode') {
-    const args = Array.isArray(node.args) ? node.args.map(compileGlslNode) : [];
+    const args = Array.isArray(node.args) ? node.args.map((argument: any) => compileGlslNode(argument, bindings)) : [];
     if (args.some((value: string | null) => value === null)) return null;
     const [first, second] = args as [string, string?];
     if (node.fn === 'unaryMinus') return `(-(${first}))`;
@@ -626,12 +627,12 @@ function compileGlslNode(node: any): string | null {
   }
   if (node.type === 'FunctionNode') {
     const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
-    const args = (Array.isArray(node.args) ? node.args : []).map(compileGlslNode);
+    const args = (Array.isArray(node.args) ? node.args : []).map((argument: any) => compileGlslNode(argument, bindings));
     if (args.some((value: string | null) => value === null)) return null;
     const compiledArgs = args as string[];
     const directFunctions = new Set([
       'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
-      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign',
+      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign', 'tanh',
     ]);
     if (directFunctions.has(name)) return `${name}(${compiledArgs.join(', ')})`;
     if (name === 'ln' || name === 'log') return `log(${compiledArgs[0] ?? '0.0'})`;
@@ -646,8 +647,17 @@ function compileGlslNode(node: any): string | null {
 
 function compileGlslExpression(source: string) {
   try {
-    const program = source.split(';').map((part) => part.trim()).filter(Boolean).at(-1) ?? source;
-    return compileGlslNode(shaderMath.parse(program));
+    const statements = source.split(';').map((part) => part.trim()).filter(Boolean);
+    const renderExpression = statements.pop() ?? source;
+    const bindings: Record<string, string> = {};
+    for (const statement of statements) {
+      const assignment = statement.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*(.+)$/);
+      if (!assignment) return null;
+      const helperExpression = compileGlslNode(shaderMath.parse(assignment[2]), bindings);
+      if (!helperExpression) return null;
+      bindings[assignment[1].toLowerCase()] = helperExpression;
+    }
+    return compileGlslNode(shaderMath.parse(renderExpression), bindings);
   } catch {
     return null;
   }
@@ -697,6 +707,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       uniform float uAspect;
       uniform float uFovRadians;
       uniform float uDomainExtent;
+      uniform float uSurfaceHeightScale;
       uniform float uPhase;
       uniform float uSpeed;
       uniform float uSmoothness;
@@ -805,6 +816,17 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
     `,
   };
 }
+
+const raymarchShaderCache = new Map<string, RaymarchShader | null>();
+
+function getCachedImplicitRaymarchShader(sources: string[]) {
+  const cacheKey = sources.join('\u001f');
+  if (!raymarchShaderCache.has(cacheKey)) {
+    raymarchShaderCache.set(cacheKey, buildImplicitRaymarchShader(sources));
+  }
+  return raymarchShaderCache.get(cacheKey) ?? null;
+}
+
 type SurfaceBlendMode = 'overlay' | 'union' | 'intersection' | 'additive';
 type StudioTheme = 'light' | 'dark' | 'neon';
 type StudioSessionState = {
@@ -869,7 +891,11 @@ const layerColors = ['#c7f36b', '#ff8b6d', '#72d8ff', '#d6a8ff', '#ffd166'];
 const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
 
 function implicitFieldSource(equation: string, mode: StudioMode) {
-  if (mode === 'surface3d') return `(z) - (${parserNormalizeSurfaceExpression(equation)})`;
+  if (mode === 'surface3d') {
+    // Bound the height field in the ray box without sampling it on the CPU.
+    // The expression remains a GPU distance-field function.
+    return `(z) - (tanh((${parserNormalizeSurfaceExpression(equation)}) * uSurfaceHeightScale) * uDomainExtent * 0.55)`;
+  }
   return parserNormalizeImplicitField(
     equation,
     mode === 'implicit3d' ? 'implicit3d' : 'implicit',
@@ -879,8 +905,8 @@ function implicitFieldSource(equation: string, mode: StudioMode) {
 function combineImplicitFields(entries: Array<{ expression: string; mode: StudioMode }>, blendMode: SurfaceBlendMode) {
   const fields = entries.map((entry) => implicitFieldSource(entry.expression, entry.mode));
   if (blendMode === 'union') {
-    // Keep the CPU fallback visually consistent with the GLSL polynomial smin.
-    // Unlike binary min(), this preserves a continuous gradient at overlaps.
+    // Keep the shader CSG visually continuous at overlaps.
+    // Unlike binary min(), this preserves a continuous gradient.
     return fields.slice(1).reduce(
       (current, field) => `(0.5 * ((${current}) + (${field}) - sqrt(((${current}) - (${field}))^2 + 0.12^2)))`,
       fields[0] ?? '0',
@@ -1026,15 +1052,6 @@ function GraphCanvas({
   const threeSurfaceGroupRef = useRef<THREE.Group | null>(null);
   const threeSurfaceGeometryRef = useRef<THREE.BufferGeometry | null>(null);
   const threeSurfaceReadyRef = useRef(false);
-  const lastSurfaceBuildRef = useRef(0);
-  const surfaceWorkerRef = useRef<Worker | null>(null);
-  const surfaceRequestIdRef = useRef(0);
-  const surfaceQueueTokenRef = useRef(0);
-  const surfaceRequestRef = useRef<ImplicitSurfaceWorkerRequest | null>(null);
-  const surfaceRequestTimerRef = useRef<number | null>(null);
-  const surfaceFallbackTimerRef = useRef<number | null>(null);
-  const surfaceWorkerBusyRef = useRef(false);
-  const surfaceInputKeyRef = useRef('');
   const surfaceColorRef = useRef(color);
   const graphZoomRef = useRef(graphZoom);
   const raymarchUniformsRef = useRef<Record<string, THREE.IUniform>>({});
@@ -1042,19 +1059,40 @@ function GraphCanvas({
   const raymarchSettleTimerRef = useRef<number | null>(null);
   const raymarchFullStepsRef = useRef(256);
   const raymarchUpdateRef = useRef<(camera: THREE.PerspectiveCamera) => void>(() => undefined);
-  const installSurfaceRef = useRef<(positions: GeometryBufferInput, indices?: GeometryBufferInput) => void>(() => undefined);
   const drawRef = useRef<() => void>(() => undefined);
   const visibilityTargetRef = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState(true);
   const [hoverPoint, setHoverPoint] = useState<{ point: THREE.Vector3; x: number; y: number } | null>(null);
-  const [surfaceQuality, setSurfaceQuality] = useState<'draft' | 'final'>('final');
   const evaluator = useMemo(() => buildGraphEvaluator(equation, mode), [equation, mode]);
-  const implicitRaymarchShader = useMemo(
-    () => mode === 'implicit3d'
-      ? buildImplicitRaymarchShader(implicitFields?.length ? implicitFields : [equation])
-      : null,
+  const implicitSources = useMemo(
+    () => implicitFields?.length
+      ? implicitFields
+      : [implicitFieldSource(equation, mode)],
     [equation, implicitFields, mode],
   );
+  const implicitSourceKey = implicitSources.join('\u001f');
+  const [implicitRaymarchShader, setImplicitRaymarchShader] = useState<RaymarchShader | null>(null);
+  useEffect(() => {
+    const isGpuRaymarchedMode = mode === 'implicit3d' || mode === 'surface3d';
+    if (!isGpuRaymarchedMode) {
+      setImplicitRaymarchShader(null);
+      return;
+    }
+    let cancelled = false;
+    const compileTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      const shader = getCachedImplicitRaymarchShader(implicitSources);
+      setImplicitRaymarchShader(shader);
+      if (!shader) {
+        onRuntimeWarning('The equation could not be compiled into a GPU fragment shader.');
+        onRenderStatus('error', 'This 3D equation uses syntax that the GPU shader compiler cannot translate.');
+      }
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(compileTimer);
+    };
+  }, [implicitSourceKey, implicitSources, mode, onRenderStatus, onRuntimeWarning]);
   const setRaymarchInteraction = useCallback((active: boolean) => {
     raymarchInteractionRef.current = active;
     if (raymarchSettleTimerRef.current !== null) {
@@ -1087,7 +1125,7 @@ function GraphCanvas({
   }, [color]);
 
   useEffect(() => {
-    if (mode !== 'implicit3d' || !implicitRaymarchShader) return;
+    if ((mode !== 'implicit3d' && mode !== 'surface3d') || !implicitRaymarchShader) return;
     setRaymarchInteraction(true);
     const settleTimer = window.setTimeout(() => setRaymarchInteraction(false), RAYMARCH_INTERACTION_SETTLE_MS + 40);
     return () => window.clearTimeout(settleTimer);
@@ -1310,15 +1348,7 @@ function GraphCanvas({
   }, [evaluator, range, speed]);
 
   useEffect(() => {
-    const signature = [
-      equation,
-      mode,
-      speed,
-      viewportRange.xMin,
-      viewportRange.xMax,
-      viewportRange.tMin,
-      viewportRange.tMax,
-    ].join('|');
+    if (mode === 'implicit3d' || mode === 'surface3d') return;
     frameCacheRef.current.clear();
     const buildToken = ++frameCacheBuildRef.current;
     let cursor = 0;
@@ -1374,24 +1404,29 @@ function GraphCanvas({
   useEffect(() => {
     const canvas = webglCanvasRef.current;
     if (!canvas) return;
+    const isThreeDimensional = mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d';
+    if (!isThreeDimensional) return;
     let context: WebGL2RenderingContext | WebGLRenderingContext | null = null;
     try {
       context = canvas.getContext('webgl2', {
         alpha: true,
         antialias: true,
         powerPreference: 'high-performance',
+        failIfMajorPerformanceCaveat: true,
         preserveDrawingBuffer: true,
       }) ?? canvas.getContext('webgl', {
         alpha: true,
         antialias: true,
         powerPreference: 'high-performance',
+        failIfMajorPerformanceCaveat: true,
         preserveDrawingBuffer: true,
       });
     } catch {
       context = null;
     }
     if (!context) {
-      onRuntimeWarning('WebGL unavailable; showing the projected 3D surface fallback.');
+      onRuntimeWarning('Hardware-accelerated WebGL is required for 3D rendering; the CPU canvas path is disabled.');
+      onRenderStatus('error', 'Hardware-accelerated WebGL is required for 3D Surface and 3D Implicit modes.');
       return;
     }
     let renderer: THREE.WebGLRenderer;
@@ -1405,11 +1440,13 @@ function GraphCanvas({
         powerPreference: 'high-performance',
       });
     } catch {
-      onRuntimeWarning('WebGL renderer unavailable; showing the projected 3D surface fallback.');
+      onRuntimeWarning('Three.js could not initialize the hardware-accelerated WebGL renderer; the CPU canvas path is disabled.');
+      onRenderStatus('error', 'The hardware-accelerated WebGL renderer could not be initialized.');
       return;
     }
-    const fullPixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-    const interactionPixelRatio = Math.min(fullPixelRatio, 0.85);
+    const isTouchViewport = navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches;
+    const fullPixelRatio = isTouchViewport ? 1 : Math.min(window.devicePixelRatio || 1, 2);
+    const interactionPixelRatio = isTouchViewport ? 0.75 : Math.min(fullPixelRatio, 0.85);
     let activePixelRatio = fullPixelRatio;
     renderer.setPixelRatio(activePixelRatio);
     const setRenderQuality = (active: boolean) => {
@@ -1435,6 +1472,7 @@ function GraphCanvas({
     threeCameraRef.current = camera;
     const controls = new OrbitControls(camera, canvas);
     threeControlsRef.current = controls;
+    canvas.style.touchAction = 'none';
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enableRotate = true;
@@ -1486,16 +1524,14 @@ function GraphCanvas({
     observer.observe(canvas);
     resize();
     const handleControlStart = () => {
-      lastSurfaceBuildRef.current = 0;
+      isOrbiting = true;
       setRaymarchInteraction(true);
       setRenderQuality(true);
-      setSurfaceQuality('draft');
     };
     const handleControlEnd = () => {
-      lastSurfaceBuildRef.current = 0;
+      isOrbiting = false;
       setRaymarchInteraction(false);
       setRenderQuality(false);
-      setSurfaceQuality('final');
     };
     let lastReportedZoom = graphZoomRef.current;
     const handleControlChange = () => {
@@ -1510,12 +1546,14 @@ function GraphCanvas({
       surfaceGroup.rotation.z += event.key === 'q' ? -0.08 : 0.08;
       event.preventDefault();
     };
-    const isThreeDimensional = mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d';
     canvas.style.pointerEvents = isThreeDimensional ? 'auto' : 'none';
     canvas.tabIndex = isThreeDimensional ? 0 : -1;
     const raycaster = new THREE.Raycaster();
     raycaster.params.Line.threshold = 0.14;
     const pointer = new THREE.Vector2();
+    let isOrbiting = false;
+    let pointerFrame = 0;
+    let pendingPointer: { clientX: number; clientY: number } | null = null;
     const hoverIndicator = new THREE.Mesh(
       new THREE.SphereGeometry(0.075, 12, 8),
       new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.95 }),
@@ -1524,32 +1562,53 @@ function GraphCanvas({
     scene.add(hoverIndicator);
     const handlePointerMove = (event: PointerEvent) => {
       if (!isThreeDimensional || !threeSurfaceGroupRef.current) return;
-      const bounds = canvas.getBoundingClientRect();
-      if (bounds.width <= 0 || bounds.height <= 0) return;
-      pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
-      pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
-      const intersections = raycaster.intersectObjects(threeSurfaceGroupRef.current.children, true);
-      const hit = intersections.find((intersection) => intersection.object !== hoverIndicator);
-      if (!hit) {
-        hoverIndicator.visible = false;
-        setHoverPoint(null);
-        return;
-      }
-      hoverIndicator.position.copy(hit.point);
-      hoverIndicator.visible = true;
-      setHoverPoint({ point: hit.point.clone(), x: event.clientX - bounds.left, y: event.clientY - bounds.top });
+      if (isOrbiting) return;
+      pendingPointer = { clientX: event.clientX, clientY: event.clientY };
+      if (pointerFrame) return;
+      pointerFrame = requestAnimationFrame(() => {
+        pointerFrame = 0;
+        const nextPointer = pendingPointer;
+        pendingPointer = null;
+        if (!nextPointer || isOrbiting || !threeSurfaceGroupRef.current) return;
+        const bounds = canvas.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.height <= 0) return;
+        pointer.x = ((nextPointer.clientX - bounds.left) / bounds.width) * 2 - 1;
+        pointer.y = -((nextPointer.clientY - bounds.top) / bounds.height) * 2 + 1;
+        raycaster.setFromCamera(pointer, camera);
+        const intersections = raycaster.intersectObjects(threeSurfaceGroupRef.current.children, true);
+        const hit = intersections.find((intersection) => intersection.object !== hoverIndicator);
+        if (!hit) {
+          hoverIndicator.visible = false;
+          setHoverPoint(null);
+          return;
+        }
+        hoverIndicator.position.copy(hit.point);
+        hoverIndicator.visible = true;
+        setHoverPoint({ point: hit.point.clone(), x: nextPointer.clientX - bounds.left, y: nextPointer.clientY - bounds.top });
+      });
     };
     const handlePointerLeave = () => {
       hoverIndicator.visible = false;
       setHoverPoint(null);
     };
+    const handlePassivePointerStart = () => {
+      if (!isThreeDimensional) return;
+      setRaymarchInteraction(true);
+      setRenderQuality(true);
+    };
+    const handlePassivePointerEnd = () => {
+      if (!isThreeDimensional) return;
+      setRenderQuality(false);
+    };
     controls.addEventListener('start', handleControlStart);
     controls.addEventListener('end', handleControlEnd);
     controls.addEventListener('change', handleControlChange);
     canvas.addEventListener('keydown', handleKeyDown);
-    canvas.addEventListener('pointermove', handlePointerMove);
-    canvas.addEventListener('pointerleave', handlePointerLeave);
+    canvas.addEventListener('pointerdown', handlePassivePointerStart, { passive: true });
+    canvas.addEventListener('pointermove', handlePointerMove, { passive: true });
+    canvas.addEventListener('pointerup', handlePassivePointerEnd, { passive: true });
+    canvas.addEventListener('pointercancel', handlePassivePointerEnd, { passive: true });
+    canvas.addEventListener('pointerleave', handlePointerLeave, { passive: true });
     let frame = 0;
     const render = (now: number) => {
       stars.rotation.z = now * 0.000012;
@@ -1566,8 +1625,12 @@ function GraphCanvas({
       controls.removeEventListener('end', handleControlEnd);
       controls.removeEventListener('change', handleControlChange);
       canvas.removeEventListener('keydown', handleKeyDown);
+      canvas.removeEventListener('pointerdown', handlePassivePointerStart);
       canvas.removeEventListener('pointermove', handlePointerMove);
+      canvas.removeEventListener('pointerup', handlePassivePointerEnd);
+      canvas.removeEventListener('pointercancel', handlePassivePointerEnd);
       canvas.removeEventListener('pointerleave', handlePointerLeave);
+      if (pointerFrame) cancelAnimationFrame(pointerFrame);
       controls.dispose();
       observer.disconnect();
       starsGeometry.dispose();
@@ -1602,7 +1665,7 @@ function GraphCanvas({
   useEffect(() => {
     const scene = threeSceneRef.current;
     const camera = threeCameraRef.current;
-    if (!isVisible || mode !== 'implicit3d' || !implicitRaymarchShader || !scene || !camera) return;
+    if (!isVisible || (mode !== 'implicit3d' && mode !== 'surface3d') || !implicitRaymarchShader || !scene || !camera) return;
 
     const extent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
     const uniforms: Record<string, THREE.IUniform> = {
@@ -1616,6 +1679,7 @@ function GraphCanvas({
       uAspect: { value: 1 },
       uFovRadians: { value: THREE.MathUtils.degToRad(camera.fov) },
       uDomainExtent: { value: extent },
+      uSurfaceHeightScale: { value: Math.max(0.25, Math.min(4, surfaceHeightScale)) },
       uPhase: { value: progress * Math.PI * 2 * speed },
       uSpeed: { value: speed },
       uSmoothness: { value: Math.max(0.045, Math.min(0.32, extent / 42)) },
@@ -1639,16 +1703,18 @@ function GraphCanvas({
     mesh.renderOrder = 1;
     scene.add(mesh);
     raymarchUniformsRef.current = uniforms;
+    const cachedRight = new THREE.Vector3();
+    const cachedUp = new THREE.Vector3();
+    const cachedForward = new THREE.Vector3();
     raymarchUpdateRef.current = (activeCamera) => {
       activeCamera.updateMatrixWorld();
-      const right = new THREE.Vector3().setFromMatrixColumn(activeCamera.matrixWorld, 0).normalize();
-      const up = new THREE.Vector3().setFromMatrixColumn(activeCamera.matrixWorld, 1).normalize();
-      const forward = new THREE.Vector3();
-      activeCamera.getWorldDirection(forward).normalize();
+      cachedRight.setFromMatrixColumn(activeCamera.matrixWorld, 0).normalize();
+      cachedUp.setFromMatrixColumn(activeCamera.matrixWorld, 1).normalize();
+      activeCamera.getWorldDirection(cachedForward).normalize();
       uniforms.uCameraPosition.value.copy(activeCamera.position);
-      uniforms.uCameraRight.value.copy(right);
-      uniforms.uCameraUp.value.copy(up);
-      uniforms.uCameraForward.value.copy(forward);
+      uniforms.uCameraRight.value.copy(cachedRight);
+      uniforms.uCameraUp.value.copy(cachedUp);
+      uniforms.uCameraForward.value.copy(cachedForward);
       uniforms.uAspect.value = activeCamera.aspect;
       uniforms.uFovRadians.value = THREE.MathUtils.degToRad(activeCamera.fov);
     };
@@ -1677,139 +1743,11 @@ function GraphCanvas({
     uniforms.uBoundsMin.value.set(-extent, -extent, -extent);
     uniforms.uBoundsMax.value.set(extent, extent, extent);
     uniforms.uDomainExtent.value = extent;
-    uniforms.uSmoothness.value = Math.max(0.045, Math.min(0.32, extent / 42));
-  }, [progress, range, speed]);
-
-  useEffect(() => {
-    if ((mode !== 'implicit3d' && mode !== 'surface3d') || !isVisible || (mode === 'implicit3d' && implicitRaymarchShader)) return;
-    let worker: Worker;
-    try {
-      worker = new Worker(new URL('./workers/implicit-surface.worker.ts', import.meta.url), { type: 'module' });
-    } catch {
-      onRuntimeWarning('3D worker unavailable; using the CPU surface fallback.');
-      return;
+    if (uniforms.uSurfaceHeightScale) {
+      uniforms.uSurfaceHeightScale.value = Math.max(0.25, Math.min(4, surfaceHeightScale));
     }
-
-    const disposeSurface = () => {
-      const group = threeSurfaceGroupRef.current;
-      group?.traverse((object) => {
-        const mesh = object as THREE.Mesh;
-        if (mesh.geometry) mesh.geometry.dispose();
-        if (Array.isArray(mesh.material)) mesh.material.forEach((material) => material.dispose());
-        else if (mesh.material) mesh.material.dispose();
-      });
-      group?.clear();
-      threeSurfaceGeometryRef.current?.dispose();
-      threeSurfaceGeometryRef.current = null;
-      threeSurfaceReadyRef.current = false;
-    };
-
-    const installSurface = (positions: GeometryBufferInput, indices?: GeometryBufferInput) => {
-      const group = threeSurfaceGroupRef.current;
-      const positionValues = ArrayBuffer.isView(positions) || Array.isArray(positions)
-        ? Array.from(positions as ArrayLike<number>, Number)
-        : new Float32Array(positions as ArrayBuffer);
-      if (positionValues.length === 0 || positionValues.length % 3 !== 0) {
-        onRuntimeWarning('3D surface returned an invalid position buffer; using the CPU fallback.');
-        return;
-      }
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positionValues, 3));
-      const indexArray = indices ? normalizeIndexBuffer(indices) : null;
-      if (indexArray) {
-        geometry.setIndex(new THREE.BufferAttribute(indexArray, 1));
-      } else if (geometry.getAttribute('position')?.count) {
-        const smoothedGeometry = mergeVertices(geometry, 0.005);
-        geometry.dispose();
-        smoothedGeometry.computeVertexNormals();
-        smoothedGeometry.computeBoundingSphere();
-        installSurface(smoothedGeometry.getAttribute('position').array, smoothedGeometry.getIndex()?.array);
-        return;
-      }
-      if (geometry.getAttribute('position')?.count === 0) {
-        geometry.dispose();
-        return;
-      }
-      geometry.computeVertexNormals();
-      geometry.computeBoundingSphere();
-      disposeSurface();
-      threeSurfaceGeometryRef.current = geometry;
-      const material = new THREE.ShaderMaterial({
-        uniforms: {
-          uColor: { value: new THREE.Color(surfaceColorRef.current) },
-          uOpacity: { value: 0.94 },
-        },
-        vertexShader: `
-          varying vec3 vNormal;
-          varying vec3 vViewPosition;
-          void main() {
-            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-            vViewPosition = viewPosition.xyz;
-            vNormal = normalize(normalMatrix * normal);
-            gl_Position = projectionMatrix * viewPosition;
-          }
-        `,
-        fragmentShader: `
-          uniform vec3 uColor;
-          uniform float uOpacity;
-          varying vec3 vNormal;
-          varying vec3 vViewPosition;
-          void main() {
-            vec3 lightDirection = normalize(vec3(-0.45, 0.72, 0.85));
-            float diffuse = 0.34 + 0.66 * max(dot(normalize(vNormal), lightDirection), 0.0);
-            float rim = pow(1.0 - max(dot(normalize(vNormal), normalize(-vViewPosition)), 0.0), 2.0);
-            vec3 shaded = uColor * diffuse + vec3(0.34, 0.52, 0.16) * rim * 0.42;
-            gl_FragColor = vec4(shaded, uOpacity);
-          }
-        `,
-        transparent: true,
-        side: THREE.DoubleSide,
-        depthWrite: true,
-      });
-      group?.add(new THREE.Mesh(geometry, material));
-      threeSurfaceReadyRef.current = true;
-      onRenderStart();
-      onRenderStatus('ready');
-    };
-
-    installSurfaceRef.current = installSurface;
-    surfaceWorkerRef.current = worker;
-    worker.onmessage = (event: MessageEvent<ImplicitSurfaceWorkerResult | ImplicitSurfaceWorkerError>) => {
-      const result = event.data;
-      if (result.id !== surfaceRequestIdRef.current) return;
-      surfaceWorkerBusyRef.current = false;
-      if (surfaceFallbackTimerRef.current !== null) {
-        window.clearTimeout(surfaceFallbackTimerRef.current);
-        surfaceFallbackTimerRef.current = null;
-      }
-      if (result.type === 'error') {
-        onRuntimeWarning(`3D worker: ${result.message}`);
-        return;
-      }
-      installSurface(result.positions, result.indices);
-    };
-    worker.onerror = () => onRuntimeWarning('3D surface worker stopped; the CPU fallback remains available.');
-
-    return () => {
-      if (surfaceRequestTimerRef.current !== null) {
-        window.clearTimeout(surfaceRequestTimerRef.current);
-        surfaceRequestTimerRef.current = null;
-      }
-      if (surfaceFallbackTimerRef.current !== null) {
-        window.clearTimeout(surfaceFallbackTimerRef.current);
-        surfaceFallbackTimerRef.current = null;
-      }
-      surfaceRequestIdRef.current += 1;
-      surfaceQueueTokenRef.current += 1;
-      surfaceRequestRef.current = null;
-      surfaceWorkerBusyRef.current = false;
-      surfaceInputKeyRef.current = '';
-      worker.terminate();
-      surfaceWorkerRef.current = null;
-      installSurfaceRef.current = () => undefined;
-      disposeSurface();
-    };
-  }, [implicitRaymarchShader, isVisible, mode, onRenderStart, onRenderStatus, onRuntimeWarning]);
+    uniforms.uSmoothness.value = Math.max(0.045, Math.min(0.32, extent / 42));
+  }, [progress, range, speed, surfaceHeightScale]);
 
   useEffect(() => {
     const group = threeSurfaceGroupRef.current;
@@ -1872,101 +1810,6 @@ function GraphCanvas({
   }, [color, evaluator, isVisible, mode, onRenderStart, onRenderStatus, progress, range, speed]);
 
   useEffect(() => {
-    const group = threeSurfaceGroupRef.current;
-    const disposeSurface = () => {
-      group?.traverse((object) => {
-        const mesh = object as THREE.Mesh;
-        if (mesh.geometry) mesh.geometry.dispose();
-        if (Array.isArray(mesh.material)) mesh.material.forEach((material) => material.dispose());
-        else if (mesh.material) mesh.material.dispose();
-      });
-      group?.clear();
-      threeSurfaceGeometryRef.current?.dispose();
-      threeSurfaceGeometryRef.current = null;
-      threeSurfaceReadyRef.current = false;
-    };
-    if (!isVisible || (mode !== 'implicit3d' && mode !== 'surface3d') || (evaluator?.kind !== 'implicit' && evaluator?.kind !== 'surface')) {
-      surfaceRequestIdRef.current += 1;
-      surfaceQueueTokenRef.current += 1;
-      surfaceRequestRef.current = null;
-      surfaceWorkerBusyRef.current = false;
-      surfaceInputKeyRef.current = '';
-      disposeSurface();
-      return;
-    }
-
-    const surfaceInputKey = `${equation}|${mode}|${surfaceQuality}|${playing}|${rangeWorldExtent(range)}|${surfaceHeightScale}`;
-    const inputChanged = surfaceInputKeyRef.current !== surfaceInputKey;
-    if (inputChanged) {
-      surfaceInputKeyRef.current = surfaceInputKey;
-      surfaceRequestIdRef.current += 1;
-      surfaceWorkerBusyRef.current = false;
-      surfaceWorkerRef.current?.postMessage({ type: 'cancel', id: surfaceRequestIdRef.current });
-    }
-    if (surfaceWorkerBusyRef.current) return;
-    if (playing && threeSurfaceReadyRef.current && !inputChanged) return;
-
-    const queueToken = ++surfaceQueueTokenRef.current;
-    const request = {
-      type: 'generate' as const,
-      id: 0,
-      equation,
-      mode,
-      phase: progress * Math.PI * 2 * speed,
-      speed,
-      resolution: Math.min(96, surfaceQuality === 'final' && !playing
-        ? IMPLICIT_3D_FINAL_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 24 : 0)
-        : IMPLICIT_3D_DRAFT_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 8 : 0)),
-      extent: range.worldExtent ?? rangeWorldExtent(range),
-      heightScale: surfaceHeightScale,
-    };
-    surfaceRequestRef.current = request;
-    const worker = surfaceWorkerRef.current;
-    if (!worker) {
-      const fallbackTimer = window.setTimeout(() => {
-        if (queueToken !== surfaceQueueTokenRef.current) return;
-         const geometry = evaluator.kind === 'surface'
-            || (mode === 'implicit3d' && isImplicit3dHeightmapExpression(equation))
-            ? createHeightmapSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution, request.extent, request.heightScale)
-           : createImplicitSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution, request.extent);
-        const positions = geometry.getAttribute('position')?.array.buffer;
-        if (positions) installSurfaceRef.current(positions);
-        geometry.dispose();
-      }, 0);
-      return () => window.clearTimeout(fallbackTimer);
-    }
-
-    const minimumInterval = surfaceQuality === 'final' ? 180 : 60;
-    const wait = Math.max(0, lastSurfaceBuildRef.current + minimumInterval - performance.now());
-    if (surfaceRequestTimerRef.current === null) {
-      surfaceRequestTimerRef.current = window.setTimeout(() => {
-        surfaceRequestTimerRef.current = null;
-        const latestRequest = surfaceRequestRef.current;
-        if (!latestRequest) return;
-        lastSurfaceBuildRef.current = performance.now();
-        const requestId = ++surfaceRequestIdRef.current;
-        surfaceWorkerBusyRef.current = true;
-        worker.postMessage({ ...latestRequest, id: requestId });
-        surfaceFallbackTimerRef.current = window.setTimeout(() => {
-          surfaceFallbackTimerRef.current = null;
-          if (!surfaceWorkerBusyRef.current || requestId !== surfaceRequestIdRef.current) return;
-          surfaceWorkerBusyRef.current = false;
-          surfaceRequestIdRef.current += 1;
-          worker.postMessage({ type: 'cancel', id: surfaceRequestIdRef.current });
-           const fallbackGeometry = evaluator.kind === 'surface'
-              || (mode === 'implicit3d' && isImplicit3dHeightmapExpression(equation))
-              ? createHeightmapSurfaceGeometry(evaluator.expression, latestRequest.phase, latestRequest.speed, IMPLICIT_3D_DRAFT_GRID_RESOLUTION, latestRequest.extent, latestRequest.heightScale)
-             : createImplicitSurfaceGeometry(evaluator.expression, latestRequest.phase, latestRequest.speed, IMPLICIT_3D_DRAFT_GRID_RESOLUTION, latestRequest.extent);
-          const fallbackPositions = fallbackGeometry.getAttribute('position')?.array.buffer;
-          if (fallbackPositions) installSurfaceRef.current(fallbackPositions);
-          fallbackGeometry.dispose();
-        }, 1400);
-      }, wait);
-    }
-    return undefined;
-  }, [equation, evaluator, isVisible, mode, playing, progress, range.worldExtent, speed, surfaceHeightScale, surfaceQuality]);
-
-  useEffect(() => {
     const scene = threeSceneRef.current;
     if (!isVisible || !scene || evaluator?.kind !== 'points') return;
     const group = new THREE.Group();
@@ -2011,6 +1854,8 @@ function GraphCanvas({
   }, [color, evaluator, isVisible, pointStyle, progress, speed]);
 
   const draw = useCallback(() => {
+    const isGpuRaymarchedMode = mode === 'implicit3d' || mode === 'surface3d';
+    if (isGpuRaymarchedMode) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const bounds = canvas.getBoundingClientRect();
@@ -2117,13 +1962,11 @@ function GraphCanvas({
     const drawProgress = easeInOutCubic(renderProgress);
 
     ctx.clearRect(0, 0, w, h);
-    const isThreeDimensional = mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d';
-    const useProjectedFallback = isThreeDimensional && !threeSceneRef.current;
-    if (showBackdrop && (!isThreeDimensional || useProjectedFallback)) {
+    if (showBackdrop) {
       ctx.fillStyle = '#171a24';
       ctx.fillRect(0, 0, w, h);
     }
-    if (showGrid && (!isThreeDimensional || useProjectedFallback)) {
+    if (showGrid) {
       ctx.lineWidth = 1;
       ctx.strokeStyle = 'rgba(221, 217, 208, 0.075)';
        const gridStep = Math.max(14, scale * gridDensity);
@@ -2140,7 +1983,7 @@ function GraphCanvas({
         ctx.stroke();
       }
     }
-    if (showAxes && (!isThreeDimensional || useProjectedFallback)) {
+    if (showAxes) {
       ctx.lineWidth = 1;
       ctx.strokeStyle = 'rgba(221, 217, 208, 0.26)';
       ctx.beginPath();
@@ -2391,72 +2234,6 @@ function GraphCanvas({
       ctx.imageSmoothingEnabled = true;
       ctx.stroke();
     };
-    const renderImplicit3dFallback = () => {
-      const geometry = threeSurfaceGeometryRef.current;
-      const positionAttribute = geometry?.getAttribute('position');
-      if (!positionAttribute) return;
-      const positions = positionAttribute.array as ArrayLike<number>;
-      const indexAttribute = geometry?.getIndex();
-      const triangleCount = indexAttribute ? Math.floor(indexAttribute.count / 3) : Math.floor(positions.length / 9);
-      const fallbackScale = Math.min(w, h) / (Math.max(1, rangeWorldExtent(viewportRange)) * 2.35) * graphZoom;
-      const fallbackCenterX = w * 0.5;
-      const fallbackCenterY = h * 0.53;
-      const triangles: Array<{
-        points: Array<[number, number]>;
-        depth: number;
-      }> = [];
-      for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
-        const index = indexAttribute ? indexAttribute.getX(triangleIndex * 3) * 3 : triangleIndex * 9;
-        const secondIndex = indexAttribute ? indexAttribute.getX(triangleIndex * 3 + 1) * 3 : index + 3;
-        const thirdIndex = indexAttribute ? indexAttribute.getX(triangleIndex * 3 + 2) * 3 : index + 6;
-        const project = (vertexIndex: number): [number, number, number] => {
-          const x = Number(positions[vertexIndex]);
-          const y = Number(positions[vertexIndex + 1]);
-          const z = Number(positions[vertexIndex + 2]);
-          return [
-            fallbackCenterX + (x * 0.82 + z * 0.52) * fallbackScale,
-            fallbackCenterY - (y * 0.86 - z * 0.34) * fallbackScale,
-            x * 0.16 - z * 0.72 + y * 0.04,
-          ];
-        };
-        const first = project(index);
-        const second = project(secondIndex);
-        const third = project(thirdIndex);
-        triangles.push({
-          points: [[first[0], first[1]], [second[0], second[1]], [third[0], third[1]]],
-          depth: (first[2] + second[2] + third[2]) / 3,
-        });
-      }
-      triangles.sort((first, second) => first.depth - second.depth);
-      ctx.save();
-      ctx.lineJoin = 'round';
-      triangles.forEach(({ points, depth }) => {
-        const alpha = 0.14 + Math.max(0, Math.min(1, (depth + 3) / 6)) * 0.2;
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.moveTo(points[0][0], points[0][1]);
-        ctx.lineTo(points[1][0], points[1][1]);
-        ctx.lineTo(points[2][0], points[2][1]);
-        ctx.closePath();
-        ctx.fill();
-      });
-      ctx.globalAlpha = 0.28;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = Math.max(0.8, lineWidth * 0.65);
-      triangles.forEach(({ points }, index) => {
-        if (index % 7 !== 0) return;
-        ctx.beginPath();
-        ctx.moveTo(points[0][0], points[0][1]);
-        ctx.lineTo(points[1][0], points[1][1]);
-        ctx.lineTo(points[2][0], points[2][1]);
-        ctx.closePath();
-        ctx.stroke();
-      });
-      ctx.restore();
-      geometrySamples += triangles.length;
-    };
-
     const renderPoints = (points: GraphPoint[], stroke = color) => {
       const visiblePoints = points.slice(0, Math.min(points.length, Math.max(1, Math.ceil(points.length * drawProgress))));
       geometrySamples += visiblePoints.length;
@@ -2638,7 +2415,7 @@ function GraphCanvas({
     } else if (evaluator?.kind === 'vector') {
       if (cachedFrame.vector.length > 0) renderCachedVectorField(cachedFrame.vector);
       else renderVectorField(evaluator);
-    } else if (evaluator?.kind === 'implicit' && mode !== 'implicit3d') {
+    } else if (evaluator?.kind === 'implicit') {
       if (showTrail) {
         ctx.shadowBlur = 0;
          if (cachedFrame.contour.length > 0) {
@@ -2650,13 +2427,7 @@ function GraphCanvas({
       }
        if (cachedFrame.contour.length > 0) renderCachedImplicitContour(cachedFrame.contour);
        else renderImplicitContour(phase);
-     } else if (
-       (mode === 'implicit3d' && evaluator?.kind === 'implicit'
-         || mode === 'surface3d' && evaluator?.kind === 'surface')
-       && !threeSceneRef.current
-     ) {
-      renderImplicit3dFallback();
-    } else if (evaluator && (!isThreeDimensional || useProjectedFallback)) {
+       } else if (evaluator) {
       if (cachedFrame.line.length > 0) {
         if (showTrail) {
           ctx.shadowBlur = 0;
@@ -2683,12 +2454,12 @@ function GraphCanvas({
       trace((u) => [(1.45 + 0.12 * Math.sin(phase)) * Math.cos(u), (1.45 + 0.12 * Math.sin(phase)) * Math.sin(u)], '#ff8b6d', 1.1);
       ctx.restore();
     }
-    if (evaluator && evaluator.kind !== 'points' && evaluator.kind !== 'vector' && (!isThreeDimensional || useProjectedFallback)) {
+    if (evaluator && evaluator.kind !== 'points' && evaluator.kind !== 'vector') {
       ctx.fillStyle = 'rgba(199, 243, 107, .9)';
       ctx.beginPath();
        const markerParameter = isFunctionLike
          ? viewportRange.xMin + drawProgress * (viewportRange.xMax - viewportRange.xMin)
-         : mode === 'parametric' || mode === 'parametric3d'
+          : mode === 'parametric'
           ? drawProgress * Math.PI * 7 - Math.PI * 3.5
           : mode === 'polar'
             ? drawProgress * Math.PI * 2
@@ -2715,14 +2486,6 @@ function GraphCanvas({
             break;
           }
         }
-        if (!hasNonEmptyPixels && mode === 'implicit3d' && webglCanvasRef.current) {
-          const webgl = webglCanvasRef.current.getContext('webgl2') ?? webglCanvasRef.current.getContext('webgl');
-          if (webgl) {
-            const pixel = new Uint8Array(4);
-            webgl.readPixels(0, 0, 1, 1, webgl.RGBA, webgl.UNSIGNED_BYTE, pixel);
-            hasNonEmptyPixels = pixel[3] > 0;
-          }
-        }
       } catch {
         hasNonEmptyPixels = false;
       }
@@ -2730,12 +2493,7 @@ function GraphCanvas({
     pixelVerificationFramesRef.current = hasNonEmptyPixels
       ? pixelVerificationFramesRef.current + 1
       : 0;
-    if (isThreeDimensional && evaluator?.kind === 'implicit') {
-      // The WebGL surface owns the 3D draw path; the transparent 2D layer
-      // must not mark a valid volumetric render as an empty XY slice.
-      geometrySamples = threeSurfaceReadyRef.current ? 1 : 0;
-    }
-    if (evaluator && (!isThreeDimensional || useProjectedFallback)) {
+    if (evaluator) {
       if (geometrySamples === 0 || pixelVerificationFramesRef.current === 0) {
         renderHealthFramesRef.current += 1;
         if (renderHealthFramesRef.current >= 4 && !healthReportedRef.current) {
@@ -2776,8 +2534,12 @@ function GraphCanvas({
 
   return (
     <div ref={visibilityTargetRef} className="graph-renderer">
-      {isVisible && <canvas ref={webglCanvasRef} className="webgl-canvas" aria-hidden="true" />}
-      <canvas ref={canvasRef} className="graph-canvas" data-testid="canvas-graph-renderer" aria-label={`Animated ${mode} graph for ${equation}`} />
+      {isVisible && (mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d') && (
+        <canvas ref={webglCanvasRef} className="webgl-canvas" aria-hidden="true" />
+      )}
+      {mode !== 'implicit3d' && mode !== 'surface3d' && (
+        <canvas ref={canvasRef} className="graph-canvas" data-testid="canvas-graph-renderer" aria-label={`Animated ${mode} graph for ${equation}`} />
+      )}
       {hoverPoint && (mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d') && (
         <div
           className="three-hover-tooltip"
@@ -2949,14 +2711,14 @@ function MainStudio() {
       id: 'renderer',
       label: 'Renderer health',
       status: renderHealth === 'error' ? 'error' : renderHealth === 'ready' ? 'ok' : 'warning',
-      detail: renderHealth === 'ready' ? 'Canvas has reported a ready frame.' : renderHealthMessage || 'Renderer is still warming up or using a fallback path.',
+       detail: renderHealth === 'ready' ? 'The active renderer has reported a ready frame.' : renderHealthMessage || 'Renderer is still warming up.',
       timestamp: 'now',
     });
     next.push({
-      id: 'webgl',
-      label: 'WebGL enhancement',
-      status: webglReady ? 'ok' : 'warning',
-      detail: webglReady ? 'WebGL context available for enhanced 3D surfaces.' : 'WebGL is unavailable; the CPU canvas remains available.',
+       id: 'webgl',
+       label: 'GPU WebGL renderer',
+       status: webglReady ? 'ok' : 'error',
+       detail: webglReady ? 'Hardware-accelerated WebGL is available for 3D shader rendering.' : 'Hardware-accelerated WebGL is required for 3D shader rendering.',
       timestamp: 'now',
     });
     await new Promise((resolve) => window.setTimeout(resolve, 100));
@@ -4086,7 +3848,7 @@ function MainStudio() {
           <span className="live-dot" />
           <span className="mono">LIVE RENDER</span>
           <span className="muted">·</span>
-          <span>{topNotice || 'Canvas / CPU adaptive'}</span>
+          <span>{topNotice || 'GPU / GLSL accelerated'}</span>
         </div>
         <div className="top-actions">
           <span className="shortcut">SPACE · R · E · G</span>
@@ -4478,7 +4240,7 @@ function MainStudio() {
                   <li>Use Auto Range first, then tune the viewport manually when comparing scenes.</li>
                   <li>Drag the graph to pan and use the graph zoom controls for detail.</li>
                   <li>Motion trail adds history; disable it when exploring dense point sets.</li>
-                  <li>If WebGL is unavailable, the CPU canvas remains the source of truth.</li>
+                  <li>3D Surface and 3D Implicit modes require hardware-accelerated WebGL shaders.</li>
                 </ol>
               </section>
               <section className="guide-block">
@@ -4583,7 +4345,7 @@ function MainStudio() {
                     <option value="intersection">Intersection / valley blend</option>
                     <option value="additive">Additive field blend</option>
                   </select>
-                    <span className="setting-desc">{resolvedMode === 'implicit3d' ? 'Active solids use polynomial smooth-min CSG with adaptive raymarching.' : 'Union uses the highest active surface at each x/y point.'}</span>
+                    <span className="setting-desc">{resolvedMode === 'implicit3d' ? 'Active solids use GPU polynomial smooth-min CSG with adaptive raymarching.' : '3D surfaces are evaluated directly in the GPU fragment shader.'}</span>
                 </div>
               )}
             <div className="control-row">
@@ -4660,7 +4422,7 @@ function MainStudio() {
        <footer className="studio-footer">
          <span>Second Solution Studio</span>
          <span className="footer-tagline">Visualize Mathematics Like Never Before</span>
-         <span className="mono">LOCAL-FIRST · CPU ADAPTIVE</span>
+         <span className="mono">LOCAL-FIRST · GPU GLSL</span>
        </footer>
        <DeveloperAiAssistant
          open={assistantOpen}

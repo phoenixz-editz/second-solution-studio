@@ -26,3 +26,9 @@ Decorative landing backgrounds should use CSS gradients and compositor-friendly 
 **Why:** A decorative animation can consume a full render loop without adding interaction, especially on mobile, while off-screen WebGL work continues unless visibility is handled explicitly.
 
 **How to apply:** Prefer a CSS-only ambient layer for page atmosphere and let IntersectionObserver mount or unmount expensive WebGL scene resources while leaving the CPU fallback available.
+
+For an explicitly GPU-only visualization mode, treat WebGL as a hard capability requirement: request high-performance context creation with major-performance-caveat rejection, and do not mount a CPU canvas fallback for that mode.
+
+**Why:** Some product modes require shader execution for both correctness and performance; silently switching them to software rendering violates the mode contract.
+
+**How to apply:** Keep fallback behavior for 2D or explicitly progressive modes, but make strict 3D modes fail clearly when hardware-accelerated WebGL cannot initialize.
