@@ -114,7 +114,9 @@ const GRAPH_ZOOM_MIN = 0.05;
 const GRAPH_ZOOM_MAX = 20;
 const GRAPH_ZOOM_BUTTON_FACTOR = 1.25;
 const GRAPH_ZOOM_WHEEL_SENSITIVITY = 0.0015;
-const GRAPH_BASE_CAMERA_DISTANCE = Math.sqrt(8 ** 2 + 8 ** 2 + 8 ** 2);
+// The default 3D surface domain is [-8, 8]. This distance fits its projected
+// bounding sphere inside a crisp ~75% perspective frame at 1x.
+const GRAPH_BASE_CAMERA_DISTANCE = 44;
 const BRAND_WATERMARK = 'Second Solution Studio';
 const AUDIO_MIN_HZ = 200;
 const AUDIO_MAX_HZ = 1200;

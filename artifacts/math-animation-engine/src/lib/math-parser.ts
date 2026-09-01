@@ -214,6 +214,34 @@ function numericAstValue(node: any, bindings: ConstantBindings = {}) {
   return constantAstValue(node, bindings);
 }
 
+function numericMagnitudeFromAst(node: any, denominator = false): number {
+  const current = unwrapAstNode(node);
+  if (!current) return 0;
+  if (current.type === 'ConstantNode') {
+    const value = Number(current.value);
+    return !denominator && Number.isFinite(value) ? Math.abs(value) : 0;
+  }
+  if (current.type === 'OperatorNode' && Array.isArray(current.args)) {
+    return current.args.reduce(
+      (maximum: number, argument: any, index: number) => Math.max(
+        maximum,
+        numericMagnitudeFromAst(
+          argument,
+          denominator || (current.op === '/' && index === 1),
+        ),
+      ),
+      0,
+    );
+  }
+  if (current.type === 'FunctionNode' && Array.isArray(current.args)) {
+    return current.args.reduce(
+      (maximum: number, argument: any) => Math.max(maximum, numericMagnitudeFromAst(argument, denominator)),
+      0,
+    );
+  }
+  return 0;
+}
+
 function axisOffset(node: any, axis: string, bindings: ConstantBindings = {}): number | null {
   const current = unwrapAstNode(node);
   if (current?.type === 'SymbolNode' && current.name?.toLowerCase() === axis) return 0;
@@ -295,13 +323,9 @@ function analyzeDynamicDomain(input: string) {
     numericMagnitude: 0,
   };
 
-  for (const match of renderExpression.matchAll(/(?<![A-Za-z_])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?![A-Za-z_])/g)) {
-    const value = Math.abs(Number(match[0]));
-    if (Number.isFinite(value)) signals.numericMagnitude = Math.max(signals.numericMagnitude, value);
-  }
-
   try {
     const root = math.parse(renderExpression);
+    signals.numericMagnitude = numericMagnitudeFromAst(root);
     root.traverse((node: any) => {
       if (node?.type === 'FunctionNode') {
         const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
@@ -335,6 +359,10 @@ function analyzeDynamicDomain(input: string) {
     });
   } catch {
     // Regex-derived signals below keep auto range useful while the input is incomplete.
+    for (const match of renderExpression.matchAll(/(?<![A-Za-z_])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?![A-Za-z_])/g)) {
+      const value = Math.abs(Number(match[0]));
+      if (Number.isFinite(value)) signals.numericMagnitude = Math.max(signals.numericMagnitude, value);
+    }
   }
 
   const addCenter = (axis: 'x' | 'y' | 'z', value: number) => {
@@ -368,6 +396,7 @@ function dynamicAxisBounds(
   hasQuadratic: boolean,
   decayRate: number,
   numericMagnitude: number,
+  extentLimits: { min?: number; max?: number } = {},
 ) {
   // A wave's natural two-period view is derived from its characteristic period.
   if (hasTrig) return { min: -2 * Math.PI, max: 2 * Math.PI };
@@ -379,18 +408,26 @@ function dynamicAxisBounds(
   const algebraicSpan = hasQuadratic && decayRate === 0 ? 2.5 : 0;
   const magnitudeSpan = decayRate === 0 && numericMagnitude > 1 ? Math.sqrt(numericMagnitude) : 0;
   const span = Math.max(1.5, decaySpan, algebraicSpan, magnitudeSpan);
-  const extent = Math.max(2, Math.ceil((Math.abs(center) + span) / 4) * 4);
+  const minimumExtent = Math.max(2, extentLimits.min ?? 0);
+  const automaticExtent = Math.ceil((Math.abs(center) + span) / 4) * 4;
+  const extent = Math.min(
+    extentLimits.max ?? Number.POSITIVE_INFINITY,
+    Math.max(minimumExtent, automaticExtent),
+  );
   return { min: -extent, max: extent };
 }
 
 export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): DynamicDomain {
   const signals = analyzeDynamicDomain(input);
+  const surfaceExtentLimits = mode === 'surface3d' ? { min: 8, max: 8 } : undefined;
+  const implicit3dExtentLimits = mode === 'implicit3d' ? { max: 10 } : undefined;
   const xBounds = dynamicAxisBounds(
     signals.xCenters,
     signals.hasTrig,
     signals.quadraticAxes.has('x'),
     signals.decayRates.x,
     signals.numericMagnitude,
+    surfaceExtentLimits ?? implicit3dExtentLimits,
   );
   const yBounds = dynamicAxisBounds(
     signals.yCenters,
@@ -398,6 +435,7 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
     signals.quadraticAxes.has('y'),
     signals.decayRates.y,
     signals.numericMagnitude,
+    surfaceExtentLimits ?? implicit3dExtentLimits,
   );
   const zBounds = dynamicAxisBounds(
     signals.zCenters,
@@ -405,6 +443,7 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
     signals.quadraticAxes.has('z'),
     signals.decayRates.z,
     signals.numericMagnitude,
+    implicit3dExtentLimits,
   );
   const tMax = mode === 'parametric' || mode === 'parametric3d'
     ? (/(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/i.test(input) ? 10 : 2 * Math.PI)
@@ -413,8 +452,10 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
   const xMax = signals.hasX || mode === 'polar' ? xBounds.max : -xBounds.min;
   const yMin = signals.hasY ? yBounds.min : -yBounds.max;
   const yMax = signals.hasY ? yBounds.max : -yBounds.min;
-  const worldExtent = mode === 'implicit3d' || mode === 'surface3d'
-    ? Math.max(Math.abs(xMin), Math.abs(xMax), Math.abs(yMin), Math.abs(yMax), Math.abs(zBounds.min), Math.abs(zBounds.max))
+  const worldExtent = mode === 'surface3d'
+    ? 8
+    : mode === 'implicit3d'
+      ? Math.min(10, Math.max(Math.abs(xMin), Math.abs(xMax), Math.abs(yMin), Math.abs(yMax), Math.abs(zBounds.min), Math.abs(zBounds.max)))
     : undefined;
   return { xMin, xMax, yMin, yMax, tMin: 0, tMax, worldExtent };
 }
