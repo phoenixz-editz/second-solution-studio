@@ -589,6 +589,35 @@ function splitProgramStatements(input: string) {
   };
 }
 
+export type EquationVariableDefinition = {
+  name: string;
+  source: string;
+};
+
+const reservedEquationNames = new Set([
+  'x', 'y', 'z', 't', 'u', 'theta', 'a', 'b', 'v', 'r', 'phi', 'pi', 'e',
+]);
+
+export function extractEquationVariableDefinitions(input: string) {
+  const statements = splitTopLevel(normalizeForPreview(input), new Set([';', '\n']));
+  const definitions: EquationVariableDefinition[] = [];
+  const renderStatements: string[] = [];
+  const assignmentPattern = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)([\s\S]+)$/;
+  statements.forEach((statement) => {
+    const assignment = statement.match(assignmentPattern);
+    const name = assignment?.[1] ?? '';
+    if (assignment && !reservedEquationNames.has(name.toLowerCase())) {
+      definitions.push({ name, source: assignment[2].trim() });
+    } else if (statement.trim()) {
+      renderStatements.push(statement.trim());
+    }
+  });
+  return {
+    definitions,
+    renderExpression: renderStatements.join('; ').trim(),
+  };
+}
+
 function compileProgramExpression(input: string) {
   const program = splitProgramStatements(input);
   const render = compileMathExpression(program.renderExpression);

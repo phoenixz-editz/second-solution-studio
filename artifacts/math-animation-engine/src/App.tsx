@@ -50,7 +50,7 @@ import {
   normalizeSurfaceExpression as parserNormalizeSurfaceExpression,
   normalizeSurfaceEquation as parserNormalizeSurfaceEquation,
   normalizeImplicitField as parserNormalizeImplicitField,
-  isImplicit3dHeightmapExpression,
+  extractEquationVariableDefinitions as parserExtractEquationVariableDefinitions,
   normalizeForPreview as parserNormalizeForPreview,
   splitEquationExpressions as parserSplitEquationExpressions,
   resolveDynamicDomain,
@@ -594,9 +594,14 @@ const getRaymarchPreviewSteps = (fullSteps: number) => fullSteps >= 256 ? 48 : 3
 
 const shaderMath = create(all);
 
-function compileGlslNode(node: any, bindings: Record<string, string> = {}): string | null {
+function compileGlslNode(
+  node: any,
+  bindings: Record<string, string> = {},
+  definitions: Map<string, string> = new Map(),
+  resolving: Set<string> = new Set(),
+): string | null {
   if (!node) return null;
-  if (node.type === 'ParenthesisNode') return compileGlslNode(node.content, bindings);
+  if (node.type === 'ParenthesisNode') return compileGlslNode(node.content, bindings, definitions, resolving);
   if (node.type === 'ConstantNode') {
     const value = Number(node.value);
     return Number.isFinite(value) ? value.toFixed(8) : null;
@@ -604,6 +609,16 @@ function compileGlslNode(node: any, bindings: Record<string, string> = {}): stri
   if (node.type === 'SymbolNode') {
     const symbol = String(node.name ?? '').toLowerCase();
     if (bindings[symbol]) return `(${bindings[symbol]})`;
+    const definition = definitions.get(symbol);
+    if (definition !== undefined) {
+      if (resolving.has(symbol)) return null;
+      const nextResolving = new Set(resolving);
+      nextResolving.add(symbol);
+      const resolved = compileGlslNode(shaderMath.parse(definition), bindings, definitions, nextResolving);
+      if (!resolved) return null;
+      bindings[symbol] = resolved;
+      return `(${resolved})`;
+    }
     if (symbol === 'x') return 'p.x';
     if (symbol === 'y') return 'p.y';
     if (symbol === 'z') return 'p.z';
@@ -616,7 +631,9 @@ function compileGlslNode(node: any, bindings: Record<string, string> = {}): stri
     return null;
   }
   if (node.type === 'OperatorNode') {
-    const args = Array.isArray(node.args) ? node.args.map((argument: any) => compileGlslNode(argument, bindings)) : [];
+    const args = Array.isArray(node.args)
+      ? node.args.map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving))
+      : [];
     if (args.some((value: string | null) => value === null)) return null;
     const [first, second] = args as [string, string?];
     if (node.fn === 'unaryMinus') return `(-(${first}))`;
@@ -627,12 +644,13 @@ function compileGlslNode(node: any, bindings: Record<string, string> = {}): stri
   }
   if (node.type === 'FunctionNode') {
     const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
-    const args = (Array.isArray(node.args) ? node.args : []).map((argument: any) => compileGlslNode(argument, bindings));
+    const args = (Array.isArray(node.args) ? node.args : [])
+      .map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving));
     if (args.some((value: string | null) => value === null)) return null;
     const compiledArgs = args as string[];
     const directFunctions = new Set([
       'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
-      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign', 'tanh',
+      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign',
     ]);
     if (directFunctions.has(name)) return `${name}(${compiledArgs.join(', ')})`;
     if (name === 'ln' || name === 'log') return `log(${compiledArgs[0] ?? '0.0'})`;
@@ -649,15 +667,13 @@ function compileGlslExpression(source: string) {
   try {
     const statements = source.split(';').map((part) => part.trim()).filter(Boolean);
     const renderExpression = statements.pop() ?? source;
-    const bindings: Record<string, string> = {};
+    const definitions = new Map<string, string>();
     for (const statement of statements) {
       const assignment = statement.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*(.+)$/);
       if (!assignment) return null;
-      const helperExpression = compileGlslNode(shaderMath.parse(assignment[2]), bindings);
-      if (!helperExpression) return null;
-      bindings[assignment[1].toLowerCase()] = helperExpression;
+      definitions.set(assignment[1].toLowerCase(), assignment[2]);
     }
-    return compileGlslNode(shaderMath.parse(renderExpression), bindings);
+    return compileGlslNode(shaderMath.parse(renderExpression), {}, definitions);
   } catch {
     return null;
   }
@@ -890,16 +906,14 @@ function clampGraphZoom(value: number) {
 const layerColors = ['#c7f36b', '#ff8b6d', '#72d8ff', '#d6a8ff', '#ffd166'];
 const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
 
-function implicitFieldSource(equation: string, mode: StudioMode) {
-  if (mode === 'surface3d') {
-    // Bound the height field in the ray box without sampling it on the CPU.
-    // The expression remains a GPU distance-field function.
-    return `(z) - (tanh((${parserNormalizeSurfaceExpression(equation)}) * uSurfaceHeightScale) * uDomainExtent * 0.55)`;
-  }
-  return parserNormalizeImplicitField(
-    equation,
-    mode === 'implicit3d' ? 'implicit3d' : 'implicit',
-  );
+function implicitFieldSource(equation: string, mode: StudioMode, variableProgram = '') {
+  const field = mode === 'surface3d'
+    ? `(z) - (tanh((${parserNormalizeSurfaceExpression(equation)}) * uSurfaceHeightScale) * uDomainExtent * 0.55)`
+    : parserNormalizeImplicitField(
+      equation,
+      mode === 'implicit3d' ? 'implicit3d' : 'implicit',
+    );
+  return variableProgram ? `${variableProgram}; ${field}` : field;
 }
 
 function combineImplicitFields(entries: Array<{ expression: string; mode: StudioMode }>, blendMode: SurfaceBlendMode) {
@@ -2926,9 +2940,24 @@ function MainStudio() {
   }, [updateActiveLayer]);
   const smartRange = useMemo(() => detectSmartRange(renderEquation, resolvedMode), [renderEquation, resolvedMode]);
   const inputExpressions = useMemo(() => splitEquationExpressions(renderEquation, resolvedMode), [renderEquation, resolvedMode]);
+  const implicitVariableProgram = useMemo(() => {
+    const definitions = new Map<string, string>();
+    const collect = (source: string) => {
+      parserExtractEquationVariableDefinitions(source).definitions.forEach((definition) => {
+        definitions.delete(definition.name.toLowerCase());
+        definitions.set(definition.name.toLowerCase(), definition.source);
+      });
+    };
+    layers.filter((layer) => layer.visible).forEach((layer) => collect(layer.equation));
+    collect(renderEquation);
+    return [...definitions.entries()]
+      .map(([name, source]) => `${name} = ${source}`)
+      .join('; ');
+  }, [layers, renderEquation]);
   const renderExpressions = useMemo(() => {
     return inputExpressions.flatMap((expression, index) => (
-      buildGraphEvaluator(
+      parserExtractEquationVariableDefinitions(expression).renderExpression
+      && buildGraphEvaluator(
         resolvedMode === 'surface3d' ? parserNormalizeSurfaceEquation(expression) : expression,
         resolvedMode,
       )
@@ -3160,7 +3189,10 @@ function MainStudio() {
             range: activeRange,
           }));
         }
-        if (!buildGraphEvaluator(layer.equation, layer.mode)) return [];
+        if (
+          !parserExtractEquationVariableDefinitions(layer.equation).renderExpression
+          || !buildGraphEvaluator(layer.equation, layer.mode)
+        ) return [];
         return [{
           expression: layer.mode === 'surface3d' ? parserNormalizeSurfaceEquation(layer.equation) : layer.equation,
           color: layer.color,
@@ -3185,15 +3217,15 @@ function MainStudio() {
         color: threeDimensionalEntries[0].color,
         mode: 'implicit3d' as const,
         range: compositeRange,
-          implicitFields: threeDimensionalEntries.map((entry) => implicitFieldSource(entry.expression, entry.mode)),
+           implicitFields: threeDimensionalEntries.map((entry) => implicitFieldSource(entry.expression, entry.mode, implicitVariableProgram)),
       }, ...coloredEntries.filter((entry) => entry.mode !== 'implicit3d' && entry.mode !== 'surface3d')];
     }
     return coloredEntries.map((entry) => (
       entry.mode === 'implicit3d' || entry.mode === 'surface3d'
-        ? { ...entry, implicitFields: [implicitFieldSource(entry.expression, entry.mode)] }
+         ? { ...entry, implicitFields: [implicitFieldSource(entry.expression, entry.mode, implicitVariableProgram)] }
         : entry
     ));
-  }, [activeLayerId, activeRange, autoRange, layers, renderExpressions, resolvedMode, surfaceBlendMode]);
+  }, [activeLayerId, activeRange, autoRange, implicitVariableProgram, layers, renderExpressions, resolvedMode, surfaceBlendMode]);
   useEffect(() => {
     if (skippedExpressionCount === 0) {
       setParserWarning('');
