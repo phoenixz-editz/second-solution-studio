@@ -591,6 +591,9 @@ type RaymarchShader = {
   normalEpsilon: number;
 };
 
+const RAYMARCH_INTERACTION_SETTLE_MS = 220;
+const getRaymarchPreviewSteps = (fullSteps: number) => fullSteps >= 256 ? 48 : 32;
+
 const shaderMath = create(all);
 
 function compileGlslNode(node: any): string | null {
@@ -699,6 +702,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       uniform float uSmoothness;
       uniform float uNormalEpsilon;
       uniform int uMaxSteps;
+      uniform int uInteractive;
       varying vec2 vScreenUv;
 
       float sminPolynomial(float a, float b, float k) {
@@ -755,15 +759,18 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
           if (stepIndex >= uMaxSteps || distanceAlongRay > interval.y) break;
           vec3 point = uCameraPosition + rayDirection * distanceAlongRay;
           float field = distanceField(point);
-          float gradientProbe = max(
-            abs(distanceField(point + vec3(baseStep, 0.0, 0.0)) - field),
-            max(
-              abs(distanceField(point + vec3(0.0, baseStep, 0.0)) - field),
-              abs(distanceField(point + vec3(0.0, 0.0, baseStep)) - field)
-            )
-          );
-          float safeStep = abs(field) / max(gradientProbe / max(baseStep, 0.0001), 0.0001) * 0.72;
-          float adaptiveStep = clamp(max(baseStep * 0.34, safeStep), baseStep * 0.34, baseStep * 2.4);
+          float adaptiveStep = baseStep * 1.2;
+          if (uInteractive == 0) {
+            float gradientProbe = max(
+              abs(distanceField(point + vec3(baseStep, 0.0, 0.0)) - field),
+              max(
+                abs(distanceField(point + vec3(0.0, baseStep, 0.0)) - field),
+                abs(distanceField(point + vec3(0.0, 0.0, baseStep)) - field)
+              )
+            );
+            float safeStep = abs(field) / max(gradientProbe / max(baseStep, 0.0001), 0.0001) * 0.72;
+            adaptiveStep = clamp(max(baseStep * 0.34, safeStep), baseStep * 0.34, baseStep * 2.4);
+          }
 
           if (abs(field) < baseStep * 0.42 || (field < 0.0) != (previousField < 0.0)) {
             float left = max(interval.x, distanceAlongRay - adaptiveStep);
@@ -1031,6 +1038,9 @@ function GraphCanvas({
   const surfaceColorRef = useRef(color);
   const graphZoomRef = useRef(graphZoom);
   const raymarchUniformsRef = useRef<Record<string, THREE.IUniform>>({});
+  const raymarchInteractionRef = useRef(false);
+  const raymarchSettleTimerRef = useRef<number | null>(null);
+  const raymarchFullStepsRef = useRef(256);
   const raymarchUpdateRef = useRef<(camera: THREE.PerspectiveCamera) => void>(() => undefined);
   const installSurfaceRef = useRef<(positions: GeometryBufferInput, indices?: GeometryBufferInput) => void>(() => undefined);
   const drawRef = useRef<() => void>(() => undefined);
@@ -1045,12 +1055,43 @@ function GraphCanvas({
       : null,
     [equation, implicitFields, mode],
   );
+  const setRaymarchInteraction = useCallback((active: boolean) => {
+    raymarchInteractionRef.current = active;
+    if (raymarchSettleTimerRef.current !== null) {
+      window.clearTimeout(raymarchSettleTimerRef.current);
+      raymarchSettleTimerRef.current = null;
+    }
+    const uniforms = raymarchUniformsRef.current;
+    if (uniforms.uMaxSteps) {
+      uniforms.uInteractive.value = active ? 1 : 0;
+      uniforms.uMaxSteps.value = active
+        ? getRaymarchPreviewSteps(raymarchFullStepsRef.current)
+        : raymarchFullStepsRef.current;
+    }
+    if (!active) return;
+    raymarchSettleTimerRef.current = window.setTimeout(() => {
+      raymarchSettleTimerRef.current = null;
+      raymarchInteractionRef.current = false;
+      const activeUniforms = raymarchUniformsRef.current;
+      if (activeUniforms.uMaxSteps) {
+        activeUniforms.uInteractive.value = 0;
+        activeUniforms.uMaxSteps.value = raymarchFullStepsRef.current;
+      }
+    }, RAYMARCH_INTERACTION_SETTLE_MS);
+  }, []);
   const viewportRangeRef = useRef(range);
   const [viewportRange, setViewportRange] = useState(range);
 
   useEffect(() => {
     surfaceColorRef.current = color;
   }, [color]);
+
+  useEffect(() => {
+    if (mode !== 'implicit3d' || !implicitRaymarchShader) return;
+    setRaymarchInteraction(true);
+    const settleTimer = window.setTimeout(() => setRaymarchInteraction(false), RAYMARCH_INTERACTION_SETTLE_MS + 40);
+    return () => window.clearTimeout(settleTimer);
+  }, [equation, implicitRaymarchShader, mode, setRaymarchInteraction]);
 
   useEffect(() => {
     graphZoomRef.current = graphZoom;
@@ -1396,6 +1437,14 @@ function GraphCanvas({
     threeControlsRef.current = controls;
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.enableRotate = true;
+    controls.rotateSpeed = 0.82;
+    // OrbitControls' spherical range now explicitly spans the complete
+    // sphere: top, bottom, front, back, and unrestricted azimuth.
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI;
+    controls.minAzimuthAngle = -Infinity;
+    controls.maxAzimuthAngle = Infinity;
     controls.enablePan = true;
     controls.screenSpacePanning = false;
     controls.minDistance = GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MAX;
@@ -1438,11 +1487,13 @@ function GraphCanvas({
     resize();
     const handleControlStart = () => {
       lastSurfaceBuildRef.current = 0;
+      setRaymarchInteraction(true);
       setRenderQuality(true);
       setSurfaceQuality('draft');
     };
     const handleControlEnd = () => {
       lastSurfaceBuildRef.current = 0;
+      setRaymarchInteraction(false);
       setRenderQuality(false);
       setSurfaceQuality('final');
     };
@@ -1540,9 +1591,13 @@ function GraphCanvas({
       threeSurfaceReadyRef.current = false;
       raymarchUniformsRef.current = {};
       raymarchUpdateRef.current = () => undefined;
+      if (raymarchSettleTimerRef.current !== null) {
+        window.clearTimeout(raymarchSettleTimerRef.current);
+        raymarchSettleTimerRef.current = null;
+      }
       setHoverPoint(null);
     };
-  }, [isVisible, mode]);
+  }, [isVisible, mode, setRaymarchInteraction]);
 
   useEffect(() => {
     const scene = threeSceneRef.current;
@@ -1565,8 +1620,10 @@ function GraphCanvas({
       uSpeed: { value: speed },
       uSmoothness: { value: Math.max(0.045, Math.min(0.32, extent / 42)) },
       uNormalEpsilon: { value: implicitRaymarchShader.normalEpsilon },
-      uMaxSteps: { value: implicitRaymarchShader.maxSteps },
+      uMaxSteps: { value: raymarchInteractionRef.current ? getRaymarchPreviewSteps(implicitRaymarchShader.maxSteps) : implicitRaymarchShader.maxSteps },
+      uInteractive: { value: raymarchInteractionRef.current ? 1 : 0 },
     };
+    raymarchFullStepsRef.current = implicitRaymarchShader.maxSteps;
     const material = new THREE.ShaderMaterial({
       uniforms,
       vertexShader: implicitRaymarchShader.vertexShader,
