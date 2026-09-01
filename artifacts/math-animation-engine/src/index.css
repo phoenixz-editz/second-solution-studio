@@ -522,7 +522,6 @@
   .graph-maker-footer { align-items: flex-start; flex-direction: column; gap: 5px; }
   .studio-footer { align-items: flex-start; flex-direction: column; gap: 5px; padding: 14px 15px; }
   .footer-tagline { text-align: left; }
-  .left-panel .panel-section:nth-child(3) { display: none; }
   .tagline { display: none; }
   .layer-card { grid-template-columns: 26px minmax(0, 1fr) auto; }
   .progress-message { left: 14px; bottom: 14px; }

@@ -29,6 +29,7 @@ import {
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { all, create } from 'mathjs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ClerkProvider, SignIn, SignUp, useAuth } from '@clerk/react';
 import { ErrorBoundary } from '@/components/error-boundary';
@@ -574,7 +575,229 @@ function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator
 
 type HistoryItem = { equation: string; mode: ResolvedStudioMode; at: number; preview?: string };
 type EquationLayer = { id: number; equation: string; mode: ResolvedStudioMode; color: string; visible: boolean };
-type CanvasEntry = { expression: string; color: string; mode: ResolvedStudioMode; range: GraphRange };
+type CanvasEntry = {
+  expression: string;
+  color: string;
+  mode: ResolvedStudioMode;
+  range: GraphRange;
+  implicitFields?: string[];
+};
+
+type RaymarchShader = {
+  vertexShader: string;
+  fragmentShader: string;
+  fieldCount: number;
+  maxSteps: number;
+  normalEpsilon: number;
+};
+
+const shaderMath = create(all);
+
+function compileGlslNode(node: any): string | null {
+  if (!node) return null;
+  if (node.type === 'ParenthesisNode') return compileGlslNode(node.content);
+  if (node.type === 'ConstantNode') {
+    const value = Number(node.value);
+    return Number.isFinite(value) ? value.toFixed(8) : null;
+  }
+  if (node.type === 'SymbolNode') {
+    const symbol = String(node.name ?? '').toLowerCase();
+    if (symbol === 'x') return 'p.x';
+    if (symbol === 'y') return 'p.y';
+    if (symbol === 'z') return 'p.z';
+    if (symbol === 't' || symbol === 'u' || symbol === 'theta' || symbol === 'a') return 'uPhase';
+    if (symbol === 'v' || symbol === 'r' || symbol === 'phi' || symbol === 'b') return 'uSpeed';
+    if (symbol === 'pi') return 'PI';
+    if (symbol === 'e') return 'E';
+    return null;
+  }
+  if (node.type === 'OperatorNode') {
+    const args = Array.isArray(node.args) ? node.args.map(compileGlslNode) : [];
+    if (args.some((value: string | null) => value === null)) return null;
+    const [first, second] = args as [string, string?];
+    if (node.fn === 'unaryMinus') return `(-(${first}))`;
+    if (!second) return first ?? null;
+    if (node.op === '^') return `pow(${first}, ${second})`;
+    if (['+', '-', '*', '/'].includes(node.op)) return `(${first} ${node.op} ${second})`;
+    return null;
+  }
+  if (node.type === 'FunctionNode') {
+    const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
+    const args = (Array.isArray(node.args) ? node.args : []).map(compileGlslNode);
+    if (args.some((value: string | null) => value === null)) return null;
+    const compiledArgs = args as string[];
+    const directFunctions = new Set([
+      'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
+      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign',
+    ]);
+    if (directFunctions.has(name)) return `${name}(${compiledArgs.join(', ')})`;
+    if (name === 'ln' || name === 'log') return `log(${compiledArgs[0] ?? '0.0'})`;
+    if (name === 'log10') return `log(${compiledArgs[0] ?? '0.0'}) / log(10.0)`;
+    if (name === 'atan2') return `atan(${compiledArgs[0] ?? '0.0'}, ${compiledArgs[1] ?? '0.0'})`;
+    if (name === 'min' || name === 'max') return `${name}(${compiledArgs.join(', ')})`;
+    if (name === 'clamp' && compiledArgs.length === 3) return `clamp(${compiledArgs.join(', ')})`;
+    return null;
+  }
+  return null;
+}
+
+function compileGlslExpression(source: string) {
+  try {
+    const program = source.split(';').map((part) => part.trim()).filter(Boolean).at(-1) ?? source;
+    return compileGlslNode(shaderMath.parse(program));
+  } catch {
+    return null;
+  }
+}
+
+function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
+  const expressions = sources
+    .map((source) => compileGlslExpression(source))
+    .filter((source): source is string => Boolean(source));
+  if (expressions.length === 0 || expressions.length !== sources.length) return null;
+
+  const fieldFunctions = expressions.map((expression, index) => (
+    `float field${index}(vec3 p) { return ${expression}; }`
+  )).join('\n');
+  const fieldCalls = expressions.map((_, index) => `field${index}(p)`);
+  const combinedField = fieldCalls.slice(1).reduce(
+    (current, field) => `sminPolynomial(${current}, ${field}, uSmoothness)`,
+    fieldCalls[0],
+  );
+  const fineFeatures = sources.length > 1 || sources.some((source) => /\b(?:sin|cos|tan|abs|sqrt|exp|log)\b|\^/i.test(source));
+  const maxSteps = fineFeatures ? 256 : 128;
+  const normalEpsilon = fineFeatures ? 0.0018 : 0.0032;
+
+  return {
+    fieldCount: expressions.length,
+    maxSteps,
+    normalEpsilon,
+    vertexShader: `
+      varying vec2 vScreenUv;
+      void main() {
+        vScreenUv = position.xy * 0.5 + 0.5;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      #define PI 3.141592653589793
+      #define E 2.718281828459045
+      #define MAX_RAY_STEPS 256
+      uniform vec3 uCameraPosition;
+      uniform vec3 uCameraRight;
+      uniform vec3 uCameraUp;
+      uniform vec3 uCameraForward;
+      uniform vec3 uBoundsMin;
+      uniform vec3 uBoundsMax;
+      uniform vec3 uColor;
+      uniform float uAspect;
+      uniform float uFovRadians;
+      uniform float uDomainExtent;
+      uniform float uPhase;
+      uniform float uSpeed;
+      uniform float uSmoothness;
+      uniform float uNormalEpsilon;
+      uniform int uMaxSteps;
+      varying vec2 vScreenUv;
+
+      float sminPolynomial(float a, float b, float k) {
+        float h = clamp(0.5 + 0.5 * (b - a) / max(k, 0.0001), 0.0, 1.0);
+        return mix(b, a, h) - k * h * (1.0 - h);
+      }
+
+      ${fieldFunctions}
+
+      float distanceField(vec3 p) {
+        return ${combinedField};
+      }
+
+      vec2 rayBox(vec3 origin, vec3 direction) {
+        vec3 inverseDirection = 1.0 / max(abs(direction), vec3(0.00001)) * sign(direction);
+        vec3 first = (uBoundsMin - origin) * inverseDirection;
+        vec3 second = (uBoundsMax - origin) * inverseDirection;
+        vec3 nearPoint = min(first, second);
+        vec3 farPoint = max(first, second);
+        return vec2(max(max(nearPoint.x, nearPoint.y), nearPoint.z), min(min(farPoint.x, farPoint.y), farPoint.z));
+      }
+
+      float normalStep() {
+        return max(uNormalEpsilon, uDomainExtent / float(uMaxSteps) * 0.68);
+      }
+
+      vec3 fieldNormal(vec3 point) {
+        float e = normalStep();
+        vec2 xOffset = vec2(e, 0.0);
+        vec2 yOffset = vec2(0.0, e);
+        float dx = distanceField(point + vec3(xOffset, 0.0)) - distanceField(point - vec3(xOffset, 0.0));
+        float dy = distanceField(point + vec3(yOffset, 0.0)) - distanceField(point - vec3(yOffset, 0.0));
+        float dz = distanceField(point + vec3(0.0, 0.0, e)) - distanceField(point - vec3(0.0, 0.0, e));
+        return normalize(vec3(dx, dy, dz));
+      }
+
+      void main() {
+        vec2 ndc = vScreenUv * 2.0 - 1.0;
+        vec3 rayDirection = normalize(
+          uCameraForward
+          + uCameraRight * ndc.x * uAspect * tan(uFovRadians * 0.5)
+          + uCameraUp * ndc.y * tan(uFovRadians * 0.5)
+        );
+        vec2 interval = rayBox(uCameraPosition, rayDirection);
+        if (interval.x > interval.y || interval.y < 0.0) discard;
+
+        float distanceAlongRay = max(interval.x, 0.0);
+        float previousField = distanceField(uCameraPosition + rayDirection * distanceAlongRay);
+        float baseStep = (uDomainExtent * 2.0) / float(uMaxSteps);
+        vec3 hitPoint = vec3(0.0);
+        bool hit = false;
+
+        for (int stepIndex = 0; stepIndex < MAX_RAY_STEPS; stepIndex += 1) {
+          if (stepIndex >= uMaxSteps || distanceAlongRay > interval.y) break;
+          vec3 point = uCameraPosition + rayDirection * distanceAlongRay;
+          float field = distanceField(point);
+          float gradientProbe = max(
+            abs(distanceField(point + vec3(baseStep, 0.0, 0.0)) - field),
+            max(
+              abs(distanceField(point + vec3(0.0, baseStep, 0.0)) - field),
+              abs(distanceField(point + vec3(0.0, 0.0, baseStep)) - field)
+            )
+          );
+          float safeStep = abs(field) / max(gradientProbe / max(baseStep, 0.0001), 0.0001) * 0.72;
+          float adaptiveStep = clamp(max(baseStep * 0.34, safeStep), baseStep * 0.34, baseStep * 2.4);
+
+          if (abs(field) < baseStep * 0.42 || (field < 0.0) != (previousField < 0.0)) {
+            float left = max(interval.x, distanceAlongRay - adaptiveStep);
+            float right = distanceAlongRay;
+            float leftField = distanceField(uCameraPosition + rayDirection * left);
+            for (int refinement = 0; refinement < 5; refinement += 1) {
+              float middle = (left + right) * 0.5;
+              float middleField = distanceField(uCameraPosition + rayDirection * middle);
+              if ((middleField < 0.0) == (leftField < 0.0)) {
+                left = middle;
+                leftField = middleField;
+              } else {
+                right = middle;
+              }
+            }
+            hitPoint = uCameraPosition + rayDirection * ((left + right) * 0.5);
+            hit = true;
+            break;
+          }
+          previousField = field;
+          distanceAlongRay += adaptiveStep;
+        }
+        if (!hit) discard;
+
+        vec3 normal = fieldNormal(hitPoint);
+        vec3 lightDirection = normalize(vec3(-0.45, 0.72, 0.85));
+        float diffuse = 0.32 + 0.68 * max(dot(normal, lightDirection), 0.0);
+        float rim = pow(1.0 - max(dot(normal, normalize(uCameraPosition - hitPoint)), 0.0), 2.0);
+        vec3 shaded = uColor * diffuse + vec3(0.34, 0.52, 0.16) * rim * 0.42;
+        gl_FragColor = vec4(shaded, 0.96);
+      }
+    `,
+  };
+}
 type SurfaceBlendMode = 'overlay' | 'union' | 'intersection' | 'additive';
 type StudioTheme = 'light' | 'dark' | 'neon';
 type StudioSessionState = {
@@ -648,7 +871,14 @@ function implicitFieldSource(equation: string, mode: StudioMode) {
 
 function combineImplicitFields(entries: Array<{ expression: string; mode: StudioMode }>, blendMode: SurfaceBlendMode) {
   const fields = entries.map((entry) => implicitFieldSource(entry.expression, entry.mode));
-  if (blendMode === 'union') return `min(${fields.map((field) => `(${field})`).join(', ')})`;
+  if (blendMode === 'union') {
+    // Keep the CPU fallback visually consistent with the GLSL polynomial smin.
+    // Unlike binary min(), this preserves a continuous gradient at overlaps.
+    return fields.slice(1).reduce(
+      (current, field) => `(0.5 * ((${current}) + (${field}) - sqrt(((${current}) - (${field}))^2 + 0.12^2)))`,
+      fields[0] ?? '0',
+    );
+  }
   if (blendMode === 'intersection') return `max(${fields.map((field) => `(${field})`).join(', ')})`;
   return fields.map((field) => `(${field})`).join(' + ');
 }
@@ -742,6 +972,7 @@ function GraphCanvas({
   cameraFrame,
   cameraSource,
   animationExpected,
+  implicitFields,
   onGraphZoomChange,
   onRenderStart,
   onRenderStatus,
@@ -767,6 +998,7 @@ function GraphCanvas({
   cameraFrame: { scale: number; centerX: number; centerY: number };
   cameraSource: boolean;
   animationExpected: boolean;
+  implicitFields?: string[];
   onGraphZoomChange: (value: number) => void;
   onRenderStart: () => void;
   onRenderStatus: (status: 'ready' | 'error', message?: string) => void;
@@ -798,6 +1030,8 @@ function GraphCanvas({
   const surfaceInputKeyRef = useRef('');
   const surfaceColorRef = useRef(color);
   const graphZoomRef = useRef(graphZoom);
+  const raymarchUniformsRef = useRef<Record<string, THREE.IUniform>>({});
+  const raymarchUpdateRef = useRef<(camera: THREE.PerspectiveCamera) => void>(() => undefined);
   const installSurfaceRef = useRef<(positions: GeometryBufferInput, indices?: GeometryBufferInput) => void>(() => undefined);
   const drawRef = useRef<() => void>(() => undefined);
   const visibilityTargetRef = useRef<HTMLDivElement>(null);
@@ -805,6 +1039,12 @@ function GraphCanvas({
   const [hoverPoint, setHoverPoint] = useState<{ point: THREE.Vector3; x: number; y: number } | null>(null);
   const [surfaceQuality, setSurfaceQuality] = useState<'draft' | 'final'>('final');
   const evaluator = useMemo(() => buildGraphEvaluator(equation, mode), [equation, mode]);
+  const implicitRaymarchShader = useMemo(
+    () => mode === 'implicit3d'
+      ? buildImplicitRaymarchShader(implicitFields?.length ? implicitFields : [equation])
+      : null,
+    [equation, implicitFields, mode],
+  );
   const viewportRangeRef = useRef(range);
   const [viewportRange, setViewportRange] = useState(range);
 
@@ -1264,6 +1504,7 @@ function GraphCanvas({
       stars.rotation.z = now * 0.000012;
       stars.rotation.y = now * 0.000018;
       controls.update();
+      raymarchUpdateRef.current(camera);
       renderer.render(scene, camera);
       frame = requestAnimationFrame(render);
     };
@@ -1297,12 +1538,93 @@ function GraphCanvas({
       threeSurfaceGeometryRef.current?.dispose();
       threeSurfaceGeometryRef.current = null;
       threeSurfaceReadyRef.current = false;
+      raymarchUniformsRef.current = {};
+      raymarchUpdateRef.current = () => undefined;
       setHoverPoint(null);
     };
   }, [isVisible, mode]);
 
   useEffect(() => {
-    if ((mode !== 'implicit3d' && mode !== 'surface3d') || !isVisible) return;
+    const scene = threeSceneRef.current;
+    const camera = threeCameraRef.current;
+    if (!isVisible || mode !== 'implicit3d' || !implicitRaymarchShader || !scene || !camera) return;
+
+    const extent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    const uniforms: Record<string, THREE.IUniform> = {
+      uCameraPosition: { value: new THREE.Vector3() },
+      uCameraRight: { value: new THREE.Vector3(1, 0, 0) },
+      uCameraUp: { value: new THREE.Vector3(0, 1, 0) },
+      uCameraForward: { value: new THREE.Vector3(0, 0, -1) },
+      uBoundsMin: { value: new THREE.Vector3(-extent, -extent, -extent) },
+      uBoundsMax: { value: new THREE.Vector3(extent, extent, extent) },
+      uColor: { value: new THREE.Color(surfaceColorRef.current) },
+      uAspect: { value: 1 },
+      uFovRadians: { value: THREE.MathUtils.degToRad(camera.fov) },
+      uDomainExtent: { value: extent },
+      uPhase: { value: progress * Math.PI * 2 * speed },
+      uSpeed: { value: speed },
+      uSmoothness: { value: Math.max(0.045, Math.min(0.32, extent / 42)) },
+      uNormalEpsilon: { value: implicitRaymarchShader.normalEpsilon },
+      uMaxSteps: { value: implicitRaymarchShader.maxSteps },
+    };
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: implicitRaymarchShader.vertexShader,
+      fragmentShader: implicitRaymarchShader.fragmentShader,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const geometry = new THREE.PlaneGeometry(2, 2);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 1;
+    scene.add(mesh);
+    raymarchUniformsRef.current = uniforms;
+    raymarchUpdateRef.current = (activeCamera) => {
+      activeCamera.updateMatrixWorld();
+      const right = new THREE.Vector3().setFromMatrixColumn(activeCamera.matrixWorld, 0).normalize();
+      const up = new THREE.Vector3().setFromMatrixColumn(activeCamera.matrixWorld, 1).normalize();
+      const forward = new THREE.Vector3();
+      activeCamera.getWorldDirection(forward).normalize();
+      uniforms.uCameraPosition.value.copy(activeCamera.position);
+      uniforms.uCameraRight.value.copy(right);
+      uniforms.uCameraUp.value.copy(up);
+      uniforms.uCameraForward.value.copy(forward);
+      uniforms.uAspect.value = activeCamera.aspect;
+      uniforms.uFovRadians.value = THREE.MathUtils.degToRad(activeCamera.fov);
+    };
+    raymarchUpdateRef.current(camera);
+    threeSurfaceReadyRef.current = true;
+    onRenderStart();
+    onRenderStatus('ready');
+
+    return () => {
+      scene.remove(mesh);
+      geometry.dispose();
+      material.dispose();
+      if (raymarchUniformsRef.current === uniforms) raymarchUniformsRef.current = {};
+      raymarchUpdateRef.current = () => undefined;
+      threeSurfaceReadyRef.current = false;
+    };
+  }, [implicitRaymarchShader, isVisible, mode, onRenderStart, onRenderStatus]);
+
+  useEffect(() => {
+    const uniforms = raymarchUniformsRef.current;
+    if (!uniforms.uPhase) return;
+    const extent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    uniforms.uPhase.value = progress * Math.PI * 2 * speed;
+    uniforms.uSpeed.value = speed;
+    uniforms.uColor.value.set(surfaceColorRef.current);
+    uniforms.uBoundsMin.value.set(-extent, -extent, -extent);
+    uniforms.uBoundsMax.value.set(extent, extent, extent);
+    uniforms.uDomainExtent.value = extent;
+    uniforms.uSmoothness.value = Math.max(0.045, Math.min(0.32, extent / 42));
+  }, [progress, range, speed]);
+
+  useEffect(() => {
+    if ((mode !== 'implicit3d' && mode !== 'surface3d') || !isVisible || (mode === 'implicit3d' && implicitRaymarchShader)) return;
     let worker: Worker;
     try {
       worker = new Worker(new URL('./workers/implicit-surface.worker.ts', import.meta.url), { type: 'module' });
@@ -1430,7 +1752,7 @@ function GraphCanvas({
       installSurfaceRef.current = () => undefined;
       disposeSurface();
     };
-  }, [isVisible, mode, onRenderStart, onRenderStatus, onRuntimeWarning]);
+  }, [implicitRaymarchShader, isVisible, mode, onRenderStart, onRenderStatus, onRuntimeWarning]);
 
   useEffect(() => {
     const group = threeSurfaceGroupRef.current;
@@ -3044,9 +3366,14 @@ function MainStudio() {
         color: threeDimensionalEntries[0].color,
         mode: 'implicit3d' as const,
         range: compositeRange,
+          implicitFields: threeDimensionalEntries.map((entry) => implicitFieldSource(entry.expression, entry.mode)),
       }, ...coloredEntries.filter((entry) => entry.mode !== 'implicit3d' && entry.mode !== 'surface3d')];
     }
-    return coloredEntries;
+    return coloredEntries.map((entry) => (
+      entry.mode === 'implicit3d' || entry.mode === 'surface3d'
+        ? { ...entry, implicitFields: [implicitFieldSource(entry.expression, entry.mode)] }
+        : entry
+    ));
   }, [activeLayerId, activeRange, autoRange, layers, renderExpressions, resolvedMode, surfaceBlendMode]);
   useEffect(() => {
     if (skippedExpressionCount === 0) {
@@ -3355,8 +3682,15 @@ function MainStudio() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [progress, redoEquationEdit, undoEquationEdit]);
   const applyPreset = (preset: (typeof presets)[number]) => {
+    // Update only the selected input layer. Other layers keep their equations,
+    // modes, visibility, and colors while the global editor follows the active one.
+    const presetMode: ResolvedStudioMode = preset.mode === 'auto'
+      ? detectSmartMode(preset.equation)
+      : preset.mode;
     changeEquation(preset.equation);
-    changeMode(preset.mode);
+    setParsedEquation(preset.equation);
+    setMode(preset.mode);
+    updateActiveLayer({ equation: preset.equation, mode: presetMode });
     setProgress(0);
     setPlaying(true);
   };
@@ -3826,6 +4160,21 @@ function MainStudio() {
            </section>
 
           <section className="panel-section">
+              <div className="panel-heading">
+                <h2>Start from a shape</h2>
+                <span className="eyebrow">presets</span>
+              </div>
+              <div className="preset-grid">
+                {presets.map((preset) => (
+                  <button className="preset-card" type="button" key={preset.label} onClick={() => applyPreset(preset)} data-testid={`button-preset-${preset.label.toLowerCase().replaceAll(' ', '-')}`}>
+                    <span className="preset-symbol">{preset.symbol}</span>
+                    <span className="preset-name">{preset.label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel-section">
             <div className="panel-heading">
               <h2>Interpret as</h2>
               <span className="eyebrow">mode</span>
@@ -3841,21 +4190,6 @@ function MainStudio() {
                 <option key={item} value={item}>{modeDetails[item].title} · {modeDetails[item].helper}</option>
               ))}
             </select>
-          </section>
-
-          <section className="panel-section">
-            <div className="panel-heading">
-              <h2>Start from a shape</h2>
-              <span className="eyebrow">presets</span>
-            </div>
-            <div className="preset-grid">
-              {presets.map((preset) => (
-                <button className="preset-card" type="button" key={preset.label} onClick={() => applyPreset(preset)} data-testid={`button-preset-${preset.label.toLowerCase().replaceAll(' ', '-')}`}>
-                  <span className="preset-symbol">{preset.symbol}</span>
-                  <span className="preset-name">{preset.label}</span>
-                </button>
-              ))}
-            </div>
           </section>
 
           <section className="panel-section">
@@ -3928,6 +4262,7 @@ function MainStudio() {
                     showTrail={showTrail}
                     lineWidth={lineWidth}
                     color={entry.color}
+                    implicitFields={entry.implicitFields}
                      showBackdrop={index === 0}
                     pointStyle={pointStyle}
                      graphZoom={graphZoom}
@@ -4191,7 +4526,7 @@ function MainStudio() {
                     <option value="intersection">Intersection / valley blend</option>
                     <option value="additive">Additive field blend</option>
                   </select>
-                  <span className="setting-desc">{resolvedMode === 'implicit3d' ? 'All active solids use F = min(F1, F2, …).' : 'Union uses the highest active surface at each x/y point.'}</span>
+                    <span className="setting-desc">{resolvedMode === 'implicit3d' ? 'Active solids use polynomial smooth-min CSG with adaptive raymarching.' : 'Union uses the highest active surface at each x/y point.'}</span>
                 </div>
               )}
             <div className="control-row">
