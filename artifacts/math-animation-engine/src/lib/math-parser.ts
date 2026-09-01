@@ -258,6 +258,27 @@ function axisOffset(node: any, axis: string, bindings: ConstantBindings = {}): n
   return null;
 }
 
+function collectHighPowerAxes(
+  node: any,
+  bindings: ConstantBindings,
+  axes = new Set<string>(),
+): Set<string> {
+  const current = unwrapAstNode(node);
+  if (!current) return axes;
+  if (current.type === 'OperatorNode' && current.op === '^' && Array.isArray(current.args)) {
+    const exponent = numericAstValue(current.args[1], bindings);
+    if (exponent !== null && Number.isInteger(exponent) && exponent >= 4) {
+      for (const axis of ['x', 'y', 'z']) {
+        if (axisOffset(current.args[0], axis, bindings) !== null) axes.add(axis);
+      }
+    }
+  }
+  if (Array.isArray(current.args)) {
+    current.args.forEach((argument: any) => collectHighPowerAxes(argument, bindings, axes));
+  }
+  return axes;
+}
+
 function squaredAxisOffset(node: any, bindings: ConstantBindings) {
   const current = unwrapAstNode(node);
   if (current?.type !== 'OperatorNode' || current.op !== '^' || !Array.isArray(current.args)) return null;
@@ -320,6 +341,8 @@ function analyzeDynamicDomain(input: string) {
     zCenters: [] as number[],
     quadraticAxes: new Set<string>(),
     decayRates: { x: 0, y: 0, z: 0 },
+    localizedAxes: new Set<string>(),
+    localizedSpan: 0,
     numericMagnitude: 0,
   };
 
@@ -349,13 +372,22 @@ function analyzeDynamicDomain(input: string) {
     root.traverse((node: any) => {
       if (node?.type !== 'FunctionNode') return;
       const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
-      if (name !== 'exp' || !Array.isArray(node.args)) return;
-      const signal = quadraticProductSignal(node.args[0], bindings);
-      if (!signal) return;
-      signals.decayRates[signal.axis as 'x' | 'y' | 'z'] = Math.max(
-        signals.decayRates[signal.axis as 'x' | 'y' | 'z'],
-        signal.decayRate,
-      );
+      if (name === 'exp' && Array.isArray(node.args)) {
+        const signal = quadraticProductSignal(node.args[0], bindings);
+        if (signal) {
+          signals.decayRates[signal.axis as 'x' | 'y' | 'z'] = Math.max(
+            signals.decayRates[signal.axis as 'x' | 'y' | 'z'],
+            signal.decayRate,
+          );
+        }
+        collectHighPowerAxes(node.args[0], bindings).forEach((axis) => signals.localizedAxes.add(axis));
+        if (signals.localizedAxes.size > 0) signals.localizedSpan = Math.max(signals.localizedSpan, 2);
+      }
+    });
+    root.traverse((node: any) => {
+      if (node?.type !== 'OperatorNode' || node.op !== '/' || !Array.isArray(node.args)) return;
+      collectHighPowerAxes(node.args[1], bindings).forEach((axis) => signals.localizedAxes.add(axis));
+      if (signals.localizedAxes.size > 0) signals.localizedSpan = Math.max(signals.localizedSpan, 3);
     });
   } catch {
     // Regex-derived signals below keep auto range useful while the input is incomplete.
@@ -397,7 +429,14 @@ function dynamicAxisBounds(
   decayRate: number,
   numericMagnitude: number,
   extentLimits: { min?: number; max?: number } = {},
+  localizedSpan = 0,
 ) {
+  const fixedExtent = extentLimits.min !== undefined
+    && extentLimits.max !== undefined
+    && extentLimits.min === extentLimits.max
+    ? extentLimits.min
+    : null;
+  if (fixedExtent !== null) return { min: -fixedExtent, max: fixedExtent };
   // A wave's natural two-period view is derived from its characteristic period.
   if (hasTrig) return { min: -2 * Math.PI, max: 2 * Math.PI };
 
@@ -409,7 +448,8 @@ function dynamicAxisBounds(
   const magnitudeSpan = decayRate === 0 && numericMagnitude > 1 ? Math.sqrt(numericMagnitude) : 0;
   const span = Math.max(1.5, decaySpan, algebraicSpan, magnitudeSpan);
   const minimumExtent = Math.max(2, extentLimits.min ?? 0);
-  const automaticExtent = Math.ceil((Math.abs(center) + span) / 4) * 4;
+  const localizedExtent = localizedSpan > 0 && centers.length === 0 ? localizedSpan : null;
+  const automaticExtent = localizedExtent ?? Math.ceil((Math.abs(center) + span) / 4) * 4;
   const extent = Math.min(
     extentLimits.max ?? Number.POSITIVE_INFINITY,
     Math.max(minimumExtent, automaticExtent),
@@ -428,6 +468,7 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
     signals.decayRates.x,
     signals.numericMagnitude,
     surfaceExtentLimits ?? implicit3dExtentLimits,
+    signals.localizedAxes.has('x') ? signals.localizedSpan : 0,
   );
   const yBounds = dynamicAxisBounds(
     signals.yCenters,
@@ -436,6 +477,7 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
     signals.decayRates.y,
     signals.numericMagnitude,
     surfaceExtentLimits ?? implicit3dExtentLimits,
+    signals.localizedAxes.has('y') ? signals.localizedSpan : 0,
   );
   const zBounds = dynamicAxisBounds(
     signals.zCenters,
@@ -444,6 +486,7 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
     signals.decayRates.z,
     signals.numericMagnitude,
     implicit3dExtentLimits,
+    signals.localizedAxes.has('z') ? signals.localizedSpan : 0,
   );
   const tMax = mode === 'parametric' || mode === 'parametric3d'
     ? (/(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/i.test(input) ? 10 : 2 * Math.PI)
@@ -455,7 +498,13 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
   const worldExtent = mode === 'surface3d'
     ? 8
     : mode === 'implicit3d'
-      ? Math.min(10, Math.max(Math.abs(xMin), Math.abs(xMax), Math.abs(yMin), Math.abs(yMax), Math.abs(zBounds.min), Math.abs(zBounds.max)))
+      ? Math.min(10, Math.max(
+        Math.abs(xMin),
+        Math.abs(xMax),
+        Math.abs(yMin),
+        Math.abs(yMax),
+        ...(signals.hasZ ? [Math.abs(zBounds.min), Math.abs(zBounds.max)] : []),
+      ))
     : undefined;
   return { xMin, xMax, yMin, yMax, tMin: 0, tMax, worldExtent };
 }

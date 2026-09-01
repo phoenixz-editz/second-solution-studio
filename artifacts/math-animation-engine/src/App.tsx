@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react';
 import {
   Activity,
   Aperture,
@@ -2447,6 +2447,10 @@ function MainStudio() {
   const [manualXMax, setManualXMax] = useState(launchRange.xMax);
   const [manualTMin, setManualTMin] = useState(launchRange.tMin);
   const [manualTMax, setManualTMax] = useState(launchRange.tMax);
+  const [domainEditorOpen, setDomainEditorOpen] = useState(false);
+  const [domainMinDraft, setDomainMinDraft] = useState('');
+  const [domainMaxDraft, setDomainMaxDraft] = useState('');
+  const [domainEditorError, setDomainEditorError] = useState('');
   const [speed, setSpeed] = useState(1);
   const [duration, setDuration] = useState(8);
   const [lineWidth, setLineWidth] = useState(2);
@@ -2799,11 +2803,12 @@ function MainStudio() {
       worldExtent: Math.max(
         Math.abs(manualXMin),
         Math.abs(manualXMax),
-        Math.abs(manualTMin),
-        Math.abs(manualTMax),
+        ...(resolvedMode === 'parametric3d'
+          ? [Math.abs(manualTMin), Math.abs(manualTMax)]
+          : []),
       ),
     };
-  }, [autoRange, manualTMax, manualTMin, manualXMax, manualXMin, smartRange]);
+  }, [autoRange, manualTMax, manualTMin, manualXMax, manualXMin, resolvedMode, smartRange]);
   const audioEvaluator = useMemo(
     () => parserBuildGraphEvaluator(renderEquation, resolvedMode),
     [renderEquation, resolvedMode],
@@ -3255,6 +3260,40 @@ function MainStudio() {
   const handleGraphPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
     pinchPointersRef.current.delete(event.pointerId);
     if (pinchPointersRef.current.size < 2) pinchDistanceRef.current = null;
+  };
+  const openDomainEditor = () => {
+    const usesParameterRange = resolvedMode === 'polar';
+    const currentMin = usesParameterRange ? activeRange.tMin : activeRange.xMin;
+    const currentMax = usesParameterRange ? activeRange.tMax : activeRange.xMax;
+    setDomainMinDraft(String(currentMin));
+    setDomainMaxDraft(String(currentMax));
+    setDomainEditorError('');
+    setDomainEditorOpen(true);
+  };
+  const applyDomainOverride = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const minimum = Number(domainMinDraft);
+    const maximum = Number(domainMaxDraft);
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) {
+      setDomainEditorError('Enter finite bounds with max greater than min.');
+      return;
+    }
+    if (resolvedMode === 'polar') {
+      setManualTMin(minimum);
+      setManualTMax(maximum);
+    } else {
+      setManualXMin(minimum);
+      setManualXMax(maximum);
+    }
+    setAutoRange(false);
+    setDomainEditorOpen(false);
+    setTopNotice(`Custom domain applied: ${minimum} … ${maximum}`);
+  };
+  const restoreAutomaticDomain = () => {
+    setAutoRange(true);
+    setDomainEditorOpen(false);
+    setDomainEditorError('');
+    setTopNotice('Automatic domain restored');
   };
   const hardResetSession = () => {
     allowUnloadRef.current = true;
@@ -3889,11 +3928,66 @@ function MainStudio() {
             <div className="canvas-overlay">
               <div className="scan-line" />
                <div className="canvas-watermark mono" aria-label="Permanent watermark">{BRAND_WATERMARK}</div>
-              <div className="canvas-readout mono">
+               <div className="canvas-readout mono">
                   <div>MODE <strong>{resolvedMode.toUpperCase()}</strong> <span className="muted">· {smartPatternLabel(renderEquation, resolvedMode)}</span>{usingSafeFallback && <span className="fps-readout"> · SAFE</span>}</div>
                 <div>FRAME <strong>{String(Math.round(progress * 240)).padStart(3, '0')}</strong> / 240</div>
                  {showFps && <div className="fps-readout">FPS <strong>{fps}</strong></div>}
-                  <div>DOMAIN <strong>{domainReadout}</strong></div>
+                  <div className="domain-readout-wrap">
+                    <button
+                      className="domain-readout-button"
+                      type="button"
+                      onClick={openDomainEditor}
+                      aria-expanded={domainEditorOpen}
+                      aria-controls="domain-editor-popover"
+                      title="Click to edit the graph domain"
+                      data-testid="button-domain-editor"
+                    >
+                      <span>DOMAIN</span> <strong>{domainReadout}</strong>
+                    </button>
+                    {domainEditorOpen && (
+                      <form
+                        className="domain-editor-popover"
+                        id="domain-editor-popover"
+                        onSubmit={applyDomainOverride}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <div className="domain-editor-title">
+                          <strong>Custom domain</strong>
+                          <button type="button" className="domain-editor-close" onClick={() => setDomainEditorOpen(false)} aria-label="Close domain editor">×</button>
+                        </div>
+                        <div className="domain-editor-fields">
+                          <label>
+                            Min
+                            <input
+                              className="range-number"
+                              type="number"
+                              step="any"
+                              value={domainMinDraft}
+                              onChange={(event) => setDomainMinDraft(event.target.value)}
+                              autoFocus
+                              data-testid="input-domain-min"
+                            />
+                          </label>
+                          <label>
+                            Max
+                            <input
+                              className="range-number"
+                              type="number"
+                              step="any"
+                              value={domainMaxDraft}
+                              onChange={(event) => setDomainMaxDraft(event.target.value)}
+                              data-testid="input-domain-max"
+                            />
+                          </label>
+                        </div>
+                        {domainEditorError && <div className="domain-editor-error" role="alert">{domainEditorError}</div>}
+                        <div className="domain-editor-actions">
+                          <button type="button" className="domain-editor-secondary" onClick={restoreAutomaticDomain}>Use auto</button>
+                          <button type="submit" className="domain-editor-apply">Apply</button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
               </div>
                  <div className="canvas-legend"><span className="legend-line" /> {canvasEntries.length > 1 ? `${canvasEntries.length} active traces` : canvasEntries.length === 0 ? 'no active traces' : 'active trace'} <span className="muted">·</span> t = {displayTime}s</div>
                   <div className={`canvas-empty ${canvasEntries.length > 0 && (playing || progress >= 1) ? 'is-hidden' : ''}`} aria-hidden={canvasEntries.length > 0 && (playing || progress >= 1)}>

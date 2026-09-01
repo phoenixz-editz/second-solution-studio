@@ -300,6 +300,23 @@
 .scan-line { position: absolute; top: 0; left: 0; width: 100%; height: 1px; background: linear-gradient(90deg, transparent, rgba(199,243,107,.45), transparent); animation: scan 7s linear infinite; }
 .canvas-readout { position: absolute; top: 18px; left: 19px; padding: 9px 11px; border: 1px solid rgba(246,241,232,.13); border-radius: 7px; background: rgba(26,29,39,.7); backdrop-filter: blur(8px); color: rgba(221,217,208,.65); font: 10px/1.6 var(--app-font-mono); }
 .canvas-readout strong { color: #c7f36b; font-weight: 500; }
+.domain-readout-wrap { position: relative; pointer-events: auto; }
+.domain-readout-button { display: inline-flex; align-items: baseline; gap: 4px; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; }
+.domain-readout-button:hover strong, .domain-readout-button:focus-visible strong { color: #e1ff9a; text-decoration: underline; text-underline-offset: 3px; }
+.domain-readout-button:focus-visible { outline: 1px solid #c7f36b; outline-offset: 3px; border-radius: 3px; }
+.domain-editor-popover { position: absolute; top: calc(100% + 8px); left: 0; z-index: 8; width: 226px; padding: 11px; border: 1px solid rgba(199,243,107,.38); border-radius: 9px; background: rgba(18,23,31,.97); box-shadow: 0 12px 30px rgba(0,0,0,.4), 0 0 18px rgba(199,243,107,.08); color: rgba(241,236,222,.86); pointer-events: auto; }
+.domain-editor-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; color: #c7f36b; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+.domain-editor-close { width: 20px; height: 20px; padding: 0; border: 0; background: transparent; color: rgba(241,236,222,.62); font: 16px/1 sans-serif; }
+.domain-editor-close:hover { color: #fff; }
+.domain-editor-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.domain-editor-fields label { display: grid; gap: 4px; color: rgba(221,217,208,.62); font-size: 9px; text-transform: uppercase; }
+.domain-editor-fields .range-number { min-width: 0; height: 29px; }
+.domain-editor-error { margin-top: 7px; color: #ffab94; font-size: 9px; line-height: 1.4; }
+.domain-editor-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 10px; }
+.domain-editor-actions button { height: 27px; padding: 0 8px; border-radius: 5px; font: 9px var(--app-font-mono); cursor: pointer; }
+.domain-editor-secondary { border: 1px solid rgba(246,241,232,.18); background: transparent; color: rgba(221,217,208,.72); }
+.domain-editor-apply { border: 1px solid rgba(199,243,107,.48); background: rgba(199,243,107,.14); color: #c7f36b; }
+.domain-editor-secondary:hover, .domain-editor-apply:hover { border-color: #c7f36b; }
 .canvas-legend { position: absolute; right: 19px; bottom: 18px; display: flex; align-items: center; gap: 7px; color: rgba(221,217,208,.62); font: 10px var(--app-font-mono); }
 .legend-line { width: 18px; height: 2px; background: #c7f36b; }
 .canvas-empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; opacity: 1; visibility: visible; transition: opacity .3s ease, visibility 0s linear 0s; }
