@@ -574,6 +574,7 @@ function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator
 
 type HistoryItem = { equation: string; mode: ResolvedStudioMode; at: number; preview?: string };
 type EquationLayer = { id: number; equation: string; mode: ResolvedStudioMode; color: string; visible: boolean };
+type CanvasEntry = { expression: string; color: string; mode: ResolvedStudioMode; range: GraphRange };
 type SurfaceBlendMode = 'overlay' | 'union' | 'intersection' | 'additive';
 type StudioTheme = 'light' | 'dark' | 'neon';
 type StudioSessionState = {
@@ -733,6 +734,7 @@ function GraphCanvas({
   showTrail,
   lineWidth,
   color,
+  showBackdrop,
   pointStyle,
   graphZoom,
   surfaceHeightScale,
@@ -757,6 +759,7 @@ function GraphCanvas({
   showTrail: boolean;
   lineWidth: number;
   color: string;
+  showBackdrop: boolean;
   pointStyle: 'line' | 'particles';
   graphZoom: number;
   surfaceHeightScale: number;
@@ -1737,7 +1740,7 @@ function GraphCanvas({
     ctx.clearRect(0, 0, w, h);
     const isThreeDimensional = mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d';
     const useProjectedFallback = isThreeDimensional && !threeSceneRef.current;
-    if (!isThreeDimensional || useProjectedFallback) {
+    if (showBackdrop && (!isThreeDimensional || useProjectedFallback)) {
       ctx.fillStyle = '#171a24';
       ctx.fillRect(0, 0, w, h);
     }
@@ -2371,7 +2374,7 @@ function GraphCanvas({
         }
       }
     }
-  }, [animationExpected, cameraFrame, cameraSource, color, createFrameBuffer, equation, evaluator, graphZoom, gridDensity, lineWidth, mode, onRenderStart, onRenderStatus, onRuntimeWarning, originView, pointStyle, progress, showAxes, showGrid, showTrail, speed, viewportRange]);
+  }, [animationExpected, cameraFrame, cameraSource, color, createFrameBuffer, equation, evaluator, graphZoom, gridDensity, lineWidth, mode, onRenderStart, onRenderStatus, onRuntimeWarning, originView, pointStyle, progress, showAxes, showBackdrop, showGrid, showTrail, speed, viewportRange]);
 
   drawRef.current = draw;
   useEffect(() => {
@@ -2749,6 +2752,13 @@ function MainStudio() {
     setEditHistory(next);
     setEditHistoryIndex(nextIndex);
   }, [updateActiveLayer]);
+  const changeLayerEquation = useCallback((id: number, value: string) => {
+    if (id === activeLayerId) {
+      changeEquation(value);
+      return;
+    }
+    setLayers((current) => current.map((layer) => layer.id === id ? { ...layer, equation: value } : layer));
+  }, [activeLayerId, changeEquation]);
   const changeMode = useCallback((value: StudioMode) => {
     setMode(value);
     updateActiveLayer({ mode: value === 'auto' ? detectSmartMode(equation) : value });
@@ -3002,36 +3012,42 @@ function MainStudio() {
     const entries = layers
       .filter((layer) => layer.visible)
       .flatMap((layer) => {
-      if (layer.id === activeLayerId) {
-        return renderExpressions.map((entry) => ({
-          ...entry,
-           mode: resolvedMode,
-          range: activeRange,
-        }));
-      }
-      if (!buildGraphEvaluator(layer.equation, layer.mode)) return [];
-      return [{
-        expression: layer.mode === 'surface3d' ? parserNormalizeSurfaceEquation(layer.equation) : layer.equation,
-        color: layer.color,
-        mode: layer.mode,
-        range: detectSmartRange(layer.equation, layer.mode),
-      }];
+        if (layer.id === activeLayerId) {
+          return renderExpressions.map((entry) => ({
+            ...entry,
+            mode: resolvedMode,
+            range: activeRange,
+          }));
+        }
+        if (!buildGraphEvaluator(layer.equation, layer.mode)) return [];
+        return [{
+          expression: layer.mode === 'surface3d' ? parserNormalizeSurfaceEquation(layer.equation) : layer.equation,
+          color: layer.color,
+          mode: layer.mode,
+          range: autoRange ? detectSmartRange(layer.equation, layer.mode) : activeRange,
+        }];
       });
-    const coloredEntries = entries.map((entry, index) => ({
+    if (entries.length === 0) return [] as CanvasEntry[];
+    const compositeRange = autoRange
+      ? mergeGraphRanges(entries.map((entry) => entry.range))
+      : activeRange;
+    const coloredEntries: CanvasEntry[] = entries.map((entry, index) => ({
       ...entry,
-      color: entries.length > 1 ? multiGraphColors[index % multiGraphColors.length] : entry.color,
+      range: compositeRange,
+      color: entry.color || multiGraphColors[index % multiGraphColors.length],
     }));
     const threeDimensionalEntries = coloredEntries.filter((entry) => entry.mode === 'implicit3d' || entry.mode === 'surface3d');
-    if (surfaceBlendMode !== 'overlay' && threeDimensionalEntries.length > 1) {
+    const effectiveBlendMode = resolvedMode === 'implicit3d' ? 'union' : surfaceBlendMode;
+    if (effectiveBlendMode !== 'overlay' && threeDimensionalEntries.length > 1) {
       return [{
-        expression: combineImplicitFields(threeDimensionalEntries, surfaceBlendMode),
+        expression: combineImplicitFields(threeDimensionalEntries, effectiveBlendMode),
         color: threeDimensionalEntries[0].color,
         mode: 'implicit3d' as const,
-        range: mergeGraphRanges(threeDimensionalEntries.map((entry) => entry.range)),
+        range: compositeRange,
       }, ...coloredEntries.filter((entry) => entry.mode !== 'implicit3d' && entry.mode !== 'surface3d')];
     }
     return coloredEntries;
-  }, [activeLayerId, activeRange, layers, resolvedMode, renderExpressions, surfaceBlendMode]);
+  }, [activeLayerId, activeRange, autoRange, layers, renderExpressions, resolvedMode, surfaceBlendMode]);
   useEffect(() => {
     if (skippedExpressionCount === 0) {
       setParserWarning('');
@@ -3347,6 +3363,7 @@ function MainStudio() {
   const selectLayer = (layer: EquationLayer) => {
     setActiveLayerId(layer.id);
     setEquation(layer.equation);
+    setParsedEquation(layer.equation);
     setMode(layer.mode);
     setColor(layer.color);
     setOriginView(false);
@@ -3742,46 +3759,71 @@ function MainStudio() {
         )}
 
       <main className="studio-layout">
-        <aside className="left-panel">
-          <section className="panel-section">
-            <div className="panel-heading">
-             <h2>{resolvedMode === 'points' ? 'Point set' : 'Equation cue'}</h2>
-              <span className="eyebrow">input 01</span>
-            </div>
-            <div className="equation-box">
-              <textarea
-                ref={equationInputRef}
-                 className={`equation-input ${resolvedMode === 'points' ? 'points-input' : ''}`}
-                value={equation}
-                onChange={(event) => changeEquation(event.target.value)}
-                placeholder={details.placeholder}
-                 rows={resolvedMode === 'points' ? 6 : undefined}
-                spellCheck={false}
-                 data-testid={resolvedMode === 'points' ? 'input-points' : 'input-equation'}
-                 aria-label={resolvedMode === 'points' ? 'Point set input' : 'Equation input'}
-              />
-              <div className="input-footer">
-                 <div className="input-edit-tools">
-                   <span className="input-hint mono">{resolvedMode === 'points' ? 'One (x, y) pair per line' : mode === 'auto' ? `Detected as ${modeDetails[resolvedMode].title} · use t for time` : 'Use t for time'}</span>
-                   <div className="edit-history-buttons" aria-label="Equation edit history">
-                     <button className="icon-btn" type="button" onClick={undoEquationEdit} disabled={editHistoryIndex === 0} aria-label="Undo equation edit" title="Undo (Ctrl/Cmd+Z)"><Undo2 className="icon" /></button>
-                     <button className="icon-btn" type="button" onClick={redoEquationEdit} disabled={editHistoryIndex >= editHistory.length - 1} aria-label="Redo equation edit" title="Redo (Ctrl/Cmd+Y)"><Redo2 className="icon" /></button>
+         <aside className="left-panel">
+           <section className="panel-section">
+             <div className="panel-heading">
+               <div>
+                 <h2>{resolvedMode === 'points' ? 'Point layers' : 'Equation layers'}</h2>
+                 <span className="panel-subtitle">Each input renders as a native scene layer.</span>
+               </div>
+               <button className="add-layer-inline" type="button" onClick={addLayer} data-testid="button-add-layer-top">
+                 <Plus className="icon" /> Add equation
+               </button>
+             </div>
+             <div className="layer-list equation-layer-list">
+               {layers.map((layer, index) => {
+                 const isActive = layer.id === activeLayerId;
+                 const layerDetails = modeDetails[layer.mode];
+                 return (
+                   <div className={`layer-card equation-layer-card ${isActive ? 'active' : ''}`} key={layer.id}>
+                     <div className="equation-layer-header">
+                       <span className="layer-swatch" style={{ '--layer-color': layer.color } as CSSProperties} />
+                       <span className="eyebrow">INPUT {String(index + 1).padStart(2, '0')}</span>
+                       <span className="layer-mode-pill mono">{layerDetails.title}</span>
+                       <div className="layer-actions">
+                         <button className={`layer-toggle ${layer.visible ? 'on' : ''}`} type="button" onClick={() => toggleLayer(layer.id)} aria-label={`${layer.visible ? 'Hide' : 'Show'} input ${index + 1}`} aria-pressed={layer.visible}>
+                           {layer.visible ? <Eye className="icon" /> : <EyeOff className="icon" />}
+                         </button>
+                         <button className="icon-btn" type="button" onClick={() => removeLayer(layer.id)} disabled={layers.length === 1} aria-label={`Delete input ${index + 1}`} title={layers.length === 1 ? 'Keep one equation input' : 'Delete equation input'}><Trash2 className="icon" /></button>
+                       </div>
+                     </div>
+                     <textarea
+                       ref={isActive ? equationInputRef : undefined}
+                       className={`equation-input layer-equation-input ${layer.mode === 'points' ? 'points-input' : ''}`}
+                       value={layer.equation}
+                       onFocus={() => selectLayer(layer)}
+                       onChange={(event) => changeLayerEquation(layer.id, event.target.value)}
+                       placeholder={layerDetails.placeholder}
+                       rows={layer.mode === 'points' ? 5 : undefined}
+                       spellCheck={false}
+                       data-testid={`input-equation-layer-${index}`}
+                       aria-label={`Equation input ${index + 1}`}
+                     />
+                     <div className="input-footer">
+                       <span className="input-hint mono">{layer.mode === 'points' ? 'One (x, y) pair per line' : isActive && mode === 'auto' ? `Detected as ${layerDetails.title} · use t for time` : 'Use t for time'}</span>
+                       {isActive && <div className="input-edit-tools">
+                         <div className="edit-history-buttons" aria-label="Equation edit history">
+                           <button className="icon-btn" type="button" onClick={undoEquationEdit} disabled={editHistoryIndex === 0} aria-label="Undo equation edit" title="Undo (Ctrl/Cmd+Z)"><Undo2 className="icon" /></button>
+                           <button className="icon-btn" type="button" onClick={redoEquationEdit} disabled={editHistoryIndex >= editHistory.length - 1} aria-label="Redo equation edit" title="Redo (Ctrl/Cmd+Y)"><Redo2 className="icon" /></button>
+                         </div>
+                         <span className={`validate-state ${validatorState.className}`} data-testid="status-validation">
+                           <span className="state-dot" /> {validatorState.label}
+                         </span>
+                       </div>}
+                     </div>
+                     {isActive && layer.mode !== 'points' && autocompleteSuggestions.length > 0 && (
+                       <div className="autocomplete-row">
+                         <span className="autocomplete-label">Function palette</span>
+                         {autocompleteSuggestions.map((suggestion) => (
+                           <button className="autocomplete-chip" type="button" key={suggestion} onClick={() => insertSuggestion(suggestion)}>{suggestion}</button>
+                         ))}
+                       </div>
+                     )}
                    </div>
-                 </div>
-                <span className={`validate-state ${validatorState.className}`} data-testid="status-validation">
-                  <span className="state-dot" /> {validatorState.label}
-                </span>
-              </div>
-               {resolvedMode !== 'points' && autocompleteSuggestions.length > 0 && (
-                <div className="autocomplete-row">
-                  <span className="autocomplete-label">Function palette</span>
-                  {autocompleteSuggestions.map((suggestion) => (
-                    <button className="autocomplete-chip" type="button" key={suggestion} onClick={() => insertSuggestion(suggestion)}>{suggestion}</button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </section>
+                 );
+               })}
+             </div>
+           </section>
 
           <section className="panel-section">
             <div className="panel-heading">
@@ -3800,31 +3842,6 @@ function MainStudio() {
               ))}
             </select>
           </section>
-
-           <section className="panel-section" id="saved-graphs">
-             <div className="panel-heading">
-               <h2>Visible layers</h2>
-               <span className="eyebrow">{layers.filter((layer) => layer.visible).length} on</span>
-             </div>
-             <div className="layer-list">
-               {layers.map((layer, index) => (
-                 <div className={`layer-card ${layer.id === activeLayerId ? 'active' : ''}`} key={layer.id}>
-                   <span className="layer-swatch" style={{ '--layer-color': layer.color } as CSSProperties} />
-                   <button className="layer-select" type="button" onClick={() => selectLayer(layer)} data-testid={`button-select-layer-${index}`}>
-                     <span className="layer-name">{layer.equation || 'Untitled layer'}</span>
-                     <span className="layer-meta mono">{smartPatternLabel(layer.equation, layer.mode)} · {layer.mode}</span>
-                   </button>
-                   <div className="layer-actions">
-                     <button className={`layer-toggle ${layer.visible ? 'on' : ''}`} type="button" onClick={() => toggleLayer(layer.id)} aria-label={`${layer.visible ? 'Hide' : 'Show'} layer ${index + 1}`} aria-pressed={layer.visible}>
-                       {layer.visible ? <Eye className="icon" /> : <EyeOff className="icon" />}
-                     </button>
-                     {layers.length > 1 && <button className="icon-btn" type="button" onClick={() => removeLayer(layer.id)} aria-label={`Remove layer ${index + 1}`}><X className="icon" /></button>}
-                   </div>
-                 </div>
-               ))}
-             </div>
-             <button className="add-layer-btn" type="button" onClick={addLayer} data-testid="button-add-layer"><Plus className="icon" /> Add equation layer</button>
-           </section>
 
           <section className="panel-section">
             <div className="panel-heading">
@@ -3905,12 +3922,13 @@ function MainStudio() {
                     playing={playing}
                     progress={progress}
                     speed={speed}
-                    showGrid={showGrid && index === 0}
+                     showGrid={showGrid && index === 0}
                     gridDensity={gridDensity}
                     showAxes={showAxes && index === 0}
                     showTrail={showTrail}
                     lineWidth={lineWidth}
                     color={entry.color}
+                     showBackdrop={index === 0}
                     pointStyle={pointStyle}
                      graphZoom={graphZoom}
                     surfaceHeightScale={surfaceHeightScale}
@@ -4154,6 +4172,28 @@ function MainStudio() {
                  <span className="setting-desc">Auto-normalized height displacement multiplier</span>
                </div>
              )}
+              {(resolvedMode === 'surface3d' || resolvedMode === 'implicit3d') && (
+                <div className="control-row">
+                  <label className="control-label" htmlFor="surface-blend-mode">
+                    Composite render <span className="control-value">{resolvedMode === 'implicit3d' ? 'CSG union' : surfaceBlendMode}</span>
+                  </label>
+                  <select
+                    id="surface-blend-mode"
+                    className="select-control"
+                    value={resolvedMode === 'implicit3d' ? 'union' : surfaceBlendMode}
+                    onChange={(event) => setSurfaceBlendMode(event.target.value as SurfaceBlendMode)}
+                    disabled={resolvedMode === 'implicit3d'}
+                    data-testid="select-surface-blend-mode"
+                    aria-label="Composite render mode"
+                  >
+                    <option value="overlay">Overlay colored meshes</option>
+                    <option value="union">Union / peak blend</option>
+                    <option value="intersection">Intersection / valley blend</option>
+                    <option value="additive">Additive field blend</option>
+                  </select>
+                  <span className="setting-desc">{resolvedMode === 'implicit3d' ? 'All active solids use F = min(F1, F2, …).' : 'Union uses the highest active surface at each x/y point.'}</span>
+                </div>
+              )}
             <div className="control-row">
               <label className="control-label" htmlFor="line-width">Line weight <span className="control-value">{lineWidth}px</span></label>
               <input id="line-width" className="range-input" type="range" min="1" max="5" step="0.5" value={lineWidth} onChange={(event) => setLineWidth(Number(event.target.value))} data-testid="input-line-width" />
