@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react';
 import {
   Activity,
   Aperture,
@@ -109,6 +109,11 @@ const IMPLICIT_WORLD_EXTENT = 10;
 const IMPLICIT_3D_DRAFT_GRID_RESOLUTION = 32;
 const IMPLICIT_3D_FINAL_GRID_RESOLUTION = 88;
 const IMPLICIT_3D_WORLD_EXTENT = 8;
+const GRAPH_ZOOM_MIN = 0.05;
+const GRAPH_ZOOM_MAX = 20;
+const GRAPH_ZOOM_BUTTON_FACTOR = 1.25;
+const GRAPH_ZOOM_WHEEL_SENSITIVITY = 0.0015;
+const GRAPH_BASE_CAMERA_DISTANCE = Math.sqrt(8 ** 2 + 8 ** 2 + 8 ** 2);
 const BRAND_WATERMARK = 'Second Solution Studio';
 const AUDIO_MIN_HZ = 200;
 const AUDIO_MAX_HZ = 1200;
@@ -585,6 +590,10 @@ function clampPageZoom(value: number) {
   return Math.min(2, Math.max(0.9, Number(value.toFixed(2))));
 }
 
+function clampGraphZoom(value: number) {
+  return Math.min(GRAPH_ZOOM_MAX, Math.max(GRAPH_ZOOM_MIN, Number(value.toFixed(3))));
+}
+
 const layerColors = ['#c7f36b', '#ff8b6d', '#72d8ff', '#d6a8ff', '#ffd166'];
 const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
 
@@ -689,6 +698,7 @@ function GraphCanvas({
   cameraFrame,
   cameraSource,
   animationExpected,
+  onGraphZoomChange,
   onRenderStart,
   onRenderStatus,
   onRuntimeWarning,
@@ -711,6 +721,7 @@ function GraphCanvas({
   cameraFrame: { scale: number; centerX: number; centerY: number };
   cameraSource: boolean;
   animationExpected: boolean;
+  onGraphZoomChange: (value: number) => void;
   onRenderStart: () => void;
   onRenderStatus: (status: 'ready' | 'error', message?: string) => void;
   onRuntimeWarning: (message: string) => void;
@@ -718,6 +729,8 @@ function GraphCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const webglCanvasRef = useRef<HTMLCanvasElement>(null);
   const threeSceneRef = useRef<THREE.Scene | null>(null);
+  const threeCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const threeControlsRef = useRef<OrbitControls | null>(null);
   const implicitContourCacheRef = useRef(new Map<string, ContourPolyline[]>());
   const runtimeWarningRef = useRef(false);
   const renderHealthFramesRef = useRef(0);
@@ -738,6 +751,7 @@ function GraphCanvas({
   const surfaceWorkerBusyRef = useRef(false);
   const surfaceInputKeyRef = useRef('');
   const surfaceColorRef = useRef(color);
+  const graphZoomRef = useRef(graphZoom);
   const installSurfaceRef = useRef<(positions: GeometryBufferInput, indices?: GeometryBufferInput) => void>(() => undefined);
   const drawRef = useRef<() => void>(() => undefined);
   const visibilityTargetRef = useRef<HTMLDivElement>(null);
@@ -751,6 +765,23 @@ function GraphCanvas({
   useEffect(() => {
     surfaceColorRef.current = color;
   }, [color]);
+
+  useEffect(() => {
+    graphZoomRef.current = graphZoom;
+    const camera = threeCameraRef.current;
+    const controls = threeControlsRef.current;
+    if (!camera || !controls) return;
+    const direction = camera.position.clone().sub(controls.target);
+    if (direction.lengthSq() < 0.0001) direction.set(1, 1, 1);
+    direction.normalize();
+    const distance = THREE.MathUtils.clamp(
+      GRAPH_BASE_CAMERA_DISTANCE / graphZoom,
+      GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MAX,
+      GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MIN,
+    );
+    camera.position.copy(controls.target).add(direction.multiplyScalar(distance));
+    controls.update();
+  }, [graphZoom]);
 
   useEffect(() => {
     const target = visibilityTargetRef.current;
@@ -1055,18 +1086,26 @@ function GraphCanvas({
     };
     const scene = new THREE.Scene();
     threeSceneRef.current = scene;
-    const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
+    const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 400);
     // Recreate a clear isometric view whenever a 3D mode is entered. Keeping
     // this in the WebGL setup also leaves 2D modes and user orbit state alone.
-    camera.position.set(8, 8, 8);
+    camera.position.set(8, 8, 8).setLength(
+      THREE.MathUtils.clamp(
+        GRAPH_BASE_CAMERA_DISTANCE / graphZoomRef.current,
+        GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MAX,
+        GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MIN,
+      ),
+    );
     camera.lookAt(0, 0, 0);
+    threeCameraRef.current = camera;
     const controls = new OrbitControls(camera, canvas);
+    threeControlsRef.current = controls;
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = true;
     controls.screenSpacePanning = false;
-    controls.minDistance = 2.5;
-    controls.maxDistance = 16;
+    controls.minDistance = GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MAX;
+    controls.maxDistance = GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MIN;
     controls.target.set(0, 0, 0);
     controls.update();
 
@@ -1113,6 +1152,14 @@ function GraphCanvas({
       setRenderQuality(false);
       setSurfaceQuality('final');
     };
+    let lastReportedZoom = graphZoomRef.current;
+    const handleControlChange = () => {
+      const distance = camera.position.distanceTo(controls.target);
+      const nextZoom = clampGraphZoom(GRAPH_BASE_CAMERA_DISTANCE / Math.max(0.0001, distance));
+      if (Math.abs(nextZoom - lastReportedZoom) < 0.001) return;
+      lastReportedZoom = nextZoom;
+      onGraphZoomChange(nextZoom);
+    };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'q' && event.key !== 'e') return;
       surfaceGroup.rotation.z += event.key === 'q' ? -0.08 : 0.08;
@@ -1154,6 +1201,7 @@ function GraphCanvas({
     };
     controls.addEventListener('start', handleControlStart);
     controls.addEventListener('end', handleControlEnd);
+    controls.addEventListener('change', handleControlChange);
     canvas.addEventListener('keydown', handleKeyDown);
     canvas.addEventListener('pointermove', handlePointerMove);
     canvas.addEventListener('pointerleave', handlePointerLeave);
@@ -1170,6 +1218,7 @@ function GraphCanvas({
       cancelAnimationFrame(frame);
       controls.removeEventListener('start', handleControlStart);
       controls.removeEventListener('end', handleControlEnd);
+      controls.removeEventListener('change', handleControlChange);
       canvas.removeEventListener('keydown', handleKeyDown);
       canvas.removeEventListener('pointermove', handlePointerMove);
       canvas.removeEventListener('pointerleave', handlePointerLeave);
@@ -1188,6 +1237,8 @@ function GraphCanvas({
       });
       renderer.dispose();
       threeSceneRef.current = null;
+      threeCameraRef.current = null;
+      threeControlsRef.current = null;
       threeSurfaceGroupRef.current = null;
       threeSurfaceGeometryRef.current?.dispose();
       threeSurfaceGeometryRef.current = null;
@@ -1911,7 +1962,7 @@ function GraphCanvas({
       const positions = positionAttribute.array as ArrayLike<number>;
       const indexAttribute = geometry?.getIndex();
       const triangleCount = indexAttribute ? Math.floor(indexAttribute.count / 3) : Math.floor(positions.length / 9);
-      const fallbackScale = Math.min(w, h) / (IMPLICIT_3D_WORLD_EXTENT * 2.35);
+      const fallbackScale = Math.min(w, h) / (IMPLICIT_3D_WORLD_EXTENT * 2.35) * graphZoom;
       const fallbackCenterX = w * 0.5;
       const fallbackCenterY = h * 0.53;
       const triangles: Array<{
@@ -2398,6 +2449,8 @@ function MainStudio() {
   const editHistoryIndexRef = useRef(0);
   const progressRef = useRef(progress);
   const sharedCameraFrameRef = useRef({ scale: 0, centerX: 0, centerY: 0 });
+  const pinchPointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchDistanceRef = useRef<number | null>(null);
   const skipNextSceneResetRef = useRef(true);
   const sessionSnapshotRef = useRef<StudioSessionState | null>(null);
   const sessionSaveTimerRef = useRef<number | null>(null);
@@ -2586,7 +2639,7 @@ function MainStudio() {
         if (saved.fps === 30 || saved.fps === 60) setFps(saved.fps);
          if (saved.surfaceBlendMode === 'overlay' || saved.surfaceBlendMode === 'union' || saved.surfaceBlendMode === 'intersection' || saved.surfaceBlendMode === 'additive') setSurfaceBlendMode(saved.surfaceBlendMode);
         setPageZoom(clampPageZoom(finiteNumber(saved.pageZoom, 1)));
-        setGraphZoom(Math.min(2.5, Math.max(0.5, finiteNumber(saved.graphZoom, 1))));
+        setGraphZoom(clampGraphZoom(finiteNumber(saved.graphZoom, 1)));
          if (Array.isArray(saved.history)) {
            setHistory(saved.history.filter((item) => (
              Boolean(item)
@@ -3094,7 +3147,42 @@ function MainStudio() {
     setPageZoom((value) => clampPageZoom(value + delta));
   };
   const zoomGraph = (delta: number) => {
-    setGraphZoom((value) => Math.min(2.5, Math.max(0.5, Number((value + delta).toFixed(2)))));
+    setGraphZoom((value) => clampGraphZoom(value * Math.pow(GRAPH_ZOOM_BUTTON_FACTOR, delta)));
+  };
+  const handleGraphZoomChange = useCallback((value: number) => {
+    setGraphZoom(clampGraphZoom(value));
+  }, []);
+  const isGraphThreeDimensional = resolvedMode === 'implicit3d' || resolvedMode === 'surface3d' || resolvedMode === 'parametric3d';
+  const handleGraphWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    if (isGraphThreeDimensional || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+    event.preventDefault();
+    setGraphZoom((value) => clampGraphZoom(value * Math.exp(-event.deltaY * GRAPH_ZOOM_WHEEL_SENSITIVITY)));
+  };
+  const handleGraphPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isGraphThreeDimensional || event.pointerType !== 'touch') return;
+    pinchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchPointersRef.current.size === 2) {
+      const points = [...pinchPointersRef.current.values()];
+      pinchDistanceRef.current = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+    }
+  };
+  const handleGraphPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isGraphThreeDimensional || event.pointerType !== 'touch' || !pinchPointersRef.current.has(event.pointerId)) return;
+    pinchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchPointersRef.current.size !== 2) return;
+    const points = [...pinchPointersRef.current.values()];
+    const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+    const previousDistance = pinchDistanceRef.current;
+    if (!previousDistance || !Number.isFinite(distance) || distance <= 0) {
+      pinchDistanceRef.current = distance;
+      return;
+    }
+    pinchDistanceRef.current = distance;
+    setGraphZoom((value) => clampGraphZoom(value * (distance / previousDistance)));
+  };
+  const handleGraphPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    pinchPointersRef.current.delete(event.pointerId);
+    if (pinchPointersRef.current.size < 2) pinchDistanceRef.current = null;
   };
   const hardResetSession = () => {
     allowUnloadRef.current = true;
@@ -3676,13 +3764,21 @@ function MainStudio() {
             <div className="canvas-actions">
                <button className="dark-icon-btn" type="button" onClick={resetScene} data-testid="button-reset-scene" aria-label="Reset scene"><RotateCcw className="icon" /></button>
                 <button className="dark-icon-btn" type="button" onClick={resetViewToOrigin} data-testid="button-reset-origin" aria-label="Reset viewport to origin">0</button>
-                <button className="dark-icon-btn" type="button" onClick={() => zoomGraph(-0.25)} data-testid="button-graph-zoom-out" aria-label="Zoom graph out"><Minus className="icon" /></button>
-                <span className="graph-zoom-value mono" aria-live="polite">{graphZoom.toFixed(2)}×</span>
-                <button className="dark-icon-btn" type="button" onClick={() => zoomGraph(0.25)} data-testid="button-graph-zoom-in" aria-label="Zoom graph in"><Plus className="icon" /></button>
+                 <button className="dark-icon-btn" type="button" onClick={() => zoomGraph(-1)} data-testid="button-graph-zoom-out" aria-label={`Zoom graph out, minimum ${GRAPH_ZOOM_MIN}x`}><Minus className="icon" /></button>
+                 <span className="graph-zoom-value mono" aria-live="polite" title={`Graph zoom range: ${GRAPH_ZOOM_MIN}x to ${GRAPH_ZOOM_MAX}x`}>{graphZoom.toFixed(2)}×</span>
+                 <button className="dark-icon-btn" type="button" onClick={() => zoomGraph(1)} data-testid="button-graph-zoom-in" aria-label={`Zoom graph in, maximum ${GRAPH_ZOOM_MAX}x`}><Plus className="icon" /></button>
                <button className="dark-icon-btn" type="button" onClick={downloadPng} data-testid="button-export-png" aria-label="Export PNG"><Download className="icon" /></button>
             </div>
           </div>
-          <div className="canvas-wrap">
+          <div
+            className="canvas-wrap"
+            onWheel={handleGraphWheel}
+            onPointerDown={handleGraphPointerDown}
+            onPointerMove={handleGraphPointerMove}
+            onPointerUp={handleGraphPointerEnd}
+            onPointerCancel={handleGraphPointerEnd}
+            onPointerLeave={handleGraphPointerEnd}
+          >
              <div className="canvas-layer-stack">
                 {canvasEntries.map((entry, index) => (
                   <GraphCanvas
@@ -3705,6 +3801,7 @@ function MainStudio() {
                      cameraFrame={sharedCameraFrameRef.current}
                      cameraSource={index === 0}
                      animationExpected={animationExpected}
+                    onGraphZoomChange={handleGraphZoomChange}
                     onRenderStart={handleRenderStart}
                      onRenderStatus={handleRenderStatus}
                     onRuntimeWarning={handleRuntimeWarning}
