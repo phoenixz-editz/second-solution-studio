@@ -114,6 +114,17 @@ export function normalizeSurfaceExpression(input: string) {
     .trim();
 }
 
+export function normalizeSurfaceEquation(input: string) {
+  const normalized = normalizeForPreview(input);
+  const program = splitProgramStatements(normalized);
+  const expression = normalizeSurfaceExpression(program.renderExpression);
+  if (program.helpers.length === 0) return expression;
+  return [
+    ...program.helpers.map((helper) => `${helper.name} = ${helper.source}`),
+    expression,
+  ].join('; ');
+}
+
 export function detectSmartMode(input: string): ResolvedStudioMode {
   const normalized = normalizeForPreview(input);
   const program = splitProgramStatements(normalized);
@@ -379,7 +390,7 @@ export function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEv
         : { kind: 'parametric', x: compileProgramPart(input, parts[0]), y: compileProgramPart(input, parts[1]), z: parts[2] ? compileProgramPart(input, parts[2]) : undefined };
     }
     if (mode === 'surface3d') {
-      return { kind: 'surface', expression: compileProgramExpression(normalizeSurfaceExpression(input)) };
+      return { kind: 'surface', expression: compileProgramExpression(normalizeSurfaceEquation(input)) };
     }
     if (mode === 'implicit' || mode === 'implicit3d') {
       const renderSource = splitProgramStatements(input).renderExpression;

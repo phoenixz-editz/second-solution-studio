@@ -15,6 +15,12 @@ For worker-backed 3D scenes, retain validated mesh geometry even when the WebGL 
 
 **How to apply:** Keep geometry installation independent of the Three.js group, and choose the projected renderer based on renderer availability rather than worker completion alone.
 
+Treat explicit heightmap Surface mode as 3D in both worker scheduling and projected-fallback classification; otherwise a transparent WebGL layer can expose an empty 2D grid even when the equation is valid.
+
+**Why:** Surface meshes follow a different evaluator branch from implicit volumes, so omitting that mode from either guard silently bypasses both the worker and the CPU projection.
+
+**How to apply:** When adding a 3D mode, update its mode checks together across the worker, Three.js setup, CPU fallback, and canvas health checks.
+
 Decorative landing backgrounds should use CSS gradients and compositor-friendly transforms; reserve requestAnimationFrame loops for interactive plots and pause scene canvases when their container is off-screen.
 
 **Why:** A decorative animation can consume a full render loop without adding interaction, especially on mobile, while off-screen WebGL work continues unless visibility is handled explicitly.

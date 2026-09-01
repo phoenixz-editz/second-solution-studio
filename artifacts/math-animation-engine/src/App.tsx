@@ -47,6 +47,7 @@ import {
   buildGraphEvaluator as parserBuildGraphEvaluator,
   evaluatePointSet,
   normalizeSurfaceExpression as parserNormalizeSurfaceExpression,
+  normalizeSurfaceEquation as parserNormalizeSurfaceEquation,
   normalizeForPreview as parserNormalizeForPreview,
   splitEquationExpressions as parserSplitEquationExpressions,
   detectSmartMode,
@@ -105,9 +106,9 @@ const IMPLICIT_GRID_RESOLUTION = 96;
 const IMPLICIT_CACHE_LIMIT = 24;
 const FRAME_CACHE_SIZE = 60;
 const IMPLICIT_WORLD_EXTENT = 10;
-const IMPLICIT_3D_DRAFT_GRID_RESOLUTION = 24;
-const IMPLICIT_3D_FINAL_GRID_RESOLUTION = 64;
-const IMPLICIT_3D_WORLD_EXTENT = 3.4;
+const IMPLICIT_3D_DRAFT_GRID_RESOLUTION = 32;
+const IMPLICIT_3D_FINAL_GRID_RESOLUTION = 88;
+const IMPLICIT_3D_WORLD_EXTENT = 8;
 const BRAND_WATERMARK = 'Second Solution Studio';
 const AUDIO_MIN_HZ = 200;
 const AUDIO_MAX_HZ = 1200;
@@ -1055,7 +1056,9 @@ function GraphCanvas({
     const scene = new THREE.Scene();
     threeSceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
-    camera.position.set(5.2, 3.1, 6.8);
+    // Recreate a clear isometric view whenever a 3D mode is entered. Keeping
+    // this in the WebGL setup also leaves 2D modes and user orbit state alone.
+    camera.position.set(8, 8, 8);
     camera.lookAt(0, 0, 0);
     const controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true;
@@ -1194,7 +1197,7 @@ function GraphCanvas({
   }, [isVisible, mode]);
 
   useEffect(() => {
-    if (mode !== 'implicit3d' || !isVisible) return;
+    if ((mode !== 'implicit3d' && mode !== 'surface3d') || !isVisible) return;
     let worker: Worker;
     try {
       worker = new Worker(new URL('./workers/implicit-surface.worker.ts', import.meta.url), { type: 'module' });
@@ -1627,7 +1630,7 @@ function GraphCanvas({
     const drawProgress = easeInOutCubic(renderProgress);
 
     ctx.clearRect(0, 0, w, h);
-    const isThreeDimensional = mode === 'implicit3d' || mode === 'parametric3d';
+    const isThreeDimensional = mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d';
     const useProjectedFallback = isThreeDimensional && !threeSceneRef.current;
     if (!isThreeDimensional || useProjectedFallback) {
       ctx.fillStyle = '#171a24';
@@ -1902,9 +1905,12 @@ function GraphCanvas({
       ctx.stroke();
     };
     const renderImplicit3dFallback = () => {
-      const positionAttribute = threeSurfaceGeometryRef.current?.getAttribute('position');
+      const geometry = threeSurfaceGeometryRef.current;
+      const positionAttribute = geometry?.getAttribute('position');
       if (!positionAttribute) return;
       const positions = positionAttribute.array as ArrayLike<number>;
+      const indexAttribute = geometry?.getIndex();
+      const triangleCount = indexAttribute ? Math.floor(indexAttribute.count / 3) : Math.floor(positions.length / 9);
       const fallbackScale = Math.min(w, h) / (IMPLICIT_3D_WORLD_EXTENT * 2.35);
       const fallbackCenterX = w * 0.5;
       const fallbackCenterY = h * 0.53;
@@ -1912,20 +1918,23 @@ function GraphCanvas({
         points: Array<[number, number]>;
         depth: number;
       }> = [];
-      for (let index = 0; index + 8 < positions.length; index += 9) {
-        const project = (offset: number): [number, number, number] => {
-          const x = Number(positions[index + offset]);
-          const y = Number(positions[index + offset + 1]);
-          const z = Number(positions[index + offset + 2]);
+      for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
+        const index = indexAttribute ? indexAttribute.getX(triangleIndex * 3) * 3 : triangleIndex * 9;
+        const secondIndex = indexAttribute ? indexAttribute.getX(triangleIndex * 3 + 1) * 3 : index + 3;
+        const thirdIndex = indexAttribute ? indexAttribute.getX(triangleIndex * 3 + 2) * 3 : index + 6;
+        const project = (vertexIndex: number): [number, number, number] => {
+          const x = Number(positions[vertexIndex]);
+          const y = Number(positions[vertexIndex + 1]);
+          const z = Number(positions[vertexIndex + 2]);
           return [
             fallbackCenterX + (x * 0.82 + z * 0.52) * fallbackScale,
             fallbackCenterY - (y * 0.86 - z * 0.34) * fallbackScale,
             x * 0.16 - z * 0.72 + y * 0.04,
           ];
         };
-        const first = project(0);
-        const second = project(3);
-        const third = project(6);
+        const first = project(index);
+        const second = project(secondIndex);
+        const third = project(thirdIndex);
         triangles.push({
           points: [[first[0], first[1]], [second[0], second[1]], [third[0], third[1]]],
           depth: (first[2] + second[2] + third[2]) / 3,
@@ -2150,7 +2159,11 @@ function GraphCanvas({
       }
        if (cachedFrame.contour.length > 0) renderCachedImplicitContour(cachedFrame.contour);
        else renderImplicitContour(phase);
-    } else if (mode === 'implicit3d' && evaluator?.kind === 'implicit' && !threeSceneRef.current) {
+     } else if (
+       (mode === 'implicit3d' && evaluator?.kind === 'implicit'
+         || mode === 'surface3d' && evaluator?.kind === 'surface')
+       && !threeSceneRef.current
+     ) {
       renderImplicit3dFallback();
     } else if (evaluator && (!isThreeDimensional || useProjectedFallback)) {
       if (cachedFrame.line.length > 0) {
@@ -2644,9 +2657,12 @@ function MainStudio() {
   const inputExpressions = useMemo(() => splitEquationExpressions(renderEquation, resolvedMode), [renderEquation, resolvedMode]);
   const renderExpressions = useMemo(() => {
     return inputExpressions.flatMap((expression, index) => (
-      buildGraphEvaluator(expression, resolvedMode)
+      buildGraphEvaluator(
+        resolvedMode === 'surface3d' ? parserNormalizeSurfaceEquation(expression) : expression,
+        resolvedMode,
+      )
         ? [{
-            expression,
+            expression: resolvedMode === 'surface3d' ? parserNormalizeSurfaceEquation(expression) : expression,
             color: inputExpressions.length > 1
               ? multiGraphColors[index % multiGraphColors.length]
               : color,
@@ -2866,7 +2882,7 @@ function MainStudio() {
       }
       if (!buildGraphEvaluator(layer.equation, layer.mode)) return [];
       return [{
-        expression: layer.equation,
+        expression: layer.mode === 'surface3d' ? parserNormalizeSurfaceEquation(layer.equation) : layer.equation,
         color: layer.color,
         mode: layer.mode,
         range: detectSmartRange(layer.equation, layer.mode),
@@ -3702,7 +3718,7 @@ function MainStudio() {
                   <div>MODE <strong>{resolvedMode.toUpperCase()}</strong> <span className="muted">· {smartPatternLabel(renderEquation, resolvedMode)}</span>{usingSafeFallback && <span className="fps-readout"> · SAFE</span>}</div>
                 <div>FRAME <strong>{String(Math.round(progress * 240)).padStart(3, '0')}</strong> / 240</div>
                  {showFps && <div className="fps-readout">FPS <strong>{fps}</strong></div>}
-                  <div>{resolvedMode === 'function' || resolvedMode === 'piecewise' ? 'X RANGE' : resolvedMode === 'parametric' ? 'T RANGE' : resolvedMode === 'polar' ? 'Θ RANGE' : 'DOMAIN'} <strong>{resolvedMode === 'function' || resolvedMode === 'piecewise' ? `${activeRange.xMin} … ${activeRange.xMax}` : resolvedMode === 'parametric' || resolvedMode === 'polar' ? `${activeRange.tMin.toFixed(2)} … ${activeRange.tMax.toFixed(2)}` : '−π … π'}</strong></div>
+                  <div>{resolvedMode === 'function' || resolvedMode === 'piecewise' ? 'X RANGE' : resolvedMode === 'parametric' ? 'T RANGE' : resolvedMode === 'polar' ? 'Θ RANGE' : 'DOMAIN'} <strong>{resolvedMode === 'function' || resolvedMode === 'piecewise' ? `${activeRange.xMin} … ${activeRange.xMax}` : resolvedMode === 'parametric' || resolvedMode === 'polar' ? `${activeRange.tMin.toFixed(2)} … ${activeRange.tMax.toFixed(2)}` : resolvedMode === 'implicit3d' || resolvedMode === 'surface3d' ? `−${activeRange.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT} … ${activeRange.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT}` : '−π … π'}</strong></div>
               </div>
                  <div className="canvas-legend"><span className="legend-line" /> {canvasEntries.length > 1 ? `${canvasEntries.length} active traces` : canvasEntries.length === 0 ? 'no active traces' : 'active trace'} <span className="muted">·</span> t = {displayTime}s</div>
                   <div className={`canvas-empty ${canvasEntries.length > 0 && (playing || progress >= 1) ? 'is-hidden' : ''}`} aria-hidden={canvasEntries.length > 0 && (playing || progress >= 1)}>
@@ -3717,7 +3733,7 @@ function MainStudio() {
                      </p>
                   </div>
                </div>
-                 {renderHealth === 'error' && <div className="render-health-alert" role="alert"><strong>Render check</strong><span>{renderHealthMessage}</span></div>}
+                  {renderHealth === 'error' && resolvedMode !== 'implicit3d' && resolvedMode !== 'surface3d' && resolvedMode !== 'parametric3d' && <div className="render-health-alert" role="alert"><strong>Render check</strong><span>{renderHealthMessage}</span></div>}
             </div>
           </div>
           <div className="transport">
