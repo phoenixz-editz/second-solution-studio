@@ -48,6 +48,8 @@ import {
   evaluatePointSet,
   normalizeSurfaceExpression as parserNormalizeSurfaceExpression,
   normalizeSurfaceEquation as parserNormalizeSurfaceEquation,
+  normalizeImplicitField as parserNormalizeImplicitField,
+  isImplicit3dHeightmapExpression,
   normalizeForPreview as parserNormalizeForPreview,
   splitEquationExpressions as parserSplitEquationExpressions,
   detectSmartMode,
@@ -137,6 +139,7 @@ type ImplicitSurfaceWorkerRequest = {
   speed: number;
   resolution: number;
   extent: number;
+  heightScale: number;
 };
 
 type GeometryBufferInput = ArrayBufferLike | ArrayLike<number>;
@@ -412,6 +415,7 @@ function createHeightmapSurfaceGeometry(
   speed: number,
   resolution: number,
   extent = IMPLICIT_3D_WORLD_EXTENT,
+  heightScale = 1,
 ) {
   const positions: number[] = [];
   const indices: number[] = [];
@@ -432,11 +436,33 @@ function createHeightmapSurfaceGeometry(
       }
     }
   }
+  let minimumHeight = Number.POSITIVE_INFINITY;
+  let maximumHeight = Number.NEGATIVE_INFINITY;
+  heights.forEach((height) => {
+    if (!Number.isFinite(height)) return;
+    minimumHeight = Math.min(minimumHeight, height);
+    maximumHeight = Math.max(maximumHeight, height);
+  });
+  const heightRange = maximumHeight - minimumHeight;
+  const heightCenter = Number.isFinite(heightRange) && heightRange > 1e-5
+    ? (minimumHeight + maximumHeight) * 0.5
+    : 0;
+  const targetHalfHeight = extent * 0.55 * Math.max(0.25, Math.min(4, heightScale));
+  const heightMultiplier = Number.isFinite(heightRange) && heightRange > 1e-5
+    ? targetHalfHeight / (heightRange * 0.5)
+    : 1;
   const vertexIndex = (x: number, y: number) => {
     const height = heights[indexOf(x, y)];
     if (!Number.isFinite(height)) return -1;
     const index = positions.length / 3;
-    positions.push(-extent + x * step, extent - y * step, height);
+    const scaledHeight = Number.isFinite(heightRange) && heightRange > 1e-5
+      ? (height - heightCenter) * heightMultiplier
+      : height;
+    positions.push(
+      -extent + x * step,
+      extent - y * step,
+      Math.max(-extent * 1.8, Math.min(extent * 1.8, scaledHeight)),
+    );
     return index;
   };
   for (let y = 0; y < resolution; y += 1) {
@@ -567,6 +593,7 @@ type StudioSessionState = {
   fps: number;
   pageZoom: number;
   graphZoom: number;
+  surfaceHeightScale: number;
   surfaceBlendMode: SurfaceBlendMode;
   history: HistoryItem[];
 };
@@ -599,9 +626,10 @@ const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
 
 function implicitFieldSource(equation: string, mode: StudioMode) {
   if (mode === 'surface3d') return `(z) - (${parserNormalizeSurfaceExpression(equation)})`;
-  const normalized = normalizeForPreview(equation);
-  const equality = normalized.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
-  return equality ? `(${equality[1]}) - (${equality[2]})` : normalized;
+  return parserNormalizeImplicitField(
+    equation,
+    mode === 'implicit3d' ? 'implicit3d' : 'implicit',
+  );
 }
 
 function combineImplicitFields(entries: Array<{ expression: string; mode: StudioMode }>, blendMode: SurfaceBlendMode) {
@@ -694,6 +722,7 @@ function GraphCanvas({
   color,
   pointStyle,
   graphZoom,
+  surfaceHeightScale,
   originView,
   cameraFrame,
   cameraSource,
@@ -717,6 +746,7 @@ function GraphCanvas({
   color: string;
   pointStyle: 'line' | 'particles';
   graphZoom: number;
+  surfaceHeightScale: number;
   originView: boolean;
   cameraFrame: { scale: number; centerX: number; centerY: number };
   cameraSource: boolean;
@@ -1462,7 +1492,7 @@ function GraphCanvas({
       return;
     }
 
-    const surfaceInputKey = `${equation}|${mode}|${surfaceQuality}|${playing}|${range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT}`;
+    const surfaceInputKey = `${equation}|${mode}|${surfaceQuality}|${playing}|${range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT}|${surfaceHeightScale}`;
     const inputChanged = surfaceInputKeyRef.current !== surfaceInputKey;
     if (inputChanged) {
       surfaceInputKeyRef.current = surfaceInputKey;
@@ -1478,13 +1508,14 @@ function GraphCanvas({
       type: 'generate' as const,
       id: 0,
       equation,
-        mode,
+      mode,
       phase: progress * Math.PI * 2 * speed,
       speed,
-        resolution: Math.min(96, surfaceQuality === 'final' && !playing
-          ? IMPLICIT_3D_FINAL_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 24 : 0)
-          : IMPLICIT_3D_DRAFT_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 8 : 0)),
-        extent: range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT,
+      resolution: Math.min(96, surfaceQuality === 'final' && !playing
+        ? IMPLICIT_3D_FINAL_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 24 : 0)
+        : IMPLICIT_3D_DRAFT_GRID_RESOLUTION + (range.worldExtent && range.worldExtent >= 8 ? 8 : 0)),
+      extent: range.worldExtent ?? IMPLICIT_3D_WORLD_EXTENT,
+      heightScale: surfaceHeightScale,
     };
     surfaceRequestRef.current = request;
     const worker = surfaceWorkerRef.current;
@@ -1492,7 +1523,8 @@ function GraphCanvas({
       const fallbackTimer = window.setTimeout(() => {
         if (queueToken !== surfaceQueueTokenRef.current) return;
          const geometry = evaluator.kind === 'surface'
-           ? createHeightmapSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution, request.extent)
+            || (mode === 'implicit3d' && isImplicit3dHeightmapExpression(equation))
+            ? createHeightmapSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution, request.extent, request.heightScale)
            : createImplicitSurfaceGeometry(evaluator.expression, request.phase, speed, request.resolution, request.extent);
         const positions = geometry.getAttribute('position')?.array.buffer;
         if (positions) installSurfaceRef.current(positions);
@@ -1519,7 +1551,8 @@ function GraphCanvas({
           surfaceRequestIdRef.current += 1;
           worker.postMessage({ type: 'cancel', id: surfaceRequestIdRef.current });
            const fallbackGeometry = evaluator.kind === 'surface'
-             ? createHeightmapSurfaceGeometry(evaluator.expression, latestRequest.phase, latestRequest.speed, IMPLICIT_3D_DRAFT_GRID_RESOLUTION, latestRequest.extent)
+              || (mode === 'implicit3d' && isImplicit3dHeightmapExpression(equation))
+              ? createHeightmapSurfaceGeometry(evaluator.expression, latestRequest.phase, latestRequest.speed, IMPLICIT_3D_DRAFT_GRID_RESOLUTION, latestRequest.extent, latestRequest.heightScale)
              : createImplicitSurfaceGeometry(evaluator.expression, latestRequest.phase, latestRequest.speed, IMPLICIT_3D_DRAFT_GRID_RESOLUTION, latestRequest.extent);
           const fallbackPositions = fallbackGeometry.getAttribute('position')?.array.buffer;
           if (fallbackPositions) installSurfaceRef.current(fallbackPositions);
@@ -1528,7 +1561,7 @@ function GraphCanvas({
       }, wait);
     }
     return undefined;
-  }, [equation, evaluator, isVisible, mode, playing, progress, range.worldExtent, speed, surfaceQuality]);
+  }, [equation, evaluator, isVisible, mode, playing, progress, range.worldExtent, speed, surfaceHeightScale, surfaceQuality]);
 
   useEffect(() => {
     const scene = threeSceneRef.current;
@@ -2402,6 +2435,7 @@ function MainStudio() {
   const [showWatermark, setShowWatermark] = useState(true);
   const [pageZoom, setPageZoom] = useState(1);
   const [graphZoom, setGraphZoom] = useState(1);
+  const [surfaceHeightScale, setSurfaceHeightScale] = useState(1);
   const [surfaceBlendMode, setSurfaceBlendMode] = useState<SurfaceBlendMode>('overlay');
   const [watermark, setWatermark] = useState('Second Solution Studio');
   const [filename, setFilename] = useState('');
@@ -2640,6 +2674,7 @@ function MainStudio() {
          if (saved.surfaceBlendMode === 'overlay' || saved.surfaceBlendMode === 'union' || saved.surfaceBlendMode === 'intersection' || saved.surfaceBlendMode === 'additive') setSurfaceBlendMode(saved.surfaceBlendMode);
         setPageZoom(clampPageZoom(finiteNumber(saved.pageZoom, 1)));
         setGraphZoom(clampGraphZoom(finiteNumber(saved.graphZoom, 1)));
+         setSurfaceHeightScale(Math.max(0.25, Math.min(4, finiteNumber(saved.surfaceHeightScale, 1))));
          if (Array.isArray(saved.history)) {
            setHistory(saved.history.filter((item) => (
              Boolean(item)
@@ -3067,6 +3102,7 @@ function MainStudio() {
       fps,
       pageZoom,
       graphZoom,
+      surfaceHeightScale,
       surfaceBlendMode,
       history,
     };
@@ -3082,7 +3118,7 @@ function MainStudio() {
     gridDensity, history, layers, lineWidth, manualTMax, manualTMin, manualXMax,
     manualXMin, mode, originView, pageZoom, playing, pointStyle, progress,
     sessionReady, showAxes, showFps, showGrid, showTrail, showWatermark, speed,
-    surfaceBlendMode,
+    surfaceBlendMode, surfaceHeightScale,
     theme, watermark,
   ]);
 
@@ -3797,6 +3833,7 @@ function MainStudio() {
                     color={entry.color}
                     pointStyle={pointStyle}
                      graphZoom={graphZoom}
+                    surfaceHeightScale={surfaceHeightScale}
                     originView={originView}
                      cameraFrame={sharedCameraFrameRef.current}
                      cameraSource={index === 0}
@@ -3962,6 +3999,26 @@ function MainStudio() {
 
           <section className="panel-section">
             <div className="panel-heading"><h2>Trace treatment</h2><Waves className="icon muted" /></div>
+             {resolvedMode === 'surface3d' && (
+               <div className="control-row">
+                 <label className="control-label" htmlFor="surface-height-scale">
+                   Z-height scale <span className="control-value">{surfaceHeightScale.toFixed(2)}×</span>
+                 </label>
+                 <input
+                   id="surface-height-scale"
+                   className="range-input"
+                   type="range"
+                   min="0.25"
+                   max="4"
+                   step="0.25"
+                   value={surfaceHeightScale}
+                   onChange={(event) => setSurfaceHeightScale(Number(event.target.value))}
+                   data-testid="input-surface-height-scale"
+                   aria-label="Z-height scale multiplier"
+                 />
+                 <span className="setting-desc">Auto-normalized height displacement multiplier</span>
+               </div>
+             )}
             <div className="control-row">
               <label className="control-label" htmlFor="line-width">Line weight <span className="control-value">{lineWidth}px</span></label>
               <input id="line-width" className="range-input" type="range" min="1" max="5" step="0.5" value={lineWidth} onChange={(event) => setLineWidth(Number(event.target.value))} data-testid="input-line-width" />

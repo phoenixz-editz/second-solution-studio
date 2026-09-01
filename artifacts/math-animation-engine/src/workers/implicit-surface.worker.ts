@@ -1,4 +1,4 @@
-import { buildGraphEvaluator } from '@/lib/math-parser';
+import { buildGraphEvaluator, isImplicit3dHeightmapExpression } from '@/lib/math-parser';
 
 type GenerateRequest = {
   type: 'generate';
@@ -9,6 +9,7 @@ type GenerateRequest = {
   speed: number;
   resolution: number;
   extent: number;
+  heightScale?: number;
 };
 
 type CancelRequest = {
@@ -69,7 +70,11 @@ async function generateSurface(request: GenerateRequest) {
   const expression = compileSurfaceEquation(request.equation, mode);
   const resolution = Math.max(8, Math.min(96, Math.round(request.resolution)));
   const extent = isUsableExtent(request.extent) ? request.extent : 3.4;
-  if (mode === 'surface3d') {
+  // A bare f(x,y) entered in 3D Implicit mode is normalized to f(x,y)-z=0.
+  // It is also exactly representable as a heightmap, so use that equivalent
+  // mesh branch instead of asking the volume extractor to resolve a nearly
+  // planar zero crossing across the entire volume.
+  if (mode === 'surface3d' || (mode === 'implicit3d' && isImplicit3dHeightmapExpression(request.equation))) {
     const positions: number[] = [];
     const indices: number[] = [];
     const heights = new Float32Array((resolution + 1) * (resolution + 1));
@@ -87,11 +92,33 @@ async function generateSurface(request: GenerateRequest) {
       if (activeRequestId !== request.id) return;
       await yieldToBrowser();
     }
+    let minimumHeight = Number.POSITIVE_INFINITY;
+    let maximumHeight = Number.NEGATIVE_INFINITY;
+    heights.forEach((height) => {
+      if (!Number.isFinite(height)) return;
+      minimumHeight = Math.min(minimumHeight, height);
+      maximumHeight = Math.max(maximumHeight, height);
+    });
+    const heightRange = maximumHeight - minimumHeight;
+    const heightCenter = Number.isFinite(heightRange) && heightRange > 1e-5
+      ? (minimumHeight + maximumHeight) * 0.5
+      : 0;
+    const targetHalfHeight = extent * 0.55 * clamp(request.heightScale ?? 1, 0.25, 4);
+    const heightMultiplier = Number.isFinite(heightRange) && heightRange > 1e-5
+      ? targetHalfHeight / (heightRange * 0.5)
+      : 1;
     const vertexIndex = (x: number, y: number) => {
       const height = heights[indexOf(x, y)];
       if (!Number.isFinite(height)) return -1;
       const index = positions.length / 3;
-      positions.push(-extent + x * step, extent - y * step, height);
+      const scaledHeight = Number.isFinite(heightRange) && heightRange > 1e-5
+        ? (height - heightCenter) * heightMultiplier
+        : height;
+      positions.push(
+        -extent + x * step,
+        extent - y * step,
+        clamp(scaledHeight, -extent * 1.8, extent * 1.8),
+      );
       return index;
     };
     for (let y = 0; y < resolution; y += 1) {

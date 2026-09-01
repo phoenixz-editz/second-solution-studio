@@ -125,6 +125,29 @@ export function normalizeSurfaceEquation(input: string) {
   ].join('; ');
 }
 
+export function normalizeImplicitField(input: string, mode: 'implicit' | 'implicit3d') {
+  const normalized = normalizeForPreview(input);
+  const program = splitProgramStatements(normalized);
+  const equality = program.renderExpression.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
+  if (equality) {
+    return `(${equality[1]}) - (${equality[2]})`;
+  }
+  // In 3D implicit mode, a pasted height/function expression is the
+  // zero-level set f(x,y) - z = 0. Without this conversion the field is
+  // independent of z, so marching tetrahedra can miss the surface entirely.
+  if (mode === 'implicit3d' && !/\bz\b/i.test(program.renderExpression)) {
+    return `(${program.renderExpression}) - z`;
+  }
+  return `(${program.renderExpression})`;
+}
+
+export function isImplicit3dHeightmapExpression(input: string) {
+  const normalized = normalizeForPreview(input);
+  const renderExpression = splitProgramStatements(normalized).renderExpression;
+  return !/\bz\b/i.test(renderExpression)
+    && !/^\s*(.+?)\s*=\s*(.+?)\s*$/.test(renderExpression);
+}
+
 export function detectSmartMode(input: string): ResolvedStudioMode {
   const normalized = normalizeForPreview(input);
   const program = splitProgramStatements(normalized);
@@ -393,12 +416,10 @@ export function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEv
       return { kind: 'surface', expression: compileProgramExpression(normalizeSurfaceEquation(input)) };
     }
     if (mode === 'implicit' || mode === 'implicit3d') {
-      const renderSource = splitProgramStatements(input).renderExpression;
-      const equality = renderSource.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
-      if (equality) {
-        return { kind: 'implicit', expression: compileProgramPart(input, `(${equality[1]}) - (${equality[2]})`) };
-      }
-      return { kind: 'implicit', expression: compileProgramExpression(`(${renderSource})`) };
+      return {
+        kind: 'implicit',
+        expression: compileProgramPart(input, normalizeImplicitField(input, mode)),
+      };
     }
     if (mode === 'polar') {
       const renderSource = splitProgramStatements(input).renderExpression;
