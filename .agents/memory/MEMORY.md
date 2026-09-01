@@ -3,3 +3,4 @@
 - [Validation contract changes](validation-contract.md) — update OpenAPI and regenerate bindings before changing shared validation behavior.
 - [OpenAPI integer compatibility](openapi-integer-compatibility.md) — use number/int32 for generated IDs with this workspace’s Zod 3 setup.
 - [API codegen compatibility](api-codegen-compatibility.md) — keep OpenAPI formats aligned with helpers available in the workspace’s generated Zod version.
+- [Implicit surface fallback](implicit-surface-fallback.md) — normalize bare 3D implicit functions to f(x,y)-z and use the equivalent heightmap path when volume extraction is degenerate.
