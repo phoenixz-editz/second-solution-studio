@@ -26,6 +26,14 @@ export type DynamicDomain = {
 };
 
 const math = create(all, {});
+const AST_CACHE_LIMIT = 512;
+const MAX_EXPRESSION_LENGTH = 200_000;
+const MAX_AST_NODES = 100_000;
+const MAX_AST_DEPTH = 1_024;
+const MAX_CALCULUS_TERMS = 16_384;
+const MAX_INTEGRAL_STEPS = 256;
+const astCache = new Map<string, any>();
+const compiledAstCache = new Map<string, CompiledExpression>();
 const mathFunctions = new Set([
   'abs', 'acos', 'acosh', 'acot', 'acoth', 'acsc', 'acsch', 'asec', 'asech',
   'asin', 'asinh', 'atan', 'atan2', 'atanh', 'cbrt', 'ceil', 'cos', 'cosh',
@@ -35,6 +43,80 @@ const mathFunctions = new Set([
   'sum',
 ]);
 const mathConstants = new Set(['true', 'false', 'null', 'undefined', 'pi', 'tau', 'e', 'i', 'Infinity', 'NaN']);
+
+function rememberCached<T>(cache: Map<string, T>, key: string, value: T) {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > AST_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  return value;
+}
+
+function getCachedAst(source: string) {
+  if (source.length > MAX_EXPRESSION_LENGTH) throw new Error('Expression is too large to evaluate safely.');
+  const cached = astCache.get(source);
+  if (cached) {
+    astCache.delete(source);
+    astCache.set(source, cached);
+    return cached;
+  }
+  const ast = math.parse(source);
+  let nodeCount = 0;
+  ast.traverse(() => {
+    nodeCount += 1;
+    if (nodeCount > MAX_AST_NODES) throw new Error('Expression contains too many AST nodes.');
+  });
+  let depth = 0;
+  let maximumDepth = 0;
+  for (const character of source) {
+    if (character === '(' || character === '[' || character === '{') {
+      depth += 1;
+      maximumDepth = Math.max(maximumDepth, depth);
+    } else if (character === ')' || character === ']' || character === '}') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  if (maximumDepth > MAX_AST_DEPTH) throw new Error('Expression nesting is too deep to evaluate safely.');
+  return rememberCached(astCache, source, ast);
+}
+
+function cseNodeWeight(node: any) {
+  let weight = 0;
+  node.traverse((child: any) => {
+    if (child?.type !== 'SymbolNode' && child?.type !== 'ConstantNode') weight += 1;
+  });
+  return weight;
+}
+
+function buildCsePlan(ast: any) {
+  const candidates = new Map<string, { node: any; count: number; weight: number }>();
+  ast.traverse((node: any) => {
+    if (!['OperatorNode', 'FunctionNode'].includes(node?.type)) return;
+    const key = node.toString();
+    const existing = candidates.get(key);
+    if (existing) existing.count += 1;
+    else candidates.set(key, { node, count: 1, weight: cseNodeWeight(node) });
+  });
+  const selected = [...candidates.entries()]
+    .filter(([, candidate]) => candidate.count > 1 && candidate.weight >= 3)
+    .sort(([, left], [, right]) => right.weight - left.weight);
+  if (selected.length === 0) return { ast, helpers: [] as Array<{ name: string; node: any }> };
+
+  const helpers = selected.map(([key, candidate], index) => ({
+    key,
+    name: `cse${index}`,
+    node: candidate.node.clone(),
+  }));
+  const replacements = new Map(helpers.map(({ key, name }) => [key, name]));
+  const transformed = ast.clone().transform((node: any) => {
+    const replacement = replacements.get(node.toString());
+    return replacement ? math.parse(replacement) : node;
+  });
+  return { ast: transformed, helpers: helpers.map(({ name, node }) => ({ name, node })) };
+}
 
 export type LocalValidationResult = {
   valid: boolean;
@@ -193,7 +275,7 @@ function rewriteCalculusCalls(source: string, operations: CalculusOperation[]) {
 function referencedSymbols(source: string) {
   const symbols = new Set<string>();
   try {
-    math.parse(source).traverse((node: any) => {
+    getCachedAst(source).traverse((node: any) => {
       if (node?.type !== 'SymbolNode') return;
       const name = String(node.name ?? '');
       if (!mathFunctions.has(name.toLowerCase()) && !mathConstants.has(name)) symbols.add(name);
@@ -224,7 +306,7 @@ function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<s
     if (upper === Number.POSITIVE_INFINITY) {
       let total = 0;
       let consecutiveSmallTerms = 0;
-      for (let index = first; index < first + 100_000; index += 1) {
+      for (let index = first; index < first + MAX_CALCULUS_TERMS; index += 1) {
         const value = evaluateAt(index);
         if (!Number.isFinite(value)) return Number.NaN;
         total += value;
@@ -235,7 +317,7 @@ function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<s
     }
     if (!Number.isFinite(upper)) return Number.NaN;
     const last = Math.floor(upper);
-    const count = Math.min(4096, Math.max(0, last - first + 1));
+    const count = Math.min(MAX_CALCULUS_TERMS, Math.max(0, last - first + 1));
     let total = 0;
     for (let index = 0; index < count; index += 1) {
       const value = evaluateAt(first + index);
@@ -250,7 +332,7 @@ function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<s
   const direction = interval < 0 ? -1 : 1;
   const start = direction === 1 ? lower : upper;
   const end = direction === 1 ? upper : lower;
-  const steps = 128;
+  const steps = MAX_INTEGRAL_STEPS;
   const step = (end - start) / steps;
   let total = evaluateAt(start) + evaluateAt(end);
   if (!Number.isFinite(total)) return Number.NaN;
@@ -264,11 +346,24 @@ function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<s
 
 function compileMathExpression(source: string): CompiledExpression {
   const normalized = normalizeCalculusNotation(source);
+  const cached = compiledAstCache.get(normalized);
+  if (cached) {
+    compiledAstCache.delete(normalized);
+    compiledAstCache.set(normalized, cached);
+    return cached;
+  }
   const operations: CalculusOperation[] = [];
   const rewritten = rewriteCalculusCalls(normalized, operations);
-  const compiled = math.compile(rewritten);
-  const symbols = referencedSymbols(rewritten);
-  return {
+  const parsed = getCachedAst(rewritten);
+  const csePlan = buildCsePlan(parsed);
+  const compiled = csePlan.ast.compile();
+  const helperPrograms = csePlan.helpers.map(({ name, node }) => ({
+    name,
+    compiled: node.compile(),
+  }));
+  const helperNames = new Set(helperPrograms.map(({ name }) => name));
+  const symbols = [...referencedSymbols(rewritten)].filter((name) => !helperNames.has(name));
+  const result: CompiledExpression = {
     evaluate: (scope) => {
       const runtimeScope = withAliases(scope);
       symbols.forEach((name) => {
@@ -277,9 +372,13 @@ function compileMathExpression(source: string): CompiledExpression {
       operations.forEach((operation) => {
         runtimeScope[operation.placeholder] = evaluateCalculusOperation(operation, runtimeScope);
       });
+      helperPrograms.forEach(({ name, compiled: helper }) => {
+        runtimeScope[name] = helper.evaluate(runtimeScope);
+      });
       return compiled.evaluate(runtimeScope);
     },
   };
+  return rememberCached(compiledAstCache, normalized, result);
 }
 
 function stripOuterCollections(input: string) {
@@ -325,8 +424,14 @@ export function normalizeForPreview(input: string) {
     .trim());
 }
 
+function stripTrailingZeroEquality(input: string) {
+  return input.match(/^\s*(.+?)\s*=\s*0\s*$/)?.[1]?.trim() ?? input.trim();
+}
+
 export function normalizeSurfaceExpression(input: string) {
-  const renderSource = splitProgramStatements(normalizeForPreview(input)).renderExpression;
+  const renderSource = stripTrailingZeroEquality(
+    splitProgramStatements(normalizeForPreview(input)).renderExpression,
+  );
   return renderSource
     .replace(/^\s*z\s*=\s*/i, '')
     .replace(/^\s*(.+?)\s*=\s*z\s*$/i, '$1')
@@ -348,17 +453,18 @@ export function normalizeSurfaceEquation(input: string) {
 export function normalizeImplicitField(input: string, mode: 'implicit' | 'implicit3d') {
   const normalized = normalizeForPreview(input);
   const program = splitProgramStatements(normalized);
-  const equality = program.renderExpression.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
+  const renderExpression = stripTrailingZeroEquality(program.renderExpression);
+  const equality = renderExpression.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
   if (equality) {
     return `(${equality[1]}) - (${equality[2]})`;
   }
   // In 3D implicit mode, a pasted height/function expression is the
   // zero-level set f(x,y) - z = 0. Without this conversion the field is
   // independent of z, so marching tetrahedra can miss the surface entirely.
-  if (mode === 'implicit3d' && !/\bz\b/i.test(program.renderExpression)) {
-    return `(${program.renderExpression}) - z`;
+  if (mode === 'implicit3d' && !/\bz\b/i.test(renderExpression)) {
+    return `(${renderExpression}) - z`;
   }
-  return `(${program.renderExpression})`;
+  return `(${renderExpression})`;
 }
 
 function unwrapAstNode(node: any): any {

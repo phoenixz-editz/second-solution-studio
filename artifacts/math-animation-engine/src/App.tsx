@@ -108,7 +108,6 @@ type CachedFrame = {
 
 const IMPLICIT_GRID_RESOLUTION = 96;
 const IMPLICIT_CACHE_LIMIT = 24;
-const FRAME_CACHE_SIZE = 60;
 const GRAPH_ZOOM_MIN = 0.05;
 const GRAPH_ZOOM_MAX = 20;
 const GRAPH_ZOOM_BUTTON_FACTOR = 1.25;
@@ -753,7 +752,11 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
   if (expressions.length === 0 || expressions.length !== sources.length) return null;
 
   const fieldFunctions = expressions.map((expression, index) => (
-    `float field${index}(vec3 p) { return ${expression}; }`
+    `float field${index}(vec3 p) {
+       float value = ${expression};
+       if (!(value == value)) return 1.0e6;
+       return clamp(value, -uDomainExtent * 4.0, uDomainExtent * 4.0);
+     }`
   )).join('\n');
   const fieldCalls = expressions.map((_, index) => `field${index}(p)`);
   const combinedField = fieldCalls.slice(1).reduce(
@@ -769,6 +772,8 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
     maxSteps,
     normalEpsilon,
     vertexShader: `
+      precision highp float;
+      precision highp int;
       varying vec2 vScreenUv;
       void main() {
         vScreenUv = position.xy * 0.5 + 0.5;
@@ -777,6 +782,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
     `,
     fragmentShader: `
       precision highp float;
+      precision highp int;
       #define PI 3.141592653589793
       #define E 2.718281828459045
       #define MAX_RAY_STEPS 256
@@ -1138,8 +1144,7 @@ function GraphCanvas({
   const renderHealthFramesRef = useRef(0);
   const pixelVerificationFramesRef = useRef(0);
   const healthReportedRef = useRef(false);
-  const frameCacheRef = useRef(new Map<number, CachedFrame>());
-  const frameCacheBuildRef = useRef(0);
+  const frameCacheRef = useRef<CachedFrame | null>(null);
   const threeSurfaceGroupRef = useRef<THREE.Group | null>(null);
   const threeSurfaceGeometryRef = useRef<THREE.BufferGeometry | null>(null);
   const threeSurfaceReadyRef = useRef(false);
@@ -1250,8 +1255,8 @@ function GraphCanvas({
     return () => observer.disconnect();
   }, []);
 
-  const createFrameBuffer = useCallback((frameIndex: number): CachedFrame => {
-    const frameProgress = frameIndex / Math.max(1, FRAME_CACHE_SIZE - 1);
+  const createFrameBuffer = useCallback((requestedProgress: number): CachedFrame => {
+    const frameProgress = Math.max(0, Math.min(1, requestedProgress));
     const phase = phaseForProgress(frameProgress, speed);
     const line: GraphPoint[] = [];
     const trailOne: GraphPoint[] = [];
@@ -1440,35 +1445,13 @@ function GraphCanvas({
 
   useEffect(() => {
     if (mode === 'implicit3d' || mode === 'surface3d') return;
-    frameCacheRef.current.clear();
-    const buildToken = ++frameCacheBuildRef.current;
-    let cursor = 0;
-    let idleHandle: number | null = null;
-    let timeoutHandle: number | null = null;
-    const idleWindow = window as typeof window & {
-      requestIdleCallback?: (callback: (deadline: { timeRemaining: () => number }) => void) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-    const schedule = (callback: (deadline?: { timeRemaining: () => number }) => void) => {
-      if (idleWindow.requestIdleCallback) {
-        idleHandle = idleWindow.requestIdleCallback(callback);
-      } else {
-        timeoutHandle = window.setTimeout(() => callback(), 0);
-      }
-    };
-    const build = (deadline?: { timeRemaining: () => number }) => {
-      if (buildToken !== frameCacheBuildRef.current) return;
-      const startedAt = performance.now();
-      while (cursor < FRAME_CACHE_SIZE && (cursor === 0 || (deadline?.timeRemaining() ?? 0) > 5) && performance.now() - startedAt < 12) {
-        frameCacheRef.current.set(cursor, createFrameBuffer(cursor));
-        cursor += 1;
-      }
-      if (cursor < FRAME_CACHE_SIZE) schedule(build);
-    };
-    schedule(build);
+    frameCacheRef.current = null;
+    const cacheHandle = window.setTimeout(() => {
+      frameCacheRef.current = createFrameBuffer(0);
+      drawRef.current();
+    }, 0);
     return () => {
-      if (idleHandle !== null) idleWindow.cancelIdleCallback?.(idleHandle);
-      if (timeoutHandle !== null) window.clearTimeout(timeoutHandle);
+      window.clearTimeout(cacheHandle);
     };
   }, [createFrameBuffer, equation, mode, range]);
 
@@ -1965,28 +1948,24 @@ function GraphCanvas({
     const cx = w * 0.5;
     const cy = h * 0.5;
     const normalizedEquation = normalizeForPreview(equation).toLowerCase();
-    const cacheFrameIndex = Math.min(FRAME_CACHE_SIZE - 1, Math.max(0, Math.round(progress * (FRAME_CACHE_SIZE - 1))));
-    let cachedFrame = frameCacheRef.current.get(cacheFrameIndex);
-    if (!cachedFrame) {
-      let nearestFrame: CachedFrame | undefined;
-      let nearestDistance = Number.POSITIVE_INFINITY;
-      frameCacheRef.current.forEach((candidate, index) => {
-        const distance = Math.abs(index - cacheFrameIndex);
-        if (distance < nearestDistance) {
-          nearestFrame = candidate;
-          nearestDistance = distance;
-        }
-      });
-      cachedFrame = nearestFrame ?? createFrameBuffer(0);
-      if (frameCacheRef.current.size === 0) frameCacheRef.current.set(0, cachedFrame);
-    }
+    // Cached static scenes avoid rebuilding expensive geometry on every paint.
+    // Animated traces bypass the cache and sample the exact transport position,
+    // so playback stays continuous without blocking the first paint.
+    const usesLiveSampling = Boolean(
+      animationExpected
+      && evaluator
+      && (evaluator.kind === 'function' || evaluator.kind === 'parametric' || evaluator.kind === 'polar'),
+    );
+    const cachedFrame = frameCacheRef.current;
+    if (!cachedFrame && !usesLiveSampling) return;
+    const liveFrame = usesLiveSampling ? createFrameBuffer(progress) : cachedFrame!;
     const renderProgress = progress;
     const isParametricSpiral = (mode === 'parametric' || mode === 'parametric3d')
       && /(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(normalizedEquation);
     const isFunctionLike = mode === 'function' || mode === 'piecewise';
-    const phase = cachedFrame.phase;
+    const phase = liveFrame.phase;
     const pointCoordinates = evaluator?.kind === 'points'
-      ? cachedFrame.points
+      ? liveFrame.points
       : [];
     let scale = isFunctionLike
       ? Math.min(w / Math.max(1, viewportRange.xMax - viewportRange.xMin + 2), h / 22)
@@ -2000,7 +1979,7 @@ function GraphCanvas({
       let maxX = -Infinity;
       let minY = Infinity;
       let maxY = -Infinity;
-      cachedFrame.line.forEach((point) => {
+      liveFrame.line.forEach((point) => {
         if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
         minX = Math.min(minX, point.x);
         maxX = Math.max(maxX, point.x);
@@ -2504,29 +2483,29 @@ function GraphCanvas({
       }
       renderPoints(pointCoordinates);
     } else if (evaluator?.kind === 'vector') {
-      if (cachedFrame.vector.length > 0) renderCachedVectorField(cachedFrame.vector);
+      if (liveFrame.vector.length > 0) renderCachedVectorField(liveFrame.vector);
       else renderVectorField(evaluator);
     } else if (evaluator?.kind === 'implicit') {
       if (showTrail) {
         ctx.shadowBlur = 0;
-         if (cachedFrame.contour.length > 0) {
-           renderCachedImplicitContour(cachedFrame.contour, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75), Math.max(drawProgress - 0.14, 0));
+         if (liveFrame.contour.length > 0) {
+           renderCachedImplicitContour(liveFrame.contour, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75), Math.max(drawProgress - 0.14, 0));
          } else {
            renderImplicitContour(phase - 0.38, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75), Math.max(drawProgress - 0.14, 0));
          }
         ctx.shadowBlur = 14;
       }
-       if (cachedFrame.contour.length > 0) renderCachedImplicitContour(cachedFrame.contour);
+       if (liveFrame.contour.length > 0) renderCachedImplicitContour(liveFrame.contour);
        else renderImplicitContour(phase);
        } else if (evaluator) {
-      if (cachedFrame.line.length > 0) {
+      if (liveFrame.line.length > 0) {
         if (showTrail) {
           ctx.shadowBlur = 0;
-          traceCached(cachedFrame.trailOne, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75));
-          traceCached(cachedFrame.trailTwo, 'rgba(199, 243, 107, .3)', Math.max(1, lineWidth - 0.4));
+          traceCached(liveFrame.trailOne, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75));
+          traceCached(liveFrame.trailTwo, 'rgba(199, 243, 107, .3)', Math.max(1, lineWidth - 0.4));
           ctx.shadowBlur = 14;
         }
-        traceCached(cachedFrame.line);
+        traceCached(liveFrame.line);
       } else {
         if (showTrail) {
           ctx.shadowBlur = 0;
@@ -2556,11 +2535,11 @@ function GraphCanvas({
             ? drawProgress * Math.PI * 2
             : phase;
       const markerIndex = Math.min(
-        Math.max(0, cachedFrame.line.length - 1),
-        Math.round(drawProgress * Math.max(0, cachedFrame.line.length - 1)),
+        Math.max(0, liveFrame.line.length - 1),
+        Math.round(drawProgress * Math.max(0, liveFrame.line.length - 1)),
       );
-      const marker = cachedFrame.line.length > 0
-        ? [cachedFrame.line[markerIndex].x, cachedFrame.line[markerIndex].y] as [number, number]
+      const marker = liveFrame.line.length > 0
+        ? [liveFrame.line[markerIndex].x, liveFrame.line[markerIndex].y] as [number, number]
         : fn(markerParameter);
       ctx.arc(originX + marker[0] * scale, originY - marker[1] * scale, 3.5, 0, Math.PI * 2);
       ctx.fill();
@@ -3355,11 +3334,15 @@ function MainStudio() {
   useEffect(() => {
     if (!sessionReady || !playing || captureActiveRef.current) return;
     let frame = 0;
-    const startedAt = performance.now() - progressRef.current * duration * 1000;
+    let previousTime = performance.now();
+    let elapsedSeconds = progressRef.current * duration;
     const tick = (now: number) => {
-      const elapsedProgress = (now - startedAt) / (duration * 1000);
+      const deltaSeconds = Math.max(0, (now - previousTime) / 1000);
+      previousTime = now;
+      elapsedSeconds += deltaSeconds;
+      const elapsedProgress = elapsedSeconds / Math.max(0.001, duration);
       const nextProgress = isLooping
-        ? ((elapsedProgress % 1) + 1) % 1
+        ? elapsedProgress - Math.floor(elapsedProgress)
         : Math.min(1, elapsedProgress);
       progressRef.current = nextProgress;
       syncAudioToProgress(nextProgress);
