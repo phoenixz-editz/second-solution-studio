@@ -31,9 +31,10 @@ const mathFunctions = new Set([
   'asin', 'asinh', 'atan', 'atan2', 'atanh', 'cbrt', 'ceil', 'cos', 'cosh',
   'cot', 'coth', 'csc', 'csch', 'exp', 'floor', 'gcd', 'lcm', 'log', 'log10',
   'max', 'min', 'mod', 'nthRoot', 'pow', 'round', 'sec', 'sech', 'sign', 'sin',
-  'sinh', 'sqrt', 'tan', 'tanh', 'trunc',
+  'sinh', 'sqrt', 'tan', 'tanh', 'trunc', 'ln', 'derivative', 'integral', 'int',
+  'sum',
 ]);
-const mathConstants = new Set(['true', 'false', 'null', 'undefined', 'pi', 'e', 'i', 'Infinity', 'NaN']);
+const mathConstants = new Set(['true', 'false', 'null', 'undefined', 'pi', 'tau', 'e', 'i', 'Infinity', 'NaN']);
 
 export type LocalValidationResult = {
   valid: boolean;
@@ -66,10 +67,218 @@ function withAliases(scope: Record<string, number>) {
   return next;
 }
 
+function normalizeCalculusNotation(input: string) {
+  return input
+    .replace(/\\frac\s*\{\s*d\s*\}\s*\{\s*d\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/gi, 'derivative_d_$1')
+    .replace(/\bd\s*\/\s*d\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gi, 'derivative_d_$1(')
+    .replace(/\\(?:int|integral)\b/gi, 'int')
+    .replace(/\\sum\b/gi, 'sum');
+}
+
+type CalculusOperation = {
+  placeholder: string;
+  kind: 'derivative' | 'integral' | 'sum';
+  expression: CompiledExpression;
+  variable: string;
+  lower?: CompiledExpression;
+  upper?: CompiledExpression;
+};
+
+function unquoteExpression(value: string) {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2
+    && ((trimmed.startsWith('"') && trimmed.endsWith('"'))
+      || (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function calculusCallName(name: string) {
+  const normalized = name.toLowerCase();
+  if (normalized === 'derivative' || normalized === 'differentiate' || normalized.startsWith('derivative_d_')) {
+    return 'derivative' as const;
+  }
+  if (normalized === 'int' || normalized === 'integral') return 'integral' as const;
+  if (normalized === 'sum') return 'sum' as const;
+  return null;
+}
+
+function rewriteCalculusCalls(source: string, operations: CalculusOperation[]) {
+  let rewritten = '';
+  let index = 0;
+  while (index < source.length) {
+    const identifier = source.slice(index).match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+    if (!identifier) {
+      rewritten += source[index];
+      index += 1;
+      continue;
+    }
+    const openIndex = index + identifier.length;
+    let cursor = openIndex;
+    while (cursor < source.length && /\s/.test(source[cursor] ?? '')) cursor += 1;
+    const kind = calculusCallName(identifier);
+    if (!kind || source[cursor] !== '(') {
+      rewritten += identifier;
+      index = openIndex;
+      continue;
+    }
+
+    let depth = 0;
+    let closeIndex = -1;
+    for (let candidate = cursor; candidate < source.length; candidate += 1) {
+      if (source[candidate] === '(') depth += 1;
+      if (source[candidate] === ')') {
+        depth -= 1;
+        if (depth === 0) {
+          closeIndex = candidate;
+          break;
+        }
+      }
+    }
+    if (closeIndex < 0) {
+      rewritten += identifier;
+      index = openIndex;
+      continue;
+    }
+
+    const argumentsList = splitTopLevel(source.slice(cursor + 1, closeIndex), new Set([',']));
+    const expressionSource = unquoteExpression(argumentsList[0] ?? '');
+    if (!expressionSource) {
+      rewritten += source.slice(index, closeIndex + 1);
+      index = closeIndex + 1;
+      continue;
+    }
+
+    let variable = 'x';
+    let lowerSource: string | undefined;
+    let upperSource: string | undefined;
+    if (kind === 'derivative') {
+      const suffixVariable = identifier.toLowerCase().startsWith('derivative_d_')
+        ? identifier.slice('derivative_d_'.length)
+        : undefined;
+      variable = unquoteExpression(argumentsList[1] ?? suffixVariable ?? 'x') || 'x';
+    } else if (kind === 'integral') {
+      if (argumentsList.length >= 4) {
+        variable = unquoteExpression(argumentsList[1] ?? 'x') || 'x';
+        lowerSource = argumentsList[2];
+        upperSource = argumentsList[3];
+      } else {
+        lowerSource = argumentsList[1];
+        upperSource = argumentsList[2];
+      }
+    } else if (argumentsList.length >= 4) {
+      variable = unquoteExpression(argumentsList[1] ?? 'n') || 'n';
+      lowerSource = argumentsList[2];
+      upperSource = argumentsList[3];
+    }
+
+    const placeholder = `calc${operations.length}`;
+    operations.push({
+      placeholder,
+      kind,
+      expression: compileMathExpression(expressionSource),
+      variable,
+      lower: lowerSource ? compileMathExpression(lowerSource) : undefined,
+      upper: upperSource ? compileMathExpression(upperSource) : undefined,
+    });
+    rewritten += placeholder;
+    index = closeIndex + 1;
+  }
+  return rewritten;
+}
+
+function referencedSymbols(source: string) {
+  const symbols = new Set<string>();
+  try {
+    math.parse(source).traverse((node: any) => {
+      if (node?.type !== 'SymbolNode') return;
+      const name = String(node.name ?? '');
+      if (!mathFunctions.has(name.toLowerCase()) && !mathConstants.has(name)) symbols.add(name);
+    });
+  } catch {
+    // The main compiler reports malformed syntax; no scope defaults are needed here.
+  }
+  return symbols;
+}
+
+function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<string, number>) {
+  const evaluateAt = (value: number) => Number(operation.expression.evaluate({ ...scope, [operation.variable]: value }));
+  if (operation.kind === 'derivative') {
+    const center = Number(scope[operation.variable] ?? 0);
+    const step = 1e-4 * Math.max(1, Math.abs(center));
+    const forward = evaluateAt(center + step);
+    const backward = evaluateAt(center - step);
+    return Number.isFinite(forward) && Number.isFinite(backward)
+      ? (forward - backward) / (2 * step)
+      : Number.NaN;
+  }
+
+  const lower = Number(operation.lower?.evaluate(scope));
+  const upper = Number(operation.upper?.evaluate(scope));
+  if (!Number.isFinite(lower)) return Number.NaN;
+  if (operation.kind === 'sum') {
+    const first = Math.ceil(lower);
+    if (upper === Number.POSITIVE_INFINITY) {
+      let total = 0;
+      let consecutiveSmallTerms = 0;
+      for (let index = first; index < first + 100_000; index += 1) {
+        const value = evaluateAt(index);
+        if (!Number.isFinite(value)) return Number.NaN;
+        total += value;
+        consecutiveSmallTerms = Math.abs(value) < 1e-9 ? consecutiveSmallTerms + 1 : 0;
+        if (consecutiveSmallTerms >= 8) return total;
+      }
+      return total;
+    }
+    if (!Number.isFinite(upper)) return Number.NaN;
+    const last = Math.floor(upper);
+    const count = Math.min(4096, Math.max(0, last - first + 1));
+    let total = 0;
+    for (let index = 0; index < count; index += 1) {
+      const value = evaluateAt(first + index);
+      if (!Number.isFinite(value)) return Number.NaN;
+      total += value;
+    }
+    return total;
+  }
+
+  const interval = upper - lower;
+  if (Math.abs(interval) < 1e-12) return 0;
+  const direction = interval < 0 ? -1 : 1;
+  const start = direction === 1 ? lower : upper;
+  const end = direction === 1 ? upper : lower;
+  const steps = 128;
+  const step = (end - start) / steps;
+  let total = evaluateAt(start) + evaluateAt(end);
+  if (!Number.isFinite(total)) return Number.NaN;
+  for (let index = 1; index < steps; index += 1) {
+    const value = evaluateAt(start + index * step);
+    if (!Number.isFinite(value)) return Number.NaN;
+    total += (index % 2 === 0 ? 2 : 4) * value;
+  }
+  return direction * (step / 3) * total;
+}
+
 function compileMathExpression(source: string): CompiledExpression {
-  const compiled = math.compile(source);
+  const normalized = normalizeCalculusNotation(source);
+  const operations: CalculusOperation[] = [];
+  const rewritten = rewriteCalculusCalls(normalized, operations);
+  const compiled = math.compile(rewritten);
+  const symbols = referencedSymbols(rewritten);
   return {
-    evaluate: (scope) => compiled.evaluate(withAliases(scope)),
+    evaluate: (scope) => {
+      const runtimeScope = withAliases(scope);
+      symbols.forEach((name) => {
+        if (runtimeScope[name] === undefined) runtimeScope[name] = 0;
+      });
+      operations.forEach((operation) => {
+        runtimeScope[operation.placeholder] = evaluateCalculusOperation(operation, runtimeScope);
+      });
+      return compiled.evaluate(runtimeScope);
+    },
   };
 }
 
@@ -98,10 +307,11 @@ function stripOuterCollections(input: string) {
 }
 
 export function normalizeForPreview(input: string) {
-  return input
+  return normalizeCalculusNotation(input
     .replace(/\\left|\\right/g, '')
     .replace(/\\cdot|\\times/g, '*')
     .replace(/\\pi/g, 'pi')
+    .replace(/\\ln/g, 'ln')
     .replace(/\\sin/g, 'sin')
     .replace(/\\cos/g, 'cos')
     .replace(/\\tan/g, 'tan')
@@ -112,7 +322,7 @@ export function normalizeForPreview(input: string) {
     // Remove only unambiguous trailing noise; valid math in the middle is left intact.
     .replace(/[;,]+$/g, '')
     .replace(/\s+q+$/i, '')
-    .trim();
+    .trim());
 }
 
 export function normalizeSurfaceExpression(input: string) {

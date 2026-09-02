@@ -591,6 +591,12 @@ type RaymarchShader = {
 
 const RAYMARCH_INTERACTION_SETTLE_MS = 220;
 const getRaymarchPreviewSteps = (fullSteps: number) => fullSteps >= 256 ? 48 : 32;
+const ANIMATION_PHASE_LIMIT = Math.PI * 2;
+
+function phaseForProgress(progress: number, speed: number) {
+  const wrappedProgress = ((Number.isFinite(progress) ? progress : 0) % 1 + 1) % 1;
+  return wrappedProgress * ANIMATION_PHASE_LIMIT * Math.max(0.25, Math.min(2, speed));
+}
 
 const shaderMath = create(all);
 
@@ -628,7 +634,10 @@ function compileGlslNode(
     if (symbol === 'e') return 'E';
     if (symbol === 'usurfaceheightscale') return 'uSurfaceHeightScale';
     if (symbol === 'udomainextent') return 'uDomainExtent';
-    return null;
+    // User-authored parameters do not have a separate shader uniform yet.
+    // Treat an absent parameter as zero so a stale cue cannot invalidate the
+    // entire GPU program while the user is switching equations.
+    return '0.0';
   }
   if (node.type === 'OperatorNode') {
     const args = Array.isArray(node.args)
@@ -644,13 +653,71 @@ function compileGlslNode(
   }
   if (node.type === 'FunctionNode') {
     const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
-    const args = (Array.isArray(node.args) ? node.args : [])
-      .map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving));
-    if (args.some((value: string | null) => value === null)) return null;
+    const astArgs = Array.isArray(node.args) ? node.args : [];
+    const args = astArgs.map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving));
+    if (args.some((value: string | null) => value === null) && name !== 'sum') return null;
     const compiledArgs = args as string[];
+    const compileWithBinding = (argument: any, variable: string, value: string) => (
+      compileGlslNode(argument, { ...bindings, [variable.toLowerCase()]: value }, definitions, resolving)
+    );
+    const getVariableName = (argument: any, fallback: string) => {
+      const unwrapped = argument?.type === 'ParenthesisNode' ? argument.content : argument;
+      return unwrapped?.type === 'SymbolNode' ? String(unwrapped.name ?? fallback).toLowerCase() : fallback;
+    };
+    if (name === 'derivative' || name === 'differentiate' || name.startsWith('derivative_d_')) {
+      const variable = name.startsWith('derivative_d_')
+        ? name.slice('derivative_d_'.length)
+        : getVariableName(astArgs[1], 'x');
+      const expression = astArgs[0];
+      if (!expression || !variable) return null;
+      const coordinate = variable === 'x' || variable === 'y' || variable === 'z' ? `p.${variable}` : '0.0';
+      const step = '0.001';
+      const forward = compileWithBinding(expression, variable, `(${coordinate} + ${step})`);
+      const backward = compileWithBinding(expression, variable, `(${coordinate} - ${step})`);
+      return forward && backward ? `((${forward} - ${backward}) / (2.0 * ${step}))` : null;
+    }
+    if (name === 'int' || name === 'integral') {
+      const variable = astArgs.length >= 4 ? getVariableName(astArgs[1], 'x') : 'x';
+      const lowerIndex = astArgs.length >= 4 ? 2 : 1;
+      const upperIndex = astArgs.length >= 4 ? 3 : 2;
+      const lower = compiledArgs[lowerIndex];
+      const upper = compiledArgs[upperIndex];
+      const expression = astArgs[0];
+      if (!expression || !lower || !upper) return null;
+      const sampleCount = 16;
+      const samples: string[] = [];
+      for (let index = 0; index <= sampleCount; index += 1) {
+        const amount = (index / sampleCount).toFixed(8);
+        const sample = compileWithBinding(expression, variable, `mix(${lower}, ${upper}, ${amount})`);
+        if (!sample) return null;
+        samples.push(sample);
+      }
+      const weighted = samples.map((sample, index) => `${index === 0 || index === sampleCount ? 1 : index % 2 === 0 ? 2 : 4}.0 * (${sample})`);
+      return `(((${upper}) - (${lower})) / ${sampleCount * 3}.0) * (${weighted.join(' + ')})`;
+    }
+    if (name === 'sum') {
+      const variable = getVariableName(astArgs[1], 'n');
+      const lowerNode = astArgs[2];
+      const upperNode = astArgs[3];
+      const lowerValue = lowerNode?.type === 'ConstantNode' ? Number(lowerNode.value) : Number.NaN;
+      const upperValue = upperNode?.type === 'ConstantNode' ? Number(upperNode.value) : Number.NaN;
+      if (!Number.isInteger(lowerValue) || (!Number.isInteger(upperValue) && upperValue !== Number.POSITIVE_INFINITY)) return null;
+      const first = Math.ceil(lowerValue);
+      const last = upperValue === Number.POSITIVE_INFINITY
+        ? first + 63
+        : Math.min(first + 63, Math.floor(upperValue));
+      if (last < first) return '0.0';
+      const terms: string[] = [];
+      for (let index = first; index <= last; index += 1) {
+        const term = compileWithBinding(astArgs[0], variable, `${index.toFixed(8)}`);
+        if (!term) return null;
+        terms.push(`(${term})`);
+      }
+      return `(${terms.join(' + ')})`;
+    }
     const directFunctions = new Set([
       'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
-      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign',
+      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign', 'log',
     ]);
     if (directFunctions.has(name)) return `${name}(${compiledArgs.join(', ')})`;
     if (name === 'ln' || name === 'log') return `log(${compiledArgs[0] ?? '0.0'})`;
@@ -673,7 +740,7 @@ function compileGlslExpression(source: string) {
       if (!assignment) return null;
       definitions.set(assignment[1].toLowerCase(), assignment[2]);
     }
-    return compileGlslNode(shaderMath.parse(renderExpression), {}, definitions);
+    return compileGlslNode(shaderMath.parse(parserNormalizeForPreview(renderExpression)), {}, definitions);
   } catch {
     return null;
   }
@@ -744,7 +811,12 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       }
 
       vec2 rayBox(vec3 origin, vec3 direction) {
-        vec3 inverseDirection = 1.0 / max(abs(direction), vec3(0.00001)) * sign(direction);
+        vec3 safeDirection = vec3(
+          direction.x >= 0.0 ? max(direction.x, 0.00001) : min(direction.x, -0.00001),
+          direction.y >= 0.0 ? max(direction.y, 0.00001) : min(direction.y, -0.00001),
+          direction.z >= 0.0 ? max(direction.z, 0.00001) : min(direction.z, -0.00001)
+        );
+        vec3 inverseDirection = 1.0 / safeDirection;
         vec3 first = (uBoundsMin - origin) * inverseDirection;
         vec3 second = (uBoundsMax - origin) * inverseDirection;
         vec3 nearPoint = min(first, second);
@@ -758,12 +830,16 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
 
       vec3 fieldNormal(vec3 point) {
         float e = normalStep();
-        vec2 xOffset = vec2(e, 0.0);
-        vec2 yOffset = vec2(0.0, e);
-        float dx = distanceField(point + vec3(xOffset, 0.0)) - distanceField(point - vec3(xOffset, 0.0));
-        float dy = distanceField(point + vec3(yOffset, 0.0)) - distanceField(point - vec3(yOffset, 0.0));
-        float dz = distanceField(point + vec3(0.0, 0.0, e)) - distanceField(point - vec3(0.0, 0.0, e));
-        return normalize(vec3(dx, dy, dz));
+        vec3 k1 = vec3(1.0, -1.0, -1.0);
+        vec3 k2 = vec3(-1.0, -1.0, 1.0);
+        vec3 k3 = vec3(-1.0, 1.0, -1.0);
+        vec3 k4 = vec3(1.0, 1.0, 1.0);
+        return normalize(
+          k1 * distanceField(point + e * k1)
+          + k2 * distanceField(point + e * k2)
+          + k3 * distanceField(point + e * k3)
+          + k4 * distanceField(point + e * k4)
+        );
       }
 
       void main() {
@@ -786,7 +862,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
           if (stepIndex >= uMaxSteps || distanceAlongRay > interval.y) break;
           vec3 point = uCameraPosition + rayDirection * distanceAlongRay;
           float field = distanceField(point);
-          float adaptiveStep = baseStep * 1.2;
+          float adaptiveStep = baseStep * 0.86;
           if (uInteractive == 0) {
             float gradientProbe = max(
               abs(distanceField(point + vec3(baseStep, 0.0, 0.0)) - field),
@@ -796,14 +872,14 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
               )
             );
             float safeStep = abs(field) / max(gradientProbe / max(baseStep, 0.0001), 0.0001) * 0.72;
-            adaptiveStep = clamp(max(baseStep * 0.34, safeStep), baseStep * 0.34, baseStep * 2.4);
+            adaptiveStep = clamp(max(baseStep * 0.28, safeStep), baseStep * 0.28, baseStep * 1.8);
           }
 
-          if (abs(field) < baseStep * 0.42 || (field < 0.0) != (previousField < 0.0)) {
+          if (abs(field) < baseStep * 0.34 || (field < 0.0) != (previousField < 0.0)) {
             float left = max(interval.x, distanceAlongRay - adaptiveStep);
             float right = distanceAlongRay;
             float leftField = distanceField(uCameraPosition + rayDirection * left);
-            for (int refinement = 0; refinement < 5; refinement += 1) {
+            for (int refinement = 0; refinement < 6; refinement += 1) {
               float middle = (left + right) * 0.5;
               float middleField = distanceField(uCameraPosition + rayDirection * middle);
               if ((middleField < 0.0) == (leftField < 0.0)) {
@@ -852,6 +928,7 @@ type StudioSessionState = {
   activeLayerId: number;
   theme: StudioTheme;
   playing: boolean;
+  isLooping: boolean;
   progress: number;
   autoRange: boolean;
   manualXMin: number;
@@ -1175,7 +1252,7 @@ function GraphCanvas({
 
   const createFrameBuffer = useCallback((frameIndex: number): CachedFrame => {
     const frameProgress = frameIndex / Math.max(1, FRAME_CACHE_SIZE - 1);
-    const phase = frameProgress * Math.PI * 2 * speed;
+    const phase = phaseForProgress(frameProgress, speed);
     const line: GraphPoint[] = [];
     const trailOne: GraphPoint[] = [];
     const trailTwo: GraphPoint[] = [];
@@ -1694,7 +1771,7 @@ function GraphCanvas({
       uFovRadians: { value: THREE.MathUtils.degToRad(camera.fov) },
       uDomainExtent: { value: extent },
       uSurfaceHeightScale: { value: Math.max(0.25, Math.min(4, surfaceHeightScale)) },
-      uPhase: { value: progress * Math.PI * 2 * speed },
+      uPhase: { value: phaseForProgress(progress, speed) },
       uSpeed: { value: speed },
       uSmoothness: { value: Math.max(0.045, Math.min(0.32, extent / 42)) },
       uNormalEpsilon: { value: implicitRaymarchShader.normalEpsilon },
@@ -1751,7 +1828,7 @@ function GraphCanvas({
     const uniforms = raymarchUniformsRef.current;
     if (!uniforms.uPhase) return;
     const extent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
-    uniforms.uPhase.value = progress * Math.PI * 2 * speed;
+    uniforms.uPhase.value = phaseForProgress(progress, speed);
     uniforms.uSpeed.value = speed;
     uniforms.uColor.value.set(surfaceColorRef.current);
     uniforms.uBoundsMin.value.set(-extent, -extent, -extent);
@@ -1770,7 +1847,7 @@ function GraphCanvas({
     const geometry = new THREE.BufferGeometry();
     const positions: number[] = [];
     const sampleCount = 720;
-    const phase = progress * Math.PI * 2 * speed;
+    const phase = phaseForProgress(progress, speed);
     for (let index = 0; index <= sampleCount; index += 1) {
       const amount = index / sampleCount;
       const parameter = range.tMin + amount * (range.tMax - range.tMin);
@@ -1828,7 +1905,7 @@ function GraphCanvas({
     if (!isVisible || !scene || evaluator?.kind !== 'points') return;
     const group = new THREE.Group();
     const visibleCount = Math.min(evaluator.points.length, Math.max(1, Math.ceil(evaluator.points.length * easeInOutCubic(progress))));
-    const pointCoordinates = evaluatePointSet(evaluator.points, progress * Math.PI * 2, speed);
+    const pointCoordinates = evaluatePointSet(evaluator.points, phaseForProgress(progress, speed), speed);
     const visiblePoints = pointCoordinates.slice(0, Math.min(pointCoordinates.length, visibleCount));
     const positions = new Float32Array(visiblePoints.flatMap((point) => [point.x, point.y, 0]));
     const geometry = new THREE.BufferGeometry();
@@ -2599,6 +2676,7 @@ function MainStudio() {
     }
   });
   const [playing, setPlaying] = useState(true);
+  const [isLooping, setIsLooping] = useState(false);
   const [progress, setProgress] = useState(0);
   const [autoRange, setAutoRange] = useState(true);
   const [manualXMin, setManualXMin] = useState(launchRange.xMin);
@@ -2840,6 +2918,7 @@ function MainStudio() {
         if (typeof saved.activeLayerId === 'number') setActiveLayerId(saved.activeLayerId);
         if (saved.theme === 'light' || saved.theme === 'dark' || saved.theme === 'neon') setTheme(saved.theme);
         if (typeof saved.playing === 'boolean') setPlaying(saved.playing);
+        if (typeof saved.isLooping === 'boolean') setIsLooping(saved.isLooping);
          setProgress(Math.min(1, Math.max(0, finiteNumber(saved.progress, 0))));
         if (typeof saved.autoRange === 'boolean') setAutoRange(saved.autoRange);
         setManualXMin(finiteNumber(saved.manualXMin, restoredRange.xMin));
@@ -3032,7 +3111,7 @@ function MainStudio() {
   const audioPosition = useCallback((currentProgress: number) => {
     if (!audioEvaluator) return { height: 0, slope: 0 };
     const traceProgress = easeInOutCubic(currentProgress);
-    const phase = currentProgress * Math.PI * 2 * speed;
+    const phase = phaseForProgress(currentProgress, speed);
     const x = activeRange.xMin + traceProgress * (activeRange.xMax - activeRange.xMin);
     const parameter = activeRange.tMin + traceProgress * (activeRange.tMax - activeRange.tMin);
     const scope = {
@@ -3278,11 +3357,14 @@ function MainStudio() {
     let frame = 0;
     const startedAt = performance.now() - progressRef.current * duration * 1000;
     const tick = (now: number) => {
-      const nextProgress = Math.min(1, (now - startedAt) / (duration * 1000));
+      const elapsedProgress = (now - startedAt) / (duration * 1000);
+      const nextProgress = isLooping
+        ? ((elapsedProgress % 1) + 1) % 1
+        : Math.min(1, elapsedProgress);
       progressRef.current = nextProgress;
       syncAudioToProgress(nextProgress);
       setProgress(nextProgress);
-      if (nextProgress >= 1) {
+      if (!isLooping && nextProgress >= 1) {
         setPlaying(false);
         return;
       }
@@ -3290,7 +3372,7 @@ function MainStudio() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [duration, playing, sessionReady, syncAudioToProgress]);
+  }, [duration, isLooping, playing, sessionReady, syncAudioToProgress]);
 
   useEffect(() => {
     if (localResult?.valid && renderEquation.trim()) {
@@ -3314,6 +3396,7 @@ function MainStudio() {
       activeLayerId,
       theme,
       playing,
+      isLooping,
       progress,
       autoRange,
       manualXMin,
@@ -3351,7 +3434,7 @@ function MainStudio() {
   }, [
     activeLayerId, autoRange, color, duration, equation, filename, fps, graphZoom,
     gridDensity, history, layers, lineWidth, manualTMax, manualTMin, manualXMax,
-    manualXMin, mode, originView, pageZoom, playing, pointStyle, progress,
+    manualXMin, mode, originView, pageZoom, playing, isLooping, pointStyle, progress,
     sessionReady, showAxes, showFps, showGrid, showTrail, showWatermark, speed,
     surfaceBlendMode, surfaceHeightScale,
     theme, watermark,
@@ -3394,6 +3477,8 @@ function MainStudio() {
   const togglePlayback = () => {
     void ensureAudioEngine();
     if (progress >= 1) {
+      progressRef.current = 0;
+      syncAudioToProgress(0);
       setProgress(0);
       setPlaying(true);
       return;
@@ -3538,11 +3623,13 @@ function MainStudio() {
     const presetMode: ResolvedStudioMode = preset.mode === 'auto'
       ? detectSmartMode(preset.equation)
       : preset.mode;
+    const nextMode: ResolvedStudioMode = presetMode === 'function' ? 'function' : presetMode;
     changeEquation(preset.equation);
     setParsedEquation(preset.equation);
-    setMode(preset.mode);
-    updateActiveLayer({ equation: preset.equation, mode: presetMode });
+    setMode(nextMode);
+    updateActiveLayer({ equation: preset.equation, mode: nextMode });
     setProgress(0);
+    progressRef.current = 0;
     setPlaying(true);
   };
   const selectLayer = (layer: EquationLayer) => {
@@ -4210,9 +4297,20 @@ function MainStudio() {
             </div>
           </div>
           <div className="transport">
-             {progress >= 1 && renderHealth === 'ready' && <strong className="scene-complete-status" role="status">Scene complete.</strong>}
+             {!isLooping && progress >= 1 && renderHealth === 'ready' && <strong className="scene-complete-status" role="status">Scene complete.</strong>}
              <button className="play-btn" type="button" onClick={togglePlayback} data-testid="button-playback" aria-label={playing ? 'Pause animation' : 'Play animation'}>
               {playing ? <Pause className="icon" /> : <Play className="icon" />}
+            </button>
+            <button
+              className={`loop-btn ${isLooping ? 'is-on' : ''}`}
+              type="button"
+              onClick={() => setIsLooping((value) => !value)}
+              aria-pressed={isLooping}
+              aria-label={isLooping ? 'Disable infinite looping' : 'Enable infinite looping'}
+              title={isLooping ? 'Disable infinite looping' : 'Enable infinite looping'}
+              data-testid="button-infinite-loop"
+            >
+              ∞
             </button>
             <span className="transport-time mono">{displayTime}s</span>
             <input className="timeline" type="range" min="0" max="1" step="0.001" value={progress} onChange={(event) => setProgress(Number(event.target.value))} data-testid="input-timeline" aria-label="Animation timeline" />
