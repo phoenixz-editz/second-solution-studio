@@ -23,7 +23,9 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    runtimeErrorOverlay(),
+    runtimeErrorOverlay({
+      filter: (error) => !error.message.includes('failed_to_load_clerk_js'),
+    }),
     ...(process.env.NODE_ENV !== 'production' &&
     process.env.REPL_ID !== undefined
       ? [
