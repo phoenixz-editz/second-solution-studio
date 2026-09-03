@@ -39,6 +39,7 @@ import { DeveloperTextEditor } from '@/components/developer-text-editor';
 import { DeveloperAiAssistant, type AssistantChatMessage, type AssistantPanel, type DiagnosticItem } from '@/components/developer-ai-assistant';
 import { AccountMenu, type AccountIdentity, useAccountIdentity } from '@/components/account-menu';
 import { Toaster } from '@/components/ui/toaster';
+import { toast } from '@/hooks/use-toast';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Router as WouterRouter, Switch, useLocation } from 'wouter';
@@ -571,7 +572,19 @@ type RaymarchShader = {
 };
 
 const RAYMARCH_INTERACTION_SETTLE_MS = 220;
-const getRaymarchPreviewSteps = (fullSteps: number) => fullSteps >= 512 ? 192 : 160;
+type RenderQuality = 'low' | 'medium' | 'high';
+const RENDER_QUALITY_STORAGE_KEY = 'app_render_quality';
+const renderQualityOptions: Array<{ value: RenderQuality; label: string; detail: string }> = [
+  { value: 'low', label: 'Low', detail: '0.75x' },
+  { value: 'medium', label: 'Medium', detail: '1.0x' },
+  { value: 'high', label: 'High', detail: 'Ultra HD' },
+];
+const renderQualitySteps: Record<RenderQuality, number> = {
+  low: 64,
+  medium: 96,
+  high: 160,
+};
+const isRenderQuality = (value: unknown): value is RenderQuality => value === 'low' || value === 'medium' || value === 'high';
 const ANIMATION_PHASE_LIMIT = Math.PI * 2;
 
 function phaseForProgress(progress: number, speed: number) {
@@ -1247,6 +1260,8 @@ function GraphCanvas({
   cameraFrame,
   cameraSource,
   animationExpected,
+  renderQuality,
+  onAutoRenderQualityFallback,
   implicitFields,
   onGraphZoomChange,
   onRenderStart,
@@ -1273,6 +1288,8 @@ function GraphCanvas({
   cameraFrame: { scale: number; centerX: number; centerY: number };
   cameraSource: boolean;
   animationExpected: boolean;
+  renderQuality: RenderQuality;
+  onAutoRenderQualityFallback: () => void;
   implicitFields?: string[];
   onGraphZoomChange: (value: number) => void;
   onRenderStart: () => void;
@@ -1300,6 +1317,10 @@ function GraphCanvas({
   const raymarchSettleTimerRef = useRef<number | null>(null);
   const raymarchFullStepsRef = useRef(512);
   const raymarchUpdateRef = useRef<(camera: THREE.PerspectiveCamera) => void>(() => undefined);
+  const webglResizeRef = useRef<() => void>(() => undefined);
+  const renderQualityRef = useRef(renderQuality);
+  const lowPerformanceSinceRef = useRef<number | null>(null);
+  const autoFallbackRequestedRef = useRef(false);
   const drawRef = useRef<() => void>(() => undefined);
   const visibilityTargetRef = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState(true);
@@ -1350,9 +1371,7 @@ function GraphCanvas({
     const uniforms = raymarchUniformsRef.current;
     if (uniforms.uMaxSteps) {
       uniforms.uInteractive.value = active ? 1 : 0;
-      uniforms.uMaxSteps.value = active
-        ? getRaymarchPreviewSteps(raymarchFullStepsRef.current)
-        : raymarchFullStepsRef.current;
+      uniforms.uMaxSteps.value = raymarchFullStepsRef.current;
     }
     if (!active) return;
     raymarchSettleTimerRef.current = window.setTimeout(() => {
@@ -1365,6 +1384,17 @@ function GraphCanvas({
       }
     }, RAYMARCH_INTERACTION_SETTLE_MS);
   }, []);
+
+  useEffect(() => {
+    renderQualityRef.current = renderQuality;
+    lowPerformanceSinceRef.current = null;
+    autoFallbackRequestedRef.current = false;
+    webglResizeRef.current();
+    const uniforms = raymarchUniformsRef.current;
+    const maxSteps = renderQualitySteps[renderQuality];
+    raymarchFullStepsRef.current = maxSteps;
+    if (uniforms.uMaxSteps) uniforms.uMaxSteps.value = maxSteps;
+  }, [renderQuality]);
   const viewportRangeRef = useRef(range);
   const [viewportRange, setViewportRange] = useState(range);
 
@@ -1670,8 +1700,12 @@ function GraphCanvas({
       onRenderStatus('error', 'The hardware-accelerated WebGL renderer could not be initialized.');
       return;
     }
-    const getDevicePixelRatio = () => Math.max(1, window.devicePixelRatio || 1);
-    renderer.setPixelRatio(getDevicePixelRatio());
+    const getQualityPixelRatio = () => {
+      if (renderQualityRef.current === 'low') return 0.75;
+      if (renderQualityRef.current === 'medium') return 1;
+      return Math.min(window.devicePixelRatio || 1, 2);
+    };
+    renderer.setPixelRatio(getQualityPixelRatio());
     const scene = new THREE.Scene();
     threeSceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(44, 1, 0.1, Math.max(400, cameraWorldExtent * 8));
@@ -1733,10 +1767,10 @@ function GraphCanvas({
     const resize = () => {
       const cssWidth = Math.max(1, canvas.clientWidth || canvas.getBoundingClientRect().width);
       const cssHeight = Math.max(1, canvas.clientHeight || canvas.getBoundingClientRect().height);
-      const devicePixelRatio = getDevicePixelRatio();
-      const pixelWidth = Math.max(1, Math.floor(cssWidth * devicePixelRatio));
-      const pixelHeight = Math.max(1, Math.floor(cssHeight * devicePixelRatio));
-      renderer.setPixelRatio(devicePixelRatio);
+      const qualityPixelRatio = getQualityPixelRatio();
+      const pixelWidth = Math.max(1, Math.floor(cssWidth * qualityPixelRatio));
+      const pixelHeight = Math.max(1, Math.floor(cssHeight * qualityPixelRatio));
+      renderer.setPixelRatio(qualityPixelRatio);
       renderer.setSize(cssWidth, cssHeight, false);
       // Keep the backing buffer explicit as well as letting Three.js update it.
       // This prevents CSS-size drawing buffers from causing blurry Retina output.
@@ -1745,6 +1779,7 @@ function GraphCanvas({
       camera.aspect = cssWidth / cssHeight;
       camera.updateProjectionMatrix();
     };
+    webglResizeRef.current = resize;
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
     window.addEventListener('resize', resize, { passive: true });
@@ -1833,12 +1868,32 @@ function GraphCanvas({
     canvas.addEventListener('pointercancel', handlePassivePointerEnd, { passive: true });
     canvas.addEventListener('pointerleave', handlePointerLeave, { passive: true });
     let frame = 0;
+    let fpsWindowStartedAt = performance.now();
+    let fpsWindowFrames = 0;
     const render = (now: number) => {
       stars.rotation.z = now * 0.000012;
       stars.rotation.y = now * 0.000018;
       controls.update();
       raymarchUpdateRef.current(camera);
       renderer.render(scene, camera);
+      fpsWindowFrames += 1;
+      if (now - fpsWindowStartedAt >= 1000) {
+        const measuredFps = fpsWindowFrames * 1000 / Math.max(1, now - fpsWindowStartedAt);
+        if (isThreeDimensional && renderQualityRef.current !== 'low' && measuredFps < 20) {
+          if (lowPerformanceSinceRef.current === null) lowPerformanceSinceRef.current = now;
+          if (
+            now - lowPerformanceSinceRef.current >= 5000
+            && !autoFallbackRequestedRef.current
+          ) {
+            autoFallbackRequestedRef.current = true;
+            onAutoRenderQualityFallback();
+          }
+        } else {
+          lowPerformanceSinceRef.current = null;
+        }
+        fpsWindowStartedAt = now;
+        fpsWindowFrames = 0;
+      }
       frame = requestAnimationFrame(render);
     };
     frame = requestAnimationFrame(render);
@@ -1873,6 +1928,7 @@ function GraphCanvas({
       threeCameraRef.current = null;
       threeControlsRef.current = null;
       threeSurfaceGroupRef.current = null;
+      webglResizeRef.current = () => undefined;
       threeSurfaceGeometryRef.current?.dispose();
       threeSurfaceGeometryRef.current = null;
       threeSurfaceReadyRef.current = false;
@@ -1884,7 +1940,7 @@ function GraphCanvas({
       }
       setHoverPoint(null);
     };
-  }, [cameraWorldExtent, isVisible, mode, setRaymarchInteraction]);
+  }, [cameraSource, cameraWorldExtent, isVisible, mode, onAutoRenderQualityFallback, setRaymarchInteraction]);
 
   useEffect(() => {
     const scene = threeSceneRef.current;
@@ -1912,10 +1968,10 @@ function GraphCanvas({
       uSpeed: { value: speed },
       uSmoothness: { value: Math.max(0.045, Math.min(0.32, extent / 42)) },
       uNormalEpsilon: { value: implicitRaymarchShader.normalEpsilon },
-      uMaxSteps: { value: raymarchInteractionRef.current ? getRaymarchPreviewSteps(implicitRaymarchShader.maxSteps) : implicitRaymarchShader.maxSteps },
+      uMaxSteps: { value: renderQualitySteps[renderQuality] },
       uInteractive: { value: raymarchInteractionRef.current ? 1 : 0 },
     };
-    raymarchFullStepsRef.current = implicitRaymarchShader.maxSteps;
+    raymarchFullStepsRef.current = renderQualitySteps[renderQuality];
     const material = new THREE.ShaderMaterial({
       uniforms,
       vertexShader: implicitRaymarchShader.vertexShader,
@@ -2835,6 +2891,15 @@ function MainStudio() {
   const [pointStyle, setPointStyle] = useState<'line' | 'particles'>('line');
   const [originView, setOriginView] = useState(false);
   const [showFps, setShowFps] = useState(true);
+  const [renderQuality, setRenderQuality] = useState<RenderQuality>(() => {
+    try {
+      if (typeof window === 'undefined') return 'medium';
+      const storedQuality = window.localStorage.getItem(RENDER_QUALITY_STORAGE_KEY);
+      return isRenderQuality(storedQuality) ? storedQuality : 'medium';
+    } catch {
+      return 'medium';
+    }
+  });
   const [showWatermark, setShowWatermark] = useState(true);
   const [pageZoom, setPageZoom] = useState(1);
   const [graphZoom, setGraphZoom] = useState(1);
@@ -2865,6 +2930,22 @@ function MainStudio() {
   const [assistantPaymentMessage, setAssistantPaymentMessage] = useState('Stripe is not connected. You can connect it later from the workspace integration panel.');
   const [assistantAuthModal, setAssistantAuthModal] = useState<'sign-in' | 'sign-up' | null>(null);
   const [studioAuthModal, setStudioAuthModal] = useState<'sign-in' | 'sign-up' | null>(null);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RENDER_QUALITY_STORAGE_KEY, renderQuality);
+    } catch {
+      // Preference persistence is optional when storage is unavailable.
+    }
+  }, [renderQuality]);
+  const handleAutoRenderQualityFallback = useCallback(() => {
+    setRenderQuality((currentQuality) => {
+      if (currentQuality === 'low') return currentQuality;
+      toast({
+        description: 'Low performance detected. Switching to Low Quality mode for smoother experience',
+      });
+      return 'low';
+    });
+  }, []);
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       if (typeof window === 'undefined') return [];
@@ -4350,6 +4431,8 @@ function MainStudio() {
                      cameraFrame={sharedCameraFrameRef.current}
                      cameraSource={index === 0}
                      animationExpected={animationExpected}
+                    renderQuality={renderQuality}
+                    onAutoRenderQualityFallback={handleAutoRenderQualityFallback}
                     onGraphZoomChange={handleGraphZoomChange}
                     onRenderStart={handleRenderStart}
                      onRenderStatus={handleRenderStatus}
@@ -4364,6 +4447,23 @@ function MainStudio() {
                   <div>MODE <strong>{resolvedMode.toUpperCase()}</strong> <span className="muted">· {smartPatternLabel(renderEquation, resolvedMode)}</span>{usingSafeFallback && <span className="fps-readout"> · SAFE</span>}</div>
                 <div>FRAME <strong>{String(Math.round(progress * 240)).padStart(3, '0')}</strong> / 240</div>
                  {showFps && <div className="fps-readout">FPS <strong>{fps}</strong></div>}
+                 <div className="quality-selector" aria-label="Render quality">
+                   <span className="quality-selector-label">QUALITY</span>
+                   <div className="quality-options" role="group" aria-label="Choose render quality">
+                     {renderQualityOptions.map((option) => (
+                       <button
+                         key={option.value}
+                         type="button"
+                         className={`quality-option ${renderQuality === option.value ? 'active' : ''}`}
+                         aria-pressed={renderQuality === option.value}
+                         onClick={() => setRenderQuality(option.value)}
+                         title={`${option.label} (${option.detail})`}
+                       >
+                         {option.label} <span>{option.detail}</span>
+                       </button>
+                     ))}
+                   </div>
+                 </div>
                   <div className="domain-readout-wrap">
                     <button
                       className="domain-readout-button"
