@@ -3,6 +3,7 @@ import {
   Activity,
   Aperture,
   ArrowDownToLine,
+  ChevronDown,
   CircleHelp,
   Download,
   Gauge,
@@ -575,8 +576,8 @@ const RAYMARCH_INTERACTION_SETTLE_MS = 220;
 type RenderQuality = 'low' | 'medium' | 'high';
 const RENDER_QUALITY_STORAGE_KEY = 'app_render_quality';
 const renderQualityOptions: Array<{ value: RenderQuality; label: string; detail: string }> = [
-  { value: 'low', label: 'Low', detail: '0.75x' },
-  { value: 'medium', label: 'Medium', detail: '1.0x' },
+  { value: 'low', label: 'Low', detail: '0.75x Performance' },
+  { value: 'medium', label: 'Medium', detail: '1.0x Balanced' },
   { value: 'high', label: 'High', detail: 'Ultra HD' },
 ];
 const renderQualitySteps: Record<RenderQuality, number> = {
@@ -2900,6 +2901,7 @@ function MainStudio() {
       return 'medium';
     }
   });
+  const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
   const [showWatermark, setShowWatermark] = useState(true);
   const [pageZoom, setPageZoom] = useState(1);
   const [graphZoom, setGraphZoom] = useState(1);
@@ -2946,6 +2948,21 @@ function MainStudio() {
       return 'low';
     });
   }, []);
+  const handleRenderQualityChange = useCallback((quality: RenderQuality) => {
+    setRenderQuality(quality);
+    setQualityMenuOpen(false);
+  }, []);
+  useEffect(() => {
+    if (!qualityMenuOpen) return;
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !qualitySelectorRef.current?.contains(target)) {
+        setQualityMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handleOutsidePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handleOutsidePointerDown, true);
+  }, [qualityMenuOpen]);
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       if (typeof window === 'undefined') return [];
@@ -2983,6 +3000,7 @@ function MainStudio() {
   const audioLastBeatIndexRef = useRef(-1);
   const allowUnloadRef = useRef(false);
   const canvasColumnRef = useRef<HTMLDivElement>(null);
+  const qualitySelectorRef = useRef<HTMLDivElement>(null);
   const equationInputRef = useRef<HTMLTextAreaElement>(null);
   const downloadPngRef = useRef<() => void>(() => undefined);
   const validation = useEquationValidator(parsedEquation, mode);
@@ -4447,23 +4465,36 @@ function MainStudio() {
                   <div>MODE <strong>{resolvedMode.toUpperCase()}</strong> <span className="muted">· {smartPatternLabel(renderEquation, resolvedMode)}</span>{usingSafeFallback && <span className="fps-readout"> · SAFE</span>}</div>
                 <div>FRAME <strong>{String(Math.round(progress * 240)).padStart(3, '0')}</strong> / 240</div>
                  {showFps && <div className="fps-readout">FPS <strong>{fps}</strong></div>}
-                 <div className="quality-selector" aria-label="Render quality">
-                   <span className="quality-selector-label">QUALITY</span>
-                   <div className="quality-options" role="group" aria-label="Choose render quality">
-                     {renderQualityOptions.map((option) => (
-                       <button
-                         key={option.value}
-                         type="button"
-                         className={`quality-option ${renderQuality === option.value ? 'active' : ''}`}
-                         aria-pressed={renderQuality === option.value}
-                         onClick={() => setRenderQuality(option.value)}
-                         title={`${option.label} (${option.detail})`}
-                       >
-                         {option.label} <span>{option.detail}</span>
-                       </button>
-                     ))}
-                   </div>
-                 </div>
+                  <div className="quality-selector" ref={qualitySelectorRef}>
+                    <button
+                      type="button"
+                      className="quality-menu-trigger"
+                      aria-label="Render Quality"
+                      aria-haspopup="menu"
+                      aria-expanded={qualityMenuOpen}
+                      onClick={() => setQualityMenuOpen((isOpen) => !isOpen)}
+                    >
+                      <span>Quality: {renderQualityOptions.find((option) => option.value === renderQuality)?.label ?? 'Medium'}</span>
+                      <ChevronDown className="icon" aria-hidden="true" />
+                    </button>
+                    {qualityMenuOpen && (
+                      <div className="quality-menu" role="menu" aria-label="Choose render quality">
+                        {renderQualityOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`quality-menu-option ${renderQuality === option.value ? 'active' : ''}`}
+                            role="menuitemradio"
+                            aria-checked={renderQuality === option.value}
+                            onClick={() => handleRenderQualityChange(option.value)}
+                          >
+                            <span>{option.label}</span>
+                            <span>{option.detail}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <div className="domain-readout-wrap">
                     <button
                       className="domain-readout-button"
