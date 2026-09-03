@@ -571,7 +571,7 @@ type RaymarchShader = {
 };
 
 const RAYMARCH_INTERACTION_SETTLE_MS = 220;
-const getRaymarchPreviewSteps = (fullSteps: number) => fullSteps >= 256 ? 48 : 32;
+const getRaymarchPreviewSteps = (fullSteps: number) => fullSteps >= 512 ? 192 : 160;
 const ANIMATION_PHASE_LIMIT = Math.PI * 2;
 
 function phaseForProgress(progress: number, speed: number) {
@@ -878,7 +878,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
     fieldCalls[0],
   );
   const fineFeatures = sources.length > 1 || sources.some((source) => /\b(?:sin|cos|tan|abs|sqrt|exp|log)\b|\^/i.test(source));
-  const maxSteps = fineFeatures ? 256 : 128;
+  const maxSteps = fineFeatures ? 512 : 384;
   const normalEpsilon = fineFeatures ? 0.0018 : 0.0032;
 
   return {
@@ -899,8 +899,9 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       precision highp int;
       #define PI 3.141592653589793
       #define E 2.718281828459045
-      #define MAX_RAY_STEPS 256
+      #define MAX_RAY_STEPS 512
       uniform vec3 uCameraPosition;
+      uniform mat4 uCameraMatrix;
       uniform vec3 uCameraRight;
       uniform vec3 uCameraUp;
       uniform vec3 uCameraForward;
@@ -968,7 +969,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       }
 
       float normalStep() {
-        return max(uNormalEpsilon, uDomainExtent / float(uMaxSteps) * 0.68);
+        return max(uNormalEpsilon, uDomainExtent / float(uMaxSteps) * 0.35);
       }
 
       vec3 fieldNormal(vec3 point) {
@@ -987,23 +988,30 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
 
       void main() {
         vec2 ndc = vScreenUv * 2.0 - 1.0;
-        vec3 rayDirection = normalize(
-          uCameraForward
-          + uCameraRight * ndc.x * uAspect * tan(uFovRadians * 0.5)
-          + uCameraUp * ndc.y * tan(uFovRadians * 0.5)
+        vec3 localRayDirection = normalize(
+          vec3(
+            ndc.x * uAspect * tan(uFovRadians * 0.5),
+            ndc.y * tan(uFovRadians * 0.5),
+            -1.0
+          )
         );
-        vec2 interval = rayBox(uCameraPosition, rayDirection);
+        // OrbitControls updates matrixWorld from the user's pitch/yaw. Transform
+        // both the camera-space ray and origin into the same world space so the
+        // raymarcher preserves true volumetric depth at every orbit angle.
+        vec3 rayOrigin = (uCameraMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        vec3 rayDirection = normalize((uCameraMatrix * vec4(localRayDirection, 0.0)).xyz);
+        vec2 interval = rayBox(rayOrigin, rayDirection);
         if (interval.x > interval.y || interval.y < 0.0) discard;
 
         float distanceAlongRay = max(interval.x, 0.0);
-        float previousField = distanceField(uCameraPosition + rayDirection * distanceAlongRay);
+        float previousField = distanceField(rayOrigin + rayDirection * distanceAlongRay);
         float baseStep = (uDomainExtent * 2.0) / float(uMaxSteps);
         vec3 hitPoint = vec3(0.0);
         bool hit = false;
 
         for (int stepIndex = 0; stepIndex < MAX_RAY_STEPS; stepIndex += 1) {
           if (stepIndex >= uMaxSteps || distanceAlongRay > interval.y) break;
-          vec3 point = uCameraPosition + rayDirection * distanceAlongRay;
+          vec3 point = rayOrigin + rayDirection * distanceAlongRay;
           float field = distanceField(point);
           float adaptiveStep = baseStep * 0.86;
           if (uInteractive == 0) {
@@ -1021,10 +1029,10 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
           if (abs(field) < baseStep * 0.34 || (field < 0.0) != (previousField < 0.0)) {
             float left = max(interval.x, distanceAlongRay - adaptiveStep);
             float right = distanceAlongRay;
-            float leftField = distanceField(uCameraPosition + rayDirection * left);
+            float leftField = distanceField(rayOrigin + rayDirection * left);
             for (int refinement = 0; refinement < 6; refinement += 1) {
               float middle = (left + right) * 0.5;
-              float middleField = distanceField(uCameraPosition + rayDirection * middle);
+              float middleField = distanceField(rayOrigin + rayDirection * middle);
               if ((middleField < 0.0) == (leftField < 0.0)) {
                 left = middle;
                 leftField = middleField;
@@ -1032,7 +1040,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
                 right = middle;
               }
             }
-            hitPoint = uCameraPosition + rayDirection * ((left + right) * 0.5);
+            hitPoint = rayOrigin + rayDirection * ((left + right) * 0.5);
             hit = true;
             break;
           }
@@ -1290,7 +1298,7 @@ function GraphCanvas({
   const raymarchUniformsRef = useRef<Record<string, THREE.IUniform>>({});
   const raymarchInteractionRef = useRef(false);
   const raymarchSettleTimerRef = useRef<number | null>(null);
-  const raymarchFullStepsRef = useRef(256);
+  const raymarchFullStepsRef = useRef(512);
   const raymarchUpdateRef = useRef<(camera: THREE.PerspectiveCamera) => void>(() => undefined);
   const drawRef = useRef<() => void>(() => undefined);
   const visibilityTargetRef = useRef<HTMLDivElement>(null);
@@ -1662,18 +1670,8 @@ function GraphCanvas({
       onRenderStatus('error', 'The hardware-accelerated WebGL renderer could not be initialized.');
       return;
     }
-    const isTouchViewport = navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches;
-    const fullPixelRatio = isTouchViewport ? 1 : Math.min(window.devicePixelRatio || 1, 2);
-    const interactionPixelRatio = isTouchViewport ? 0.75 : Math.min(fullPixelRatio, 0.85);
-    let activePixelRatio = fullPixelRatio;
-    renderer.setPixelRatio(activePixelRatio);
-    const setRenderQuality = (active: boolean) => {
-      const nextRatio = active ? interactionPixelRatio : fullPixelRatio;
-      if (nextRatio === activePixelRatio) return;
-      activePixelRatio = nextRatio;
-      renderer.setPixelRatio(nextRatio);
-      resize();
-    };
+    const getDevicePixelRatio = () => Math.max(1, window.devicePixelRatio || 1);
+    renderer.setPixelRatio(getDevicePixelRatio());
     const scene = new THREE.Scene();
     threeSceneRef.current = scene;
     const camera = new THREE.PerspectiveCamera(44, 1, 0.1, Math.max(400, cameraWorldExtent * 8));
@@ -1733,23 +1731,31 @@ function GraphCanvas({
     threeSurfaceGroupRef.current = surfaceGroup;
 
     const resize = () => {
-      const bounds = canvas.getBoundingClientRect();
-      renderer.setSize(Math.max(1, bounds.width), Math.max(1, bounds.height), false);
-      camera.aspect = Math.max(1, bounds.width) / Math.max(1, bounds.height);
+      const cssWidth = Math.max(1, canvas.clientWidth || canvas.getBoundingClientRect().width);
+      const cssHeight = Math.max(1, canvas.clientHeight || canvas.getBoundingClientRect().height);
+      const devicePixelRatio = getDevicePixelRatio();
+      const pixelWidth = Math.max(1, Math.floor(cssWidth * devicePixelRatio));
+      const pixelHeight = Math.max(1, Math.floor(cssHeight * devicePixelRatio));
+      renderer.setPixelRatio(devicePixelRatio);
+      renderer.setSize(cssWidth, cssHeight, false);
+      // Keep the backing buffer explicit as well as letting Three.js update it.
+      // This prevents CSS-size drawing buffers from causing blurry Retina output.
+      if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+      if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+      camera.aspect = cssWidth / cssHeight;
       camera.updateProjectionMatrix();
     };
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
+    window.addEventListener('resize', resize, { passive: true });
     resize();
     const handleControlStart = () => {
       isOrbiting = true;
       setRaymarchInteraction(true);
-      setRenderQuality(true);
     };
     const handleControlEnd = () => {
       isOrbiting = false;
       setRaymarchInteraction(false);
-      setRenderQuality(false);
     };
     let lastReportedZoom = graphZoomRef.current;
     const handleControlChange = () => {
@@ -1813,11 +1819,9 @@ function GraphCanvas({
     const handlePassivePointerStart = () => {
       if (!isThreeDimensional) return;
       setRaymarchInteraction(true);
-      setRenderQuality(true);
     };
     const handlePassivePointerEnd = () => {
       if (!isThreeDimensional) return;
-      setRenderQuality(false);
     };
     controls.addEventListener('start', handleControlStart);
     controls.addEventListener('end', handleControlEnd);
@@ -1849,6 +1853,7 @@ function GraphCanvas({
       canvas.removeEventListener('pointerup', handlePassivePointerEnd);
       canvas.removeEventListener('pointercancel', handlePassivePointerEnd);
       canvas.removeEventListener('pointerleave', handlePointerLeave);
+      window.removeEventListener('resize', resize);
       if (pointerFrame) cancelAnimationFrame(pointerFrame);
       controls.dispose();
       observer.disconnect();
@@ -1892,6 +1897,7 @@ function GraphCanvas({
       : baseExtent;
     const uniforms: Record<string, THREE.IUniform> = {
       uCameraPosition: { value: new THREE.Vector3() },
+      uCameraMatrix: { value: new THREE.Matrix4() },
       uCameraRight: { value: new THREE.Vector3(1, 0, 0) },
       uCameraUp: { value: new THREE.Vector3(0, 1, 0) },
       uCameraForward: { value: new THREE.Vector3(0, 0, -1) },
@@ -1934,6 +1940,7 @@ function GraphCanvas({
       cachedUp.setFromMatrixColumn(activeCamera.matrixWorld, 1).normalize();
       activeCamera.getWorldDirection(cachedForward).normalize();
       uniforms.uCameraPosition.value.copy(activeCamera.position);
+      uniforms.uCameraMatrix.value.copy(activeCamera.matrixWorld);
       uniforms.uCameraRight.value.copy(cachedRight);
       uniforms.uCameraUp.value.copy(cachedUp);
       uniforms.uCameraForward.value.copy(cachedForward);
