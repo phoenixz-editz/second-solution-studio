@@ -44,9 +44,9 @@ function safeEvaluate(expression: { evaluate: (scope: Record<string, number>) =>
       a: phase,
       b: speed,
     }));
-    if (Number.isFinite(value)) return Math.max(-1e6, Math.min(1e6, value));
-    if (value === Number.POSITIVE_INFINITY) return 1e6;
-    if (value === Number.NEGATIVE_INFINITY) return -1e6;
+    if (Number.isFinite(value)) return Math.max(-1e9, Math.min(1e9, value));
+    if (value === Number.POSITIVE_INFINITY) return 1e9;
+    if (value === Number.NEGATIVE_INFINITY) return -1e9;
     return Number.NaN;
   } catch {
     return Number.NaN;
@@ -54,7 +54,7 @@ function safeEvaluate(expression: { evaluate: (scope: Record<string, number>) =>
 }
 
 function isUsableExtent(value: number) {
-  return Number.isFinite(value) && value > 0.05 && value < 100;
+  return Number.isFinite(value) && value > 0.05 && value < 4096;
 }
 
 function yieldToBrowser() {
@@ -70,6 +70,9 @@ async function generateSurface(request: GenerateRequest) {
   const expression = compileSurfaceEquation(request.equation, mode);
   const resolution = Math.max(8, Math.min(96, Math.round(request.resolution)));
   const extent = isUsableExtent(request.extent) ? request.extent : 3.4;
+  const heightScale = mode === 'surface3d'
+    ? clamp(request.heightScale ?? 1, 0.25, 4)
+    : 1;
   // A bare f(x,y) entered in 3D Implicit mode is normalized to f(x,y)-z=0.
   // It is also exactly representable as a heightmap, so use that equivalent
   // mesh branch instead of asking the volume extractor to resolve a nearly
@@ -84,40 +87,22 @@ async function generateSurface(request: GenerateRequest) {
       for (let x = 0; x <= resolution; x += 1) {
         const worldX = -extent + x * step;
         const worldY = extent - y * step;
-        const height = safeEvaluate(expression, worldX, worldY, 0, request.phase, request.speed);
+        const height = safeEvaluate(expression, worldX, worldY, 0, request.phase, request.speed) * heightScale;
         heights[indexOf(x, y)] = Number.isFinite(height)
-          ? Math.max(-extent * 1.8, Math.min(extent * 1.8, height))
+          ? height
           : Number.NaN;
       }
       if (activeRequestId !== request.id) return;
       await yieldToBrowser();
     }
-    let minimumHeight = Number.POSITIVE_INFINITY;
-    let maximumHeight = Number.NEGATIVE_INFINITY;
-    heights.forEach((height) => {
-      if (!Number.isFinite(height)) return;
-      minimumHeight = Math.min(minimumHeight, height);
-      maximumHeight = Math.max(maximumHeight, height);
-    });
-    const heightRange = maximumHeight - minimumHeight;
-    const heightCenter = Number.isFinite(heightRange) && heightRange > 1e-5
-      ? (minimumHeight + maximumHeight) * 0.5
-      : 0;
-    const targetHalfHeight = extent * 0.55 * clamp(request.heightScale ?? 1, 0.25, 4);
-    const heightMultiplier = Number.isFinite(heightRange) && heightRange > 1e-5
-      ? targetHalfHeight / (heightRange * 0.5)
-      : 1;
     const vertexIndex = (x: number, y: number) => {
       const height = heights[indexOf(x, y)];
       if (!Number.isFinite(height)) return -1;
       const index = positions.length / 3;
-      const scaledHeight = Number.isFinite(heightRange) && heightRange > 1e-5
-        ? (height - heightCenter) * heightMultiplier
-        : height;
       positions.push(
         -extent + x * step,
         extent - y * step,
-        clamp(scaledHeight, -extent * 1.8, extent * 1.8),
+        height,
       );
       return index;
     };

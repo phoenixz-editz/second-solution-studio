@@ -330,9 +330,9 @@ function createImplicitSurfaceGeometry(
   const evaluate = (x: number, y: number, z: number) => {
     try {
       const value = Number(expression.evaluate({ x, y, z, t: phase, a: phase, b: speed }));
-      if (Number.isFinite(value)) return Math.max(-1e6, Math.min(1e6, value));
-      if (value === Number.POSITIVE_INFINITY) return 1e6;
-      if (value === Number.NEGATIVE_INFINITY) return -1e6;
+      if (Number.isFinite(value)) return Math.max(-1e9, Math.min(1e9, value));
+      if (value === Number.POSITIVE_INFINITY) return 1e9;
+      if (value === Number.NEGATIVE_INFINITY) return -1e9;
       return Number.NaN;
     } catch {
       return Number.NaN;
@@ -440,39 +440,21 @@ function createHeightmapSurfaceGeometry(
       try {
         const value = Number(expression.evaluate({ x: worldX, y: worldY, z: 0, t: phase, a: phase, b: speed }));
         heights[indexOf(x, y)] = Number.isFinite(value)
-          ? Math.max(-extent * 1.8, Math.min(extent * 1.8, value))
+          ? value * Math.max(0.25, Math.min(4, heightScale))
           : Number.NaN;
       } catch {
         heights[indexOf(x, y)] = Number.NaN;
       }
     }
   }
-  let minimumHeight = Number.POSITIVE_INFINITY;
-  let maximumHeight = Number.NEGATIVE_INFINITY;
-  heights.forEach((height) => {
-    if (!Number.isFinite(height)) return;
-    minimumHeight = Math.min(minimumHeight, height);
-    maximumHeight = Math.max(maximumHeight, height);
-  });
-  const heightRange = maximumHeight - minimumHeight;
-  const heightCenter = Number.isFinite(heightRange) && heightRange > 1e-5
-    ? (minimumHeight + maximumHeight) * 0.5
-    : 0;
-  const targetHalfHeight = extent * 0.55 * Math.max(0.25, Math.min(4, heightScale));
-  const heightMultiplier = Number.isFinite(heightRange) && heightRange > 1e-5
-    ? targetHalfHeight / (heightRange * 0.5)
-    : 1;
   const vertexIndex = (x: number, y: number) => {
     const height = heights[indexOf(x, y)];
     if (!Number.isFinite(height)) return -1;
     const index = positions.length / 3;
-    const scaledHeight = Number.isFinite(heightRange) && heightRange > 1e-5
-      ? (height - heightCenter) * heightMultiplier
-      : height;
     positions.push(
       -extent + x * step,
       extent - y * step,
-      Math.max(-extent * 1.8, Math.min(extent * 1.8, scaledHeight)),
+      height,
     );
     return index;
   };
@@ -608,6 +590,8 @@ function compileGlslNode(
   if (!node) return null;
   if (node.type === 'ParenthesisNode') return compileGlslNode(node.content, bindings, definitions, resolving);
   if (node.type === 'ConstantNode') {
+    if (node.value === true || node.value === false) return node.value ? 'true' : 'false';
+    if (String(node.value).toLowerCase() === 'infinity') return '1.0e20';
     const value = Number(node.value);
     return Number.isFinite(value) ? value.toFixed(8) : null;
   }
@@ -644,29 +628,85 @@ function compileGlslNode(
       : [];
     if (args.some((value: string | null) => value === null)) return null;
     const [first, second] = args as [string, string?];
-    if (node.fn === 'unaryMinus') return `(-(${first}))`;
+    if (node.fn === 'unaryMinus' || node.op === 'unaryMinus') return `(-(${first}))`;
+    if (node.fn === 'unaryPlus' || node.op === 'unaryPlus') return first ?? null;
+    if (node.op === 'not' || node.op === '!') return `(!(${first}))`;
     if (!second) return first ?? null;
     if (node.op === '^') return `pow(${first}, ${second})`;
+    if (node.op === '%') return `mod(${first}, ${second})`;
     if (['+', '-', '*', '/'].includes(node.op)) return `(${first} ${node.op} ${second})`;
+    if (['==', '!=', '<', '>', '<=', '>='].includes(node.op)) return `(${first} ${node.op} ${second})`;
+    if (node.op === 'and' || node.op === '&&') return `((${first}) && (${second}))`;
+    if (node.op === 'or' || node.op === '||') return `((${first}) || (${second}))`;
     return null;
+  }
+  if (node.type === 'RelationalNode') {
+    const params = Array.isArray(node.params) ? node.params : [];
+    const values = params.map((parameter: any) => compileGlslNode(parameter, bindings, definitions, resolving));
+    if (values.some((value: string | null) => value === null)) return null;
+    const relation = String(node.condition ?? node.op ?? '==');
+    return values.slice(1).reduce(
+      (current: string, value: string | null) => `(${current} ${relation} ${value})`,
+      values[0] ?? 'false',
+    );
+  }
+  if (node.type === 'ConditionalNode') {
+    const condition = compileGlslNode(node.condition, bindings, definitions, resolving);
+    const trueBranch = compileGlslNode(node.trueExpr, bindings, definitions, resolving);
+    const falseBranch = compileGlslNode(node.falseExpr, bindings, definitions, resolving);
+    return condition && trueBranch && falseBranch ? `((${condition}) ? (${trueBranch}) : (${falseBranch}))` : null;
+  }
+  if (node.type === 'ArrayNode') {
+    const items = Array.isArray(node.items) ? node.items : [];
+    const values = items.map((item: any) => compileGlslNode(item, bindings, definitions, resolving));
+    if (values.some((value: string | null) => value === null) || values.length < 2 || values.length > 4) return null;
+    return `vec${values.length}(${(values as string[]).join(', ')})`;
+  }
+  if (node.type === 'AccessorNode') {
+    const object = compileGlslNode(node.object, bindings, definitions, resolving);
+    const indexNode = node.index?.dimensions?.[0] ?? node.index;
+    const index = compileGlslNode(indexNode, bindings, definitions, resolving);
+    return object && index ? `${object}[int(${index})]` : null;
   }
   if (node.type === 'FunctionNode') {
     const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
     const astArgs = Array.isArray(node.args) ? node.args : [];
-    const args = astArgs.map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving));
-    if (args.some((value: string | null) => value === null) && name !== 'sum') return null;
-    const compiledArgs = args as string[];
     const compileWithBinding = (argument: any, variable: string, value: string) => (
       compileGlslNode(argument, { ...bindings, [variable.toLowerCase()]: value }, definitions, resolving)
+    );
+    const compileWithBindings = (argument: any, nextBindings: Record<string, string>) => (
+      compileGlslNode(argument, { ...bindings, ...nextBindings }, definitions, resolving)
     );
     const getVariableName = (argument: any, fallback: string) => {
       const unwrapped = argument?.type === 'ParenthesisNode' ? argument.content : argument;
       return unwrapped?.type === 'SymbolNode' ? String(unwrapped.name ?? fallback).toLowerCase() : fallback;
     };
-    if (name === 'derivative' || name === 'differentiate' || name.startsWith('derivative_d_')) {
+    if (name === 'gradient') {
+      const expression = astArgs[0];
+      if (!expression) return null;
+      const components = ['x', 'y', 'z'].map((variable) => {
+        const coordinate = `p.${variable}`;
+        const forward = compileWithBinding(expression, variable, `(${coordinate} + 0.001)`);
+        const backward = compileWithBinding(expression, variable, `(${coordinate} - 0.001)`);
+        return forward && backward ? `((${forward} - ${backward}) / 0.002)` : null;
+      });
+      return components.every(Boolean) ? `vec3(${(components as string[]).join(', ')})` : null;
+    }
+    if (
+      name === 'derivative'
+      || name === 'differentiate'
+      || name === 'partial'
+      || name === 'gradx'
+      || name === 'grady'
+      || name === 'gradz'
+      || name.startsWith('derivative_d_')
+    ) {
       const variable = name.startsWith('derivative_d_')
         ? name.slice('derivative_d_'.length)
-        : getVariableName(astArgs[1], 'x');
+        : name === 'gradx' ? 'x'
+          : name === 'grady' ? 'y'
+            : name === 'gradz' ? 'z'
+              : getVariableName(astArgs[1], 'x');
       const expression = astArgs[0];
       if (!expression || !variable) return null;
       const coordinate = variable === 'x' || variable === 'y' || variable === 'z' ? `p.${variable}` : '0.0';
@@ -679,8 +719,8 @@ function compileGlslNode(
       const variable = astArgs.length >= 4 ? getVariableName(astArgs[1], 'x') : 'x';
       const lowerIndex = astArgs.length >= 4 ? 2 : 1;
       const upperIndex = astArgs.length >= 4 ? 3 : 2;
-      const lower = compiledArgs[lowerIndex];
-      const upper = compiledArgs[upperIndex];
+      const lower = compileGlslNode(astArgs[lowerIndex], bindings, definitions, resolving);
+      const upper = compileGlslNode(astArgs[upperIndex], bindings, definitions, resolving);
       const expression = astArgs[0];
       if (!expression || !lower || !upper) return null;
       const sampleCount = 16;
@@ -693,6 +733,41 @@ function compileGlslNode(
       }
       const weighted = samples.map((sample, index) => `${index === 0 || index === sampleCount ? 1 : index % 2 === 0 ? 2 : 4}.0 * (${sample})`);
       return `(((${upper}) - (${lower})) / ${sampleCount * 3}.0) * (${weighted.join(' + ')})`;
+    }
+    if (name === 'integral2' || name === 'doubleintegral' || name === 'dblquad' || name === 'int2'
+      || name === 'integral3' || name === 'tripleintegral' || name === 'int3') {
+      const dimension = ['integral3', 'tripleintegral', 'int3'].includes(name) ? 3 : 2;
+      const expression = astArgs[0];
+      const bounds = Array.from({ length: dimension }, (_, boundIndex) => {
+        const offset = 1 + boundIndex * 3;
+        return {
+          variable: getVariableName(astArgs[offset], ['x', 'y', 'z'][boundIndex]!),
+          lower: compileGlslNode(astArgs[offset + 1], bindings, definitions, resolving),
+          upper: compileGlslNode(astArgs[offset + 2], bindings, definitions, resolving),
+        };
+      });
+      if (!expression || bounds.some((bound) => !bound.lower || !bound.upper)) return null;
+      const sampleCount = dimension === 3 ? 6 : 8;
+      const samples: string[] = [];
+      const visit = (depth: number, nextBindings: Record<string, string>, amounts: number[]) => {
+        const bound = bounds[depth];
+        if (!bound) {
+          const sample = compileWithBindings(expression, nextBindings);
+          if (sample) samples.push(`(${sample})`);
+          return;
+        }
+        for (let index = 0; index < sampleCount; index += 1) {
+          const amount = ((index + 0.5) / sampleCount).toFixed(8);
+          visit(depth + 1, {
+            ...nextBindings,
+            [bound.variable]: `mix(${bound.lower}, ${bound.upper}, ${amount})`,
+          }, [...amounts, index]);
+        }
+      };
+      visit(0, {}, []);
+      if (samples.length !== sampleCount ** dimension) return null;
+      const widths = bounds.map((bound) => `((${bound.upper}) - (${bound.lower}))`).join(' * ');
+      return `((${widths}) / ${sampleCount ** dimension}.0) * (${samples.join(' + ')})`;
     }
     if (name === 'sum') {
       const variable = getVariableName(astArgs[1], 'n');
@@ -714,16 +789,54 @@ function compileGlslNode(
       }
       return `(${terms.join(' + ')})`;
     }
+    const args = astArgs.map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving));
+    if (args.some((value: string | null) => value === null)) return null;
+    const compiledArgs = args as string[];
+    if (name === 'if' && compiledArgs.length >= 3) return `((${compiledArgs[0]}) ? (${compiledArgs[1]}) : (${compiledArgs[2]}))`;
+    if (name === 'piecewise' && compiledArgs.length >= 3) {
+      const hasFallback = compiledArgs.length % 2 === 1;
+      let result = hasFallback ? compiledArgs[compiledArgs.length - 1]! : '0.0';
+      const limit = hasFallback ? compiledArgs.length - 1 : compiledArgs.length;
+      for (let index = limit - 2; index >= 1; index -= 2) {
+        result = `((${compiledArgs[index]}) ? (${compiledArgs[index - 1]}) : (${result}))`;
+      }
+      return result;
+    }
+    if (name === 'mod' && compiledArgs.length === 2) return `mod(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'atan2' && compiledArgs.length === 2) return `atan(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'step' && compiledArgs.length === 1) return `stepSign(${compiledArgs[0]})`;
+    if (name === 'step' && compiledArgs.length === 2) return `step(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'smoothstep' && compiledArgs.length === 3) return `smoothstep(${compiledArgs.join(', ')})`;
+    if (name === 'gamma' && compiledArgs.length === 1) return `gammaApprox(${compiledArgs[0]})`;
+    if (name === 'dot' && compiledArgs.length === 2) return `dot(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'cross' && compiledArgs.length === 2) return `cross(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'ln' && compiledArgs.length === 1) return `log(${compiledArgs[0]})`;
+    if (name === 'log' && compiledArgs.length === 2) return `(log(${compiledArgs[0]}) / log(${compiledArgs[1]}))`;
+    if (name === 'log10' && compiledArgs.length === 1) return `(log(${compiledArgs[0]}) / log(10.0))`;
+    if (name === 'cbrt' && compiledArgs.length === 1) return `(sign(${compiledArgs[0]}) * pow(abs(${compiledArgs[0]}), 0.33333333))`;
+    if (name === 'sinh' && compiledArgs.length === 1) return `((exp(${compiledArgs[0]}) - exp(-(${compiledArgs[0]}))) * 0.5)`;
+    if (name === 'cosh' && compiledArgs.length === 1) return `((exp(${compiledArgs[0]}) + exp(-(${compiledArgs[0]}))) * 0.5)`;
+    if (name === 'tanh' && compiledArgs.length === 1) return `(sinh(${compiledArgs[0]}) / cosh(${compiledArgs[0]}))`;
+    if (name === 'asinh' && compiledArgs.length === 1) return `log(${compiledArgs[0]} + sqrt(${compiledArgs[0]} * ${compiledArgs[0]} + 1.0))`;
+    if (name === 'acosh' && compiledArgs.length === 1) return `log(${compiledArgs[0]} + sqrt(${compiledArgs[0]} * ${compiledArgs[0]} - 1.0))`;
+    if (name === 'atanh' && compiledArgs.length === 1) return `(0.5 * log((1.0 + ${compiledArgs[0]}) / (1.0 - ${compiledArgs[0]})))`;
+    if (name === 'sec' && compiledArgs.length === 1) return `(1.0 / cos(${compiledArgs[0]}))`;
+    if (name === 'csc' && compiledArgs.length === 1) return `(1.0 / sin(${compiledArgs[0]}))`;
+    if (name === 'cot' && compiledArgs.length === 1) return `(1.0 / tan(${compiledArgs[0]}))`;
+    if (name === 'sech' && compiledArgs.length === 1) return `(1.0 / cosh(${compiledArgs[0]}))`;
+    if (name === 'csch' && compiledArgs.length === 1) return `(1.0 / sinh(${compiledArgs[0]}))`;
+    if (name === 'coth' && compiledArgs.length === 1) return `(1.0 / tanh(${compiledArgs[0]}))`;
+    if (name === 'acot' && compiledArgs.length === 1) return `(PI * 0.5 - atan(${compiledArgs[0]}))`;
+    if (name === 'min' || name === 'max') {
+      if (compiledArgs.length < 2) return compiledArgs[0] ?? null;
+      return compiledArgs.slice(1).reduce((current, value) => `${name}(${current}, ${value})`, compiledArgs[0]!);
+    }
+    if (name === 'clamp' && compiledArgs.length === 3) return `clamp(${compiledArgs.join(', ')})`;
     const directFunctions = new Set([
-      'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
-      'abs', 'sqrt', 'exp', 'floor', 'ceil', 'round', 'sign', 'log',
+      'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'abs', 'sqrt', 'exp', 'floor',
+      'ceil', 'round', 'sign', 'min', 'max', 'dot', 'cross',
     ]);
     if (directFunctions.has(name)) return `${name}(${compiledArgs.join(', ')})`;
-    if (name === 'ln' || name === 'log') return `log(${compiledArgs[0] ?? '0.0'})`;
-    if (name === 'log10') return `log(${compiledArgs[0] ?? '0.0'}) / log(10.0)`;
-    if (name === 'atan2') return `atan(${compiledArgs[0] ?? '0.0'}, ${compiledArgs[1] ?? '0.0'})`;
-    if (name === 'min' || name === 'max') return `${name}(${compiledArgs.join(', ')})`;
-    if (name === 'clamp' && compiledArgs.length === 3) return `clamp(${compiledArgs.join(', ')})`;
     return null;
   }
   return null;
@@ -755,7 +868,8 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
     `float field${index}(vec3 p) {
        float value = ${expression};
        if (!(value == value)) return 1.0e6;
-       return clamp(value, -uDomainExtent * 4.0, uDomainExtent * 4.0);
+       if (abs(value) > 1.0e19) return sign(value) * 1.0e19;
+       return value;
      }`
   )).join('\n');
   const fieldCalls = expressions.map((_, index) => `field${index}(p)`);
@@ -808,6 +922,29 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       float sminPolynomial(float a, float b, float k) {
         float h = clamp(0.5 + 0.5 * (b - a) / max(k, 0.0001), 0.0, 1.0);
         return mix(b, a, h) - k * h * (1.0 - h);
+      }
+
+      float stepSign(float value) {
+        return value < 0.0 ? 0.0 : 1.0;
+      }
+
+      float gammaLanczos(float value) {
+        float shifted = value - 1.0;
+        float accumulator = 0.99999994;
+        accumulator += 676.5204 / (shifted + 1.0);
+        accumulator -= 1259.1392 / (shifted + 2.0);
+        accumulator += 771.3234 / (shifted + 3.0);
+        accumulator -= 176.6150 / (shifted + 4.0);
+        accumulator += 12.50734 / (shifted + 5.0);
+        accumulator -= 0.138571 / (shifted + 6.0);
+        float base = shifted + 7.5;
+        return sqrt(2.0 * PI) * pow(base, shifted + 0.5) * exp(-base) * accumulator;
+      }
+
+      float gammaApprox(float value) {
+        if (value <= 0.0 && abs(value - floor(value)) < 0.0001) return 1.0e20;
+        if (value < 0.5) return PI / (sin(PI * value) * gammaLanczos(1.0 - value));
+        return gammaLanczos(value);
       }
 
       ${fieldFunctions}
@@ -991,7 +1128,7 @@ const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
 
 function implicitFieldSource(equation: string, mode: StudioMode, variableProgram = '') {
   const field = mode === 'surface3d'
-    ? `(z) - (tanh((${parserNormalizeSurfaceExpression(equation)}) * uSurfaceHeightScale) * uDomainExtent * 0.55)`
+    ? `(z) - ((${parserNormalizeSurfaceExpression(equation)}) * uSurfaceHeightScale)`
     : parserNormalizeImplicitField(
       equation,
       mode === 'implicit3d' ? 'implicit3d' : 'implicit',
@@ -1160,6 +1297,13 @@ function GraphCanvas({
   const [isVisible, setIsVisible] = useState(true);
   const [hoverPoint, setHoverPoint] = useState<{ point: THREE.Vector3; x: number; y: number } | null>(null);
   const evaluator = useMemo(() => buildGraphEvaluator(equation, mode), [equation, mode]);
+  const cameraWorldExtent = Math.max(
+    1,
+    range.worldExtent ?? rangeWorldExtent(range),
+    mode === 'surface3d'
+      ? (range.worldExtent ?? rangeWorldExtent(range)) * Math.max(1, Math.abs(surfaceHeightScale))
+      : 0,
+  );
   const implicitSources = useMemo(
     () => implicitFields?.length
       ? implicitFields
@@ -1236,13 +1380,13 @@ function GraphCanvas({
     if (direction.lengthSq() < 0.0001) direction.set(1, 1, 1);
     direction.normalize();
     const distance = THREE.MathUtils.clamp(
-      GRAPH_BASE_CAMERA_DISTANCE / graphZoom,
-      GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MAX,
-      GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MIN,
+      Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / graphZoom,
+      Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MAX,
+      Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MIN,
     );
     camera.position.copy(controls.target).add(direction.multiplyScalar(distance));
     controls.update();
-  }, [graphZoom]);
+  }, [cameraWorldExtent, graphZoom]);
 
   useEffect(() => {
     const target = visibilityTargetRef.current;
@@ -1532,14 +1676,14 @@ function GraphCanvas({
     };
     const scene = new THREE.Scene();
     threeSceneRef.current = scene;
-    const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 400);
+    const camera = new THREE.PerspectiveCamera(44, 1, 0.1, Math.max(400, cameraWorldExtent * 8));
     // Recreate a clear isometric view whenever a 3D mode is entered. Keeping
     // this in the WebGL setup also leaves 2D modes and user orbit state alone.
     camera.position.set(8, 8, 8).setLength(
       THREE.MathUtils.clamp(
-        GRAPH_BASE_CAMERA_DISTANCE / graphZoomRef.current,
-        GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MAX,
-        GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MIN,
+        Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / graphZoomRef.current,
+        Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MAX,
+        Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MIN,
       ),
     );
     camera.lookAt(0, 0, 0);
@@ -1559,8 +1703,8 @@ function GraphCanvas({
     controls.maxAzimuthAngle = Infinity;
     controls.enablePan = true;
     controls.screenSpacePanning = false;
-    controls.minDistance = GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MAX;
-    controls.maxDistance = GRAPH_BASE_CAMERA_DISTANCE / GRAPH_ZOOM_MIN;
+    controls.minDistance = Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MAX;
+    controls.maxDistance = Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MIN;
     controls.target.set(0, 0, 0);
     controls.update();
 
@@ -1610,7 +1754,8 @@ function GraphCanvas({
     let lastReportedZoom = graphZoomRef.current;
     const handleControlChange = () => {
       const distance = camera.position.distanceTo(controls.target);
-      const nextZoom = clampGraphZoom(GRAPH_BASE_CAMERA_DISTANCE / Math.max(0.0001, distance));
+      const cameraBaseDistance = Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6);
+      const nextZoom = clampGraphZoom(cameraBaseDistance / Math.max(0.0001, distance));
       if (Math.abs(nextZoom - lastReportedZoom) < 0.001) return;
       lastReportedZoom = nextZoom;
       onGraphZoomChange(nextZoom);
@@ -1734,14 +1879,17 @@ function GraphCanvas({
       }
       setHoverPoint(null);
     };
-  }, [isVisible, mode, setRaymarchInteraction]);
+  }, [cameraWorldExtent, isVisible, mode, setRaymarchInteraction]);
 
   useEffect(() => {
     const scene = threeSceneRef.current;
     const camera = threeCameraRef.current;
     if (!isVisible || (mode !== 'implicit3d' && mode !== 'surface3d') || !implicitRaymarchShader || !scene || !camera) return;
 
-    const extent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    const baseExtent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    const extent = mode === 'surface3d'
+      ? Math.max(baseExtent, baseExtent * Math.max(1, Math.abs(surfaceHeightScale)))
+      : baseExtent;
     const uniforms: Record<string, THREE.IUniform> = {
       uCameraPosition: { value: new THREE.Vector3() },
       uCameraRight: { value: new THREE.Vector3(1, 0, 0) },
@@ -1805,12 +1953,15 @@ function GraphCanvas({
       raymarchUpdateRef.current = () => undefined;
       threeSurfaceReadyRef.current = false;
     };
-  }, [implicitRaymarchShader, isVisible, mode, onRenderStart, onRenderStatus]);
+  }, [cameraWorldExtent, implicitRaymarchShader, isVisible, mode, onRenderStart, onRenderStatus]);
 
   useEffect(() => {
     const uniforms = raymarchUniformsRef.current;
     if (!uniforms.uPhase) return;
-    const extent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    const baseExtent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    const extent = mode === 'surface3d'
+      ? Math.max(baseExtent, baseExtent * Math.max(1, Math.abs(surfaceHeightScale)))
+      : baseExtent;
     uniforms.uPhase.value = phaseForProgress(progress, speed);
     uniforms.uSpeed.value = speed;
     uniforms.uColor.value.set(surfaceColorRef.current);

@@ -1,7 +1,7 @@
 import { all, create } from 'mathjs';
 import type { StudioMode } from '@/hooks/use-equation-validator';
 
-export type CompiledExpression = { evaluate: (scope: Record<string, number>) => unknown };
+export type CompiledExpression = { evaluate: (scope: Record<string, any>) => unknown };
 export type GraphPoint = { x: number; y: number };
 export type ResolvedStudioMode = Exclude<StudioMode, 'auto'>;
 export type CompiledPoint = { x: CompiledExpression; y: CompiledExpression };
@@ -32,15 +32,78 @@ const MAX_AST_NODES = 100_000;
 const MAX_AST_DEPTH = 1_024;
 const MAX_CALCULUS_TERMS = 16_384;
 const MAX_INTEGRAL_STEPS = 256;
+const MAX_MULTIVARIABLE_INTEGRAL_STEPS = 24;
+const DOMAIN_SAFETY_LIMIT = 4096;
 const astCache = new Map<string, any>();
 const compiledAstCache = new Map<string, CompiledExpression>();
+const gammaApproximation = (value: number): number => {
+  if (Number.isInteger(value) && value <= 0) return Number.NaN;
+  if (value < 0.5) return Math.PI / (Math.sin(Math.PI * value) * gammaApproximation(1 - value));
+  const coefficients = [
+    0.9999999999998099,
+    676.5203681218851,
+    -1259.1392167224028,
+    771.3234287776531,
+    -176.6150291621406,
+    12.507343278686905,
+    -0.13857109526572012,
+    9.984369578019572e-6,
+    1.5056327351493116e-7,
+  ];
+  const shifted = value - 1;
+  let accumulator = coefficients[0]!;
+  for (let index = 1; index < coefficients.length; index += 1) {
+    accumulator += coefficients[index]! / (shifted + index);
+  }
+  const base = shifted + coefficients.length - 1.5;
+  return Math.sqrt(2 * Math.PI) * base ** (shifted + 0.5) * Math.exp(-base) * accumulator;
+};
+const stepFunction = (value: number, edge = 0) => (value < edge ? 0 : 1);
+const smoothstepFunction = (edge0: number, edge1: number, value: number) => {
+  if (edge0 === edge1) return value < edge0 ? 0 : 1;
+  const amount = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+  return amount * amount * (3 - 2 * amount);
+};
+const dotFunction = (left: unknown, right: unknown) => {
+  if (!Array.isArray(left) || !Array.isArray(right)) return Number.NaN;
+  return left.reduce((total, value, index) => total + Number(value) * Number(right[index] ?? 0), 0);
+};
+const crossFunction = (left: unknown, right: unknown) => {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length < 3 || right.length < 3) return [Number.NaN, Number.NaN, Number.NaN];
+  return [
+    Number(left[1]) * Number(right[2]) - Number(left[2]) * Number(right[1]),
+    Number(left[2]) * Number(right[0]) - Number(left[0]) * Number(right[2]),
+    Number(left[0]) * Number(right[1]) - Number(left[1]) * Number(right[0]),
+  ];
+};
+const piecewiseFunction = (...values: unknown[]) => {
+  const hasFallback = values.length % 2 === 1;
+  const limit = hasFallback ? values.length - 1 : values.length;
+  for (let index = 0; index + 1 < limit; index += 2) {
+    const firstIsCondition = typeof values[index] === 'boolean';
+    const condition = firstIsCondition ? values[index] : values[index + 1];
+    const result = firstIsCondition ? values[index + 1] : values[index];
+    if (Boolean(condition)) return result;
+  }
+  return hasFallback ? values[values.length - 1] : Number.NaN;
+};
+math.import({
+  gamma: gammaApproximation,
+  step: stepFunction,
+  smoothstep: smoothstepFunction,
+  dot: dotFunction,
+  cross: crossFunction,
+  piecewise: piecewiseFunction,
+}, { override: true });
 const mathFunctions = new Set([
   'abs', 'acos', 'acosh', 'acot', 'acoth', 'acsc', 'acsch', 'asec', 'asech',
   'asin', 'asinh', 'atan', 'atan2', 'atanh', 'cbrt', 'ceil', 'cos', 'cosh',
   'cot', 'coth', 'csc', 'csch', 'exp', 'floor', 'gcd', 'lcm', 'log', 'log10',
   'max', 'min', 'mod', 'nthRoot', 'pow', 'round', 'sec', 'sech', 'sign', 'sin',
-  'sinh', 'sqrt', 'tan', 'tanh', 'trunc', 'ln', 'derivative', 'integral', 'int',
-  'sum',
+  'sinh', 'sqrt', 'tan', 'tanh', 'trunc', 'ln', 'gamma', 'step', 'smoothstep',
+  'clamp', 'dot', 'cross', 'derivative', 'differentiate', 'partial', 'gradient',
+  'gradx', 'grady', 'gradz', 'integral', 'integral2', 'integral3', 'doubleintegral',
+  'tripleintegral', 'dblquad', 'int2', 'int3', 'sum', 'if', 'piecewise',
 ]);
 const mathConstants = new Set(['true', 'false', 'null', 'undefined', 'pi', 'tau', 'e', 'i', 'Infinity', 'NaN']);
 
@@ -132,8 +195,8 @@ export type LocalValidationResult = {
   variables: string[];
 };
 
-function withAliases(scope: Record<string, number>) {
-  const next = { ...scope };
+function withAliases(scope: Record<string, any>) {
+  const next: Record<string, any> = { ...scope };
   // Keep parameter aliases aligned without letting a cartesian x coordinate
   // overwrite an explicit animation parameter. This matters for vector fields
   // that use both x/y and t/u in the same expression.
@@ -152,6 +215,7 @@ function withAliases(scope: Record<string, number>) {
 function normalizeCalculusNotation(input: string) {
   return input
     .replace(/\\frac\s*\{\s*d\s*\}\s*\{\s*d\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/gi, 'derivative_d_$1')
+    .replace(/∂\s*\/\s*∂\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gi, 'derivative_d_$1(')
     .replace(/\bd\s*\/\s*d\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gi, 'derivative_d_$1(')
     .replace(/\\(?:int|integral)\b/gi, 'int')
     .replace(/\\sum\b/gi, 'sum');
@@ -159,11 +223,16 @@ function normalizeCalculusNotation(input: string) {
 
 type CalculusOperation = {
   placeholder: string;
-  kind: 'derivative' | 'integral' | 'sum';
+  kind: 'derivative' | 'gradient' | 'integral' | 'sum' | 'integral2' | 'integral3';
   expression: CompiledExpression;
   variable: string;
   lower?: CompiledExpression;
   upper?: CompiledExpression;
+  bounds?: Array<{
+    variable: string;
+    lower: CompiledExpression;
+    upper: CompiledExpression;
+  }>;
 };
 
 function unquoteExpression(value: string) {
@@ -180,9 +249,20 @@ function unquoteExpression(value: string) {
 
 function calculusCallName(name: string) {
   const normalized = name.toLowerCase();
-  if (normalized === 'derivative' || normalized === 'differentiate' || normalized.startsWith('derivative_d_')) {
+  if (normalized === 'gradient') return 'gradient' as const;
+  if (
+    normalized === 'derivative'
+    || normalized === 'differentiate'
+    || normalized === 'partial'
+    || normalized === 'gradx'
+    || normalized === 'grady'
+    || normalized === 'gradz'
+    || normalized.startsWith('derivative_d_')
+  ) {
     return 'derivative' as const;
   }
+  if (['integral2', 'doubleintegral', 'dblquad', 'int2'].includes(normalized)) return 'integral2' as const;
+  if (['integral3', 'tripleintegral', 'int3'].includes(normalized)) return 'integral3' as const;
   if (normalized === 'int' || normalized === 'integral') return 'integral' as const;
   if (normalized === 'sum') return 'sum' as const;
   return null;
@@ -237,11 +317,13 @@ function rewriteCalculusCalls(source: string, operations: CalculusOperation[]) {
     let variable = 'x';
     let lowerSource: string | undefined;
     let upperSource: string | undefined;
+    let bounds: CalculusOperation['bounds'];
     if (kind === 'derivative') {
       const suffixVariable = identifier.toLowerCase().startsWith('derivative_d_')
         ? identifier.slice('derivative_d_'.length)
         : undefined;
-      variable = unquoteExpression(argumentsList[1] ?? suffixVariable ?? 'x') || 'x';
+      const shorthandVariable = identifier.toLowerCase().match(/^grad([xyz])$/)?.[1];
+      variable = unquoteExpression(argumentsList[1] ?? shorthandVariable ?? suffixVariable ?? 'x') || 'x';
     } else if (kind === 'integral') {
       if (argumentsList.length >= 4) {
         variable = unquoteExpression(argumentsList[1] ?? 'x') || 'x';
@@ -251,6 +333,22 @@ function rewriteCalculusCalls(source: string, operations: CalculusOperation[]) {
         lowerSource = argumentsList[1];
         upperSource = argumentsList[2];
       }
+    } else if (kind === 'integral2' || kind === 'integral3') {
+      const dimension = kind === 'integral2' ? 2 : 3;
+      const expectedArguments = 1 + dimension * 3;
+      if (argumentsList.length < expectedArguments) {
+        rewritten += source.slice(index, closeIndex + 1);
+        index = closeIndex + 1;
+        continue;
+      }
+      bounds = Array.from({ length: dimension }, (_, boundIndex) => {
+        const offset = 1 + boundIndex * 3;
+        return {
+          variable: unquoteExpression(argumentsList[offset] ?? '') || ['x', 'y', 'z'][boundIndex]!,
+          lower: compileMathExpression(argumentsList[offset + 1] ?? '0'),
+          upper: compileMathExpression(argumentsList[offset + 2] ?? '0'),
+        };
+      });
     } else if (argumentsList.length >= 4) {
       variable = unquoteExpression(argumentsList[1] ?? 'n') || 'n';
       lowerSource = argumentsList[2];
@@ -265,6 +363,7 @@ function rewriteCalculusCalls(source: string, operations: CalculusOperation[]) {
       variable,
       lower: lowerSource ? compileMathExpression(lowerSource) : undefined,
       upper: upperSource ? compileMathExpression(upperSource) : undefined,
+      bounds,
     });
     rewritten += placeholder;
     index = closeIndex + 1;
@@ -286,16 +385,59 @@ function referencedSymbols(source: string) {
   return symbols;
 }
 
-function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<string, number>) {
-  const evaluateAt = (value: number) => Number(operation.expression.evaluate({ ...scope, [operation.variable]: value }));
-  if (operation.kind === 'derivative') {
-    const center = Number(scope[operation.variable] ?? 0);
+function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<string, any>) {
+  const evaluateAt = (value: number, variable = operation.variable, extraScope: Record<string, number> = {}) => (
+    Number(operation.expression.evaluate({ ...scope, ...extraScope, [variable]: value }))
+  );
+  const derivativeAt = (variable: string) => {
+    const center = Number(scope[variable] ?? 0);
     const step = 1e-4 * Math.max(1, Math.abs(center));
-    const forward = evaluateAt(center + step);
-    const backward = evaluateAt(center - step);
+    const forward = evaluateAt(center + step, variable);
+    const backward = evaluateAt(center - step, variable);
     return Number.isFinite(forward) && Number.isFinite(backward)
       ? (forward - backward) / (2 * step)
       : Number.NaN;
+  };
+  if (operation.kind === 'gradient') return ['x', 'y', 'z'].map(derivativeAt);
+  if (operation.kind === 'derivative') {
+    return derivativeAt(operation.variable);
+  }
+
+  if ((operation.kind === 'integral2' || operation.kind === 'integral3') && operation.bounds) {
+    const evaluatedBounds = operation.bounds.map((bound) => ({
+      ...bound,
+      lowerValue: Number(bound.lower.evaluate(scope)),
+      upperValue: Number(bound.upper.evaluate(scope)),
+    }));
+    if (evaluatedBounds.some((bound) => !Number.isFinite(bound.lowerValue) || !Number.isFinite(bound.upperValue))) {
+      return Number.NaN;
+    }
+    const steps = Math.min(
+      MAX_MULTIVARIABLE_INTEGRAL_STEPS,
+      operation.kind === 'integral3' ? 12 : MAX_MULTIVARIABLE_INTEGRAL_STEPS,
+    );
+    const widths = evaluatedBounds.map((bound) => bound.upperValue - bound.lowerValue);
+    let total = 0;
+    const visit = (dimension: number, values: Record<string, number>) => {
+      const bound = evaluatedBounds[dimension];
+      if (!bound) {
+        const value = Number(operation.expression.evaluate({ ...scope, ...values }));
+        if (!Number.isFinite(value)) throw new Error('Non-finite multivariable integral sample.');
+        total += value;
+        return;
+      }
+      const step = widths[dimension]! / steps;
+      for (let index = 0; index < steps; index += 1) {
+        const sample = bound.lowerValue + (index + 0.5) * step;
+        visit(dimension + 1, { ...values, [bound.variable]: sample });
+      }
+    };
+    try {
+      visit(0, {});
+      return total * widths.reduce((product, width) => product * width / steps, 1);
+    } catch {
+      return Number.NaN;
+    }
   }
 
   const lower = Number(operation.lower?.evaluate(scope));
@@ -365,7 +507,7 @@ function compileMathExpression(source: string): CompiledExpression {
   const symbols = [...referencedSymbols(rewritten)].filter((name) => !helperNames.has(name));
   const result: CompiledExpression = {
     evaluate: (scope) => {
-      const runtimeScope = withAliases(scope);
+      const runtimeScope: Record<string, any> = withAliases(scope);
       symbols.forEach((name) => {
         if (runtimeScope[name] === undefined) runtimeScope[name] = 0;
       });
@@ -409,6 +551,9 @@ export function normalizeForPreview(input: string) {
   return normalizeCalculusNotation(input
     .replace(/\\left|\\right/g, '')
     .replace(/\\cdot|\\times/g, '*')
+    .replace(/\.\*/g, '*')
+    .replace(/\.\/|\.\\/g, '/')
+    .replace(/\.\^/g, '^')
     .replace(/\\pi/g, 'pi')
     .replace(/\\ln/g, 'ln')
     .replace(/\\sin/g, 'sin')
@@ -416,6 +561,7 @@ export function normalizeForPreview(input: string) {
     .replace(/\\tan/g, 'tan')
     .replace(/\\sqrt\s*\{([^{}]+)\}/g, 'sqrt($1)')
     .replace(/\{([^{}]+)\}/g, '($1)')
+    .replace(/~=/g, '!=')
     .replace(/(\S)\s+mod\s+(\S)/gi, '$1 % $2')
     // A pasted shader expression often carries a stray delimiter or typo.
     // Remove only unambiguous trailing noise; valid math in the middle is left intact.
@@ -660,6 +806,7 @@ function analyzeDynamicDomain(input: string) {
     localizedAxes: new Set<string>(),
     localizedSpan: 0,
     numericMagnitude: 0,
+    dynamicExtent: 0,
   };
 
   try {
@@ -738,12 +885,105 @@ function analyzeDynamicDomain(input: string) {
   return signals;
 }
 
+function expressionScope(x: number, y: number, z: number, phase: number, speed = 1) {
+  return {
+    x,
+    y,
+    z,
+    t: phase,
+    u: phase,
+    theta: phase,
+    a: phase,
+    v: speed,
+    r: speed,
+    phi: speed,
+    b: speed,
+  };
+}
+
+function sampleExpressionEnvelope(source: string, coordinates = { x: 0, y: 0, z: 0 }) {
+  try {
+    const expression = compileMathExpression(source);
+    let maximum = 0;
+    for (let index = 0; index <= 24; index += 1) {
+      const phase = (index / 24) * Math.PI * 2;
+      const value = Number(expression.evaluate(expressionScope(
+        coordinates.x,
+        coordinates.y,
+        coordinates.z,
+        phase,
+      )));
+      if (Number.isFinite(value)) maximum = Math.max(maximum, Math.abs(value));
+    }
+    return maximum;
+  } catch {
+    return 0;
+  }
+}
+
+function highestPowerForAxis(source: string, axis: string) {
+  let power = 1;
+  try {
+    getCachedAst(source).traverse((node: any) => {
+      if (node?.type !== 'OperatorNode' || node.op !== '^' || !Array.isArray(node.args)) return;
+      const exponent = numericAstValue(node.args[1]);
+      if (exponent === null || exponent < 1 || !Number.isFinite(exponent)) return;
+      if (axisOffset(node.args[0], axis) !== null) power = Math.max(power, exponent);
+    });
+  } catch {
+    // Keep the linear fallback for expressions that are still being typed.
+  }
+  return Math.min(12, power);
+}
+
+function estimateImplicitExtent(input: string, signals: ReturnType<typeof analyzeDynamicDomain>) {
+  const normalized = normalizeForPreview(input);
+  const renderExpression = splitProgramStatements(normalized).renderExpression;
+  const equality = renderExpression.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
+  const leftSource = equality?.[1] ?? renderExpression;
+  const targetSource = equality?.[2];
+  const targetEnvelope = targetSource
+    ? sampleExpressionEnvelope(targetSource)
+    : sampleExpressionEnvelope(leftSource);
+  if (!Number.isFinite(targetEnvelope) || targetEnvelope <= 1e-9) return 0;
+
+  let maximumExtent = 0;
+  try {
+    const field = compileMathExpression(leftSource);
+    for (const axis of ['x', 'y', 'z']) {
+      const centers = axis === 'x' ? signals.xCenters : axis === 'y' ? signals.yCenters : signals.zCenters;
+      const center = centers[0] ?? 0;
+      const atCenter = Number(field.evaluate(expressionScope(
+        axis === 'x' ? center : 0,
+        axis === 'y' ? center : 0,
+        axis === 'z' ? center : 0,
+        0,
+      )));
+      const atUnit = Number(field.evaluate(expressionScope(
+        axis === 'x' ? center + 1 : 0,
+        axis === 'y' ? center + 1 : 0,
+        axis === 'z' ? center + 1 : 0,
+        0,
+      )));
+      const coefficient = Math.abs(atUnit - atCenter);
+      if (!Number.isFinite(coefficient) || coefficient < 1e-9) continue;
+      const power = highestPowerForAxis(leftSource, axis);
+      const radius = Math.pow(targetEnvelope / coefficient, 1 / power);
+      if (Number.isFinite(radius)) maximumExtent = Math.max(maximumExtent, Math.abs(center) + radius);
+    }
+  } catch {
+    // The static signal analysis remains the fallback for incomplete input.
+  }
+  return Math.min(DOMAIN_SAFETY_LIMIT, maximumExtent);
+}
+
 function dynamicAxisBounds(
   centers: number[],
   hasTrig: boolean,
   hasQuadratic: boolean,
   decayRate: number,
   numericMagnitude: number,
+  dynamicExtent = 0,
   extentLimits: { min?: number; max?: number } = {},
   localizedSpan = 0,
 ) {
@@ -762,7 +1002,7 @@ function dynamicAxisBounds(
   const decaySpan = decayRate > 0 ? 3 / Math.sqrt(decayRate) : 0;
   const algebraicSpan = hasQuadratic && decayRate === 0 ? 2.5 : 0;
   const magnitudeSpan = decayRate === 0 && numericMagnitude > 1 ? Math.sqrt(numericMagnitude) : 0;
-  const span = Math.max(1.5, decaySpan, algebraicSpan, magnitudeSpan);
+  const span = Math.max(1.5, decaySpan, algebraicSpan, magnitudeSpan, dynamicExtent);
   const minimumExtent = Math.max(2, extentLimits.min ?? 0);
   const localizedExtent = localizedSpan > 0 && centers.length === 0 ? localizedSpan : null;
   const automaticExtent = localizedExtent ?? Math.ceil((Math.abs(center) + span) / 4) * 4;
@@ -773,16 +1013,64 @@ function dynamicAxisBounds(
   return { min: -extent, max: extent };
 }
 
+function estimateSurfaceHeightExtent(input: string, xMin: number, xMax: number, yMin: number, yMax: number) {
+  try {
+    const expression = compileMathExpression(normalizeSurfaceExpression(input));
+    let maximum = 0;
+    for (let phaseIndex = 0; phaseIndex <= 8; phaseIndex += 1) {
+      const phase = (phaseIndex / 8) * Math.PI * 2;
+      for (let yIndex = 0; yIndex <= 8; yIndex += 1) {
+        const y = yMin + (yIndex / 8) * (yMax - yMin);
+        for (let xIndex = 0; xIndex <= 8; xIndex += 1) {
+          const x = xMin + (xIndex / 8) * (xMax - xMin);
+          const value = Number(expression.evaluate(expressionScope(x, y, 0, phase)));
+          if (Number.isFinite(value)) maximum = Math.max(maximum, Math.abs(value));
+        }
+      }
+    }
+    return Math.min(DOMAIN_SAFETY_LIMIT, maximum);
+  } catch {
+    return 0;
+  }
+}
+
+function estimateParametricExtent(input: string, tMin: number, tMax: number) {
+  try {
+    const evaluator = buildGraphEvaluator(input, 'parametric3d');
+    if (!evaluator || evaluator.kind !== 'parametric' || !evaluator.z) return 0;
+    let maximum = 0;
+    for (let phaseIndex = 0; phaseIndex <= 8; phaseIndex += 1) {
+      const phase = (phaseIndex / 8) * Math.PI * 2;
+      for (let parameterIndex = 0; parameterIndex <= 96; parameterIndex += 1) {
+        const parameter = tMin + (parameterIndex / 96) * (tMax - tMin);
+        const scope = expressionScope(0, 0, 0, phase);
+        scope.t = parameter;
+        scope.u = parameter;
+        scope.theta = parameter;
+        [evaluator.x, evaluator.y, evaluator.z].forEach((part) => {
+          const value = Number(part.evaluate(scope));
+          if (Number.isFinite(value)) maximum = Math.max(maximum, Math.abs(value));
+        });
+      }
+    }
+    return Math.min(DOMAIN_SAFETY_LIMIT, maximum);
+  } catch {
+    return 0;
+  }
+}
+
 export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): DynamicDomain {
   const signals = analyzeDynamicDomain(input);
+  if (mode === 'implicit3d') signals.dynamicExtent = Math.max(signals.dynamicExtent, estimateImplicitExtent(input, signals));
   const surfaceExtentLimits = mode === 'surface3d' ? { min: 8, max: 8 } : undefined;
-  const implicit3dExtentLimits = mode === 'implicit3d' ? { max: 10 } : undefined;
+  const implicit3dExtentLimits = mode === 'implicit3d' ? { max: DOMAIN_SAFETY_LIMIT } : undefined;
   const xBounds = dynamicAxisBounds(
     signals.xCenters,
     signals.hasTrig,
     signals.quadraticAxes.has('x'),
     signals.decayRates.x,
     signals.numericMagnitude,
+    signals.dynamicExtent,
     surfaceExtentLimits ?? implicit3dExtentLimits,
     signals.localizedAxes.has('x') ? signals.localizedSpan : 0,
   );
@@ -792,6 +1080,7 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
     signals.quadraticAxes.has('y'),
     signals.decayRates.y,
     signals.numericMagnitude,
+    signals.dynamicExtent,
     surfaceExtentLimits ?? implicit3dExtentLimits,
     signals.localizedAxes.has('y') ? signals.localizedSpan : 0,
   );
@@ -801,6 +1090,7 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
     signals.quadraticAxes.has('z'),
     signals.decayRates.z,
     signals.numericMagnitude,
+    signals.dynamicExtent,
     implicit3dExtentLimits,
     signals.localizedAxes.has('z') ? signals.localizedSpan : 0,
   );
@@ -811,17 +1101,24 @@ export function resolveDynamicDomain(input: string, mode: ResolvedStudioMode): D
   const xMax = signals.hasX || mode === 'polar' ? xBounds.max : -xBounds.min;
   const yMin = signals.hasY ? yBounds.min : -yBounds.max;
   const yMax = signals.hasY ? yBounds.max : -yBounds.min;
+  const surfaceHeightExtent = mode === 'surface3d'
+    ? estimateSurfaceHeightExtent(input, xBounds.min, xBounds.max, yBounds.min, yBounds.max)
+    : 0;
+  const parametricExtent = mode === 'parametric3d'
+    ? estimateParametricExtent(input, 0, tMax)
+    : 0;
   const worldExtent = mode === 'surface3d'
-    ? 8
+    ? Math.max(8, surfaceHeightExtent)
     : mode === 'implicit3d'
-      ? Math.min(10, Math.max(
+      ? Math.min(DOMAIN_SAFETY_LIMIT, Math.max(
         Math.abs(xMin),
         Math.abs(xMax),
         Math.abs(yMin),
         Math.abs(yMax),
         ...(signals.hasZ ? [Math.abs(zBounds.min), Math.abs(zBounds.max)] : []),
+        signals.dynamicExtent,
       ))
-    : undefined;
+    : mode === 'parametric3d' ? Math.max(1, parametricExtent) : undefined;
   return { xMin, xMax, yMin, yMax, tMin: 0, tMax, worldExtent };
 }
 
@@ -943,8 +1240,8 @@ function compileProgramExpression(input: string) {
     expression: compileMathExpression(helper.source),
   }));
   return {
-    evaluate: (scope: Record<string, number>) => {
-      const programScope: Record<string, number> = withAliases(scope);
+    evaluate: (scope: Record<string, any>) => {
+      const programScope: Record<string, any> = withAliases(scope);
       helpers.forEach(({ name, expression }) => {
         const value = expression.evaluate(programScope);
         programScope[name] = Number(value);
