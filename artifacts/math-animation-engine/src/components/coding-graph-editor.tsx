@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import type { CodingGraphDiagnostic } from '@/lib/coding-graph-compiler';
 
 export type CodingGraphMode = 'code2d' | 'code3d';
 export type CodingCompileStatus = 'ready' | 'pending' | 'error';
@@ -10,6 +11,7 @@ type CodingGraphEditorProps = {
   mode: CodingGraphMode;
   status: CodingCompileStatus;
   statusLabel?: string;
+  diagnostic?: CodingGraphDiagnostic;
   testId?: string;
 };
 
@@ -40,10 +42,12 @@ export function CodingGraphEditor({
   mode,
   status,
   statusLabel,
+  diagnostic,
   testId,
 }: CodingGraphEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
   const details = modeCopy[mode];
   const lineCount = useMemo(() => Math.max(1, value.split('\n').length), [value]);
   const lines = useMemo(
@@ -72,6 +76,19 @@ export function CodingGraphEditor({
   const statusText = statusLabel ?? (
     status === 'pending' ? 'Compiling' : status === 'error' ? 'Needs review' : 'Compile ready'
   );
+  const highlightedLines = value.split('\n');
+  const renderLine = (line: string, lineIndex: number) => {
+    if (!diagnostic || diagnostic.line !== lineIndex + 1) return <>{line || ' '}</>;
+    const start = Math.max(0, Math.min(line.length, diagnostic.column - 1));
+    const end = Math.max(start + 1, Math.min(line.length, start + diagnostic.length));
+    return (
+      <>
+        {line.slice(0, start)}
+        <mark className="coding-error-underline">{line.slice(start, end) || ' '}</mark>
+        {line.slice(end)}
+      </>
+    );
+  };
 
   return (
     <div className={`coding-editor coding-editor-${mode} coding-editor-${status}`} data-testid={`editor-${testId ?? mode}`}>
@@ -98,25 +115,43 @@ export function CodingGraphEditor({
       </div>
       <div className="coding-editor-body">
         <div className="coding-gutter" aria-hidden="true" style={{ transform: `translateY(-${scrollTop}px)` }}>
-          {lines.map((line) => <span key={line}>{line}</span>)}
+          {lines.map((line, index) => <span className={diagnostic?.line === index + 1 ? 'has-error' : ''} key={line}>{line}</span>)}
         </div>
-        <textarea
-          ref={textareaRef}
-          className="coding-source-input"
-          value={value}
-          onFocus={onFocus}
-          onChange={handleChange}
-          onKeyDown={insertIndent}
-          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-          placeholder={details.example}
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          rows={7}
-          data-testid={testId ?? `input-${mode}`}
-          aria-label={`${mode === 'code2d' ? 'Coding 2D Graph' : 'Coding 3D Graph'} source`}
-        />
+        <div className="coding-source-surface">
+          <pre
+            className="coding-source-highlight"
+            aria-hidden="true"
+            style={{ transform: `translate(${-scrollLeft}px, ${-scrollTop}px)` }}
+          >
+            {highlightedLines.map((line, index) => <span className="coding-source-highlight-line" key={`${index}-${line}`}>{renderLine(line, index)}{index < highlightedLines.length - 1 ? '\n' : ''}</span>)}
+          </pre>
+          <textarea
+            ref={textareaRef}
+            className="coding-source-input"
+            value={value}
+            onFocus={onFocus}
+            onChange={handleChange}
+            onKeyDown={insertIndent}
+            onScroll={(event) => {
+              setScrollTop(event.currentTarget.scrollTop);
+              setScrollLeft(event.currentTarget.scrollLeft);
+            }}
+            placeholder={details.example}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            rows={7}
+            data-testid={testId ?? `input-${mode}`}
+            aria-label={`${mode === 'code2d' ? 'Coding 2D Graph' : 'Coding 3D Graph'} source`}
+            aria-describedby={diagnostic ? `coding-error-${testId ?? mode}` : undefined}
+          />
+        </div>
       </div>
+      {diagnostic && (
+        <div className="coding-error-detail" id={`coding-error-${testId ?? mode}`} role="alert">
+          <strong>Line {diagnostic.line}, column {diagnostic.column}:</strong> {diagnostic.message}
+        </div>
+      )}
       <div className="coding-editor-footer">
         <span className="coding-footer-symbol">fn</span>
         <span>Source adapter</span>

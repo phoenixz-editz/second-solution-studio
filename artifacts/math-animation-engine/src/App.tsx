@@ -4428,7 +4428,10 @@ function MainStudio() {
                          onFocus={() => selectLayer(layer)}
                          mode={layer.mode}
                          status={isActive ? codeCompileStatus : 'ready'}
-                         statusLabel={isActive && codingSource?.error ? codingSource.error : isActive ? undefined : 'Standby'}
+                         statusLabel={isActive && codingSource?.diagnostic
+                           ? `Line ${codingSource.diagnostic.line} · Col ${codingSource.diagnostic.column}`
+                           : isActive ? undefined : 'Standby'}
+                         diagnostic={isActive ? codingSource?.diagnostic : undefined}
                          testId={`input-equation-layer-${index}`}
                        />
                      ) : (

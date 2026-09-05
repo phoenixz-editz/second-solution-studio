@@ -3,10 +3,18 @@ import type { ResolvedStudioMode } from '@/lib/math-parser';
 
 export type CodingGraphMode = Extract<StudioMode, 'code2d' | 'code3d'>;
 
+export type CodingGraphDiagnostic = {
+  message: string;
+  line: number;
+  column: number;
+  length: number;
+};
+
 export type CodingGraphCompileResult = {
   equation: string;
   renderMode: Exclude<ResolvedStudioMode, 'code2d' | 'code3d'>;
   error?: string;
+  diagnostic?: CodingGraphDiagnostic;
 };
 
 const DEFAULT_2D = 'sin(x + t) * exp(-0.08 * x^2)';
@@ -52,6 +60,53 @@ function matchingParenthesis(source: string, openingIndex: number) {
   return -1;
 }
 
+function diagnosticAt(source: string, message: string, index = 0, length = 1): CodingGraphDiagnostic {
+  const safeIndex = Math.max(0, Math.min(source.length, index));
+  const lineStart = source.lastIndexOf('\n', Math.max(0, safeIndex - 1)) + 1;
+  const lineEnd = source.indexOf('\n', safeIndex);
+  return {
+    message,
+    line: source.slice(0, safeIndex).split('\n').length,
+    column: safeIndex - lineStart + 1,
+    length: Math.max(1, Math.min(length, (lineEnd < 0 ? source.length : lineEnd) - safeIndex || 1)),
+  };
+}
+
+function delimiterDiagnostic(source: string) {
+  const pairs = new Map([[')', '('], [']', '['], ['}', '{']]);
+  const stack: Array<{ character: string; index: number }> = [];
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '(' || character === '[' || character === '{') {
+      stack.push({ character, index });
+      continue;
+    }
+    const expectedOpening = pairs.get(character);
+    if (!expectedOpening) continue;
+    const opening = stack.pop();
+    if (!opening || opening.character !== expectedOpening) {
+      return diagnosticAt(source, `Unexpected "${character}". Check the matching delimiter.`, index);
+    }
+  }
+  const opening = stack.at(-1);
+  if (!opening) return undefined;
+  const closing = opening.character === '(' ? ')' : opening.character === '[' ? ']' : '}';
+  return diagnosticAt(source, `Missing "${closing}" for this "${opening.character}".`, opening.index);
+}
+
+function functionBodyOpeningIndex(source: string) {
+  const functionIndex = source.search(/\bfunction\b/);
+  const arrowIndex = source.indexOf('=>');
+  if (functionIndex >= 0) {
+    const parameterOpenIndex = source.indexOf('(', functionIndex);
+    const parameterCloseIndex = parameterOpenIndex >= 0
+      ? matchingParenthesis(source, parameterOpenIndex)
+      : -1;
+    return parameterCloseIndex >= 0 ? source.indexOf('{', parameterCloseIndex) : -1;
+  }
+  return arrowIndex >= 0 ? source.indexOf('{', arrowIndex) : -1;
+}
+
 function splitStatements(source: string) {
   const statements: string[] = [];
   let start = 0;
@@ -91,20 +146,7 @@ function objectReturnToTuple(expression: string) {
 }
 
 function compileFunctionBody(source: string) {
-  const functionIndex = source.search(/\bfunction\b/);
-  const arrowIndex = source.indexOf('=>');
-  let openingIndex = -1;
-  if (functionIndex >= 0) {
-    const parameterOpenIndex = source.indexOf('(', functionIndex);
-    const parameterCloseIndex = parameterOpenIndex >= 0
-      ? matchingParenthesis(source, parameterOpenIndex)
-      : -1;
-    openingIndex = parameterCloseIndex >= 0
-      ? source.indexOf('{', parameterCloseIndex)
-      : -1;
-  } else if (arrowIndex >= 0) {
-    openingIndex = source.indexOf('{', arrowIndex);
-  }
+  const openingIndex = functionBodyOpeningIndex(source);
   if (openingIndex < 0) return normalizeMathSource(source);
   const closingIndex = matchingBrace(source, openingIndex);
   if (closingIndex < 0) return '';
@@ -159,27 +201,56 @@ function extractExpression(source: string, mode: CodingGraphMode) {
 export function compileCodingGraph(source: string, mode: CodingGraphMode): CodingGraphCompileResult {
   const input = source.trim();
   if (!input) {
+    const diagnostic = diagnosticAt(source, 'Add a return expression to compile this source.');
     return {
       equation: mode === 'code2d' ? DEFAULT_2D : DEFAULT_3D,
       renderMode: mode === 'code2d' ? 'function' : 'implicit3d',
-      error: 'Add a return expression to compile this source.',
+      error: diagnostic.message,
+      diagnostic,
+    };
+  }
+
+  const delimiterIssue = delimiterDiagnostic(input);
+  if (delimiterIssue) {
+    return {
+      equation: mode === 'code2d' ? DEFAULT_2D : DEFAULT_3D,
+      renderMode: mode === 'code2d' ? 'function' : 'implicit3d',
+      error: delimiterIssue.message,
+      diagnostic: delimiterIssue,
     };
   }
 
   const expression = extractExpression(input, mode);
   if (!expression) {
+    const functionBodyIndex = functionBodyOpeningIndex(input);
+    const diagnostic = diagnosticAt(
+      input,
+      /\bfunction\b|=>/i.test(input)
+        ? 'No return expression found in this function.'
+        : 'No graph expression found. Use return, y =, z =, or a PGFPlots addplot block.',
+      functionBodyIndex >= 0 ? functionBodyIndex + 1 : 0,
+    );
     return {
       equation: mode === 'code2d' ? DEFAULT_2D : DEFAULT_3D,
       renderMode: mode === 'code2d' ? 'function' : 'implicit3d',
-      error: 'No graph expression found. Use return, y =, z =, or a PGFPlots addplot block.',
+      error: diagnostic.message,
+      diagnostic,
     };
   }
 
   if (!/^[\w\s.+\-*/%^(),=[\]<>!?&|:'"πθ;]+$/i.test(expression)) {
+    const invalidIndex = expression.search(/[^\w\s.+\-*/%^(),=[\]<>!?&|:'"πθ;]/);
+    const expressionIndex = input.indexOf(expression);
+    const diagnostic = diagnosticAt(
+      input,
+      'The source contains syntax the local graph adapter cannot compile yet.',
+      expressionIndex >= 0 && invalidIndex >= 0 ? expressionIndex + invalidIndex : 0,
+    );
     return {
       equation: mode === 'code2d' ? DEFAULT_2D : DEFAULT_3D,
       renderMode: mode === 'code2d' ? 'function' : 'implicit3d',
-      error: 'The source contains syntax the local graph adapter cannot compile yet.',
+      error: diagnostic.message,
+      diagnostic,
     };
   }
 

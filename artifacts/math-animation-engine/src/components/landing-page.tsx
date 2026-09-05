@@ -703,7 +703,7 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
         points[index * 2] = x;
         points[index * 2 + 1] = y;
       }
-      gl.clearColor(0, 0, 0, 0);
+      gl.clearColor(9 / 255, 20 / 255, 28 / 255, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.useProgram(program);
       gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -784,6 +784,8 @@ function LiveHeroPreview() {
       const waveScaleX = split / (Math.PI * 4.4);
 
       context.clearRect(0, 0, width, height);
+      context.fillStyle = '#09141c';
+      context.fillRect(0, 0, width, height);
       context.strokeStyle = 'rgba(238,244,241,.12)';
       context.lineWidth = 1;
       for (let column = 1; column < 5; column += 1) {
