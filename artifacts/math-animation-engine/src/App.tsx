@@ -1,0 +1,5042 @@
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react';
+import {
+  Activity,
+  Aperture,
+  ArrowDownToLine,
+  ChevronDown,
+  CircleHelp,
+  Download,
+  Gauge,
+  House,
+  Minus,
+  MonitorPlay,
+  Pause,
+  Play,
+  Plus,
+  Eye,
+  EyeOff,
+  Palette,
+  RotateCcw,
+  Redo2,
+  Settings2,
+  Trash2,
+  Undo2,
+  Upload,
+  Volume2,
+  VolumeX,
+  Waves,
+  X,
+} from 'lucide-react';
+// @ts-ignore Three's runtime modules ship without declarations in this imported app.
+import * as THREE from 'three';
+// @ts-ignore Three's runtime modules ship without declarations in this imported app.
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+// @ts-ignore Three's runtime modules ship without declarations in this imported app.
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { all, create } from 'mathjs';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { ErrorBoundary } from '@/components/error-boundary';
+import { LandingPage } from '@/components/landing-page';
+import { DEVELOPER_EMAIL, DEVELOPER_PASSWORD, DeveloperAccessSequence } from '@/components/developer-access-form';
+import { DeveloperTextEditor } from '@/components/developer-text-editor';
+import { DeveloperAiAssistant, type AssistantChatMessage, type AssistantPanel, type DiagnosticItem } from '@/components/developer-ai-assistant';
+import { AccountMenu, setStoredAccount, type AccountIdentity, useAccountIdentity } from '@/components/account-menu';
+import { Toaster } from '@/components/ui/toaster';
+import { toast } from '@/hooks/use-toast';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import NotFound from '@/pages/not-found';
+import { Route, Router as WouterRouter, Switch, useLocation } from 'wouter';
+import { useEquationValidator, type StudioMode } from '@/hooks/use-equation-validator';
+import { basePath } from '@/lib/clerk-config';
+import {
+  buildGraphEvaluator as parserBuildGraphEvaluator,
+  evaluatePointSet,
+  normalizeSurfaceExpression as parserNormalizeSurfaceExpression,
+  normalizeSurfaceEquation as parserNormalizeSurfaceEquation,
+  normalizeImplicitField as parserNormalizeImplicitField,
+  extractEquationVariableDefinitions as parserExtractEquationVariableDefinitions,
+  normalizeForPreview as parserNormalizeForPreview,
+  splitEquationExpressions as parserSplitEquationExpressions,
+  resolveDynamicDomain,
+  detectSmartMode,
+  type ResolvedStudioMode,
+  type CompiledExpression,
+  type GraphEvaluator,
+  type GraphPoint,
+} from '@/lib/math-parser';
+import { clearStoredSession, loadEncryptedJson, saveEncryptedJson } from '@/lib/session-storage';
+
+const queryClient = new QueryClient();
+type DeveloperSessionContextValue = {
+  isDeveloper: boolean;
+  account: AccountIdentity;
+  grantDeveloperSession: () => void;
+  resetDeveloperSession: () => void;
+};
+
+const DeveloperSessionContext = createContext<DeveloperSessionContextValue>({
+  isDeveloper: false,
+  account: {
+    isLoaded: false,
+    isSignedIn: false,
+    isPrivileged: false,
+    username: '',
+    email: '',
+    roleLabel: 'Member',
+    initials: '',
+  },
+  grantDeveloperSession: () => undefined,
+  resetDeveloperSession: () => undefined,
+});
+
+function useDeveloperSession() {
+  return useContext(DeveloperSessionContext);
+}
+
+type ScreenPoint = [number, number];
+type ContourSegment = { start: ScreenPoint; end: ScreenPoint };
+type ContourPolyline = ScreenPoint[];
+type GraphRange = { xMin: number; xMax: number; yMin?: number; yMax?: number; tMin: number; tMax: number; worldExtent?: number };
+type CachedVectorArrow = { x: number; y: number; endX: number; endY: number };
+type WorldContourPolyline = ScreenPoint[];
+type CachedFrame = {
+  progress: number;
+  phase: number;
+  line: GraphPoint[];
+  trailOne: GraphPoint[];
+  trailTwo: GraphPoint[];
+  points: GraphPoint[];
+  vector: CachedVectorArrow[];
+  contour: WorldContourPolyline[];
+};
+
+const IMPLICIT_GRID_RESOLUTION = 96;
+const IMPLICIT_CACHE_LIMIT = 24;
+const GRAPH_ZOOM_MIN = 0.05;
+const GRAPH_ZOOM_MAX = 20;
+const GRAPH_ZOOM_BUTTON_FACTOR = 1.25;
+const GRAPH_ZOOM_WHEEL_SENSITIVITY = 0.0015;
+// The default 3D surface domain is [-8, 8]. This distance fits its projected
+// bounding sphere inside a crisp ~75% perspective frame at 1x.
+const GRAPH_BASE_CAMERA_DISTANCE = 44;
+const BRAND_WATERMARK = 'Second Solution Studio';
+const AUDIO_MIN_HZ = 200;
+const AUDIO_MAX_HZ = 1200;
+type ImplicitSurfaceWorkerResult = {
+  type: 'result';
+  id: number;
+  positions: ArrayBuffer;
+  indices: ArrayBuffer;
+};
+type ImplicitSurfaceWorkerError = {
+  type: 'error';
+  id: number;
+  message: string;
+};
+type ImplicitSurfaceWorkerRequest = {
+  type: 'generate';
+  id: number;
+  equation: string;
+  mode: 'implicit3d' | 'surface3d';
+  phase: number;
+  speed: number;
+  resolution: number;
+  extent: number;
+  heightScale: number;
+};
+
+type GeometryBufferInput = ArrayBufferLike | ArrayLike<number>;
+
+function normalizeIndexBuffer(input: GeometryBufferInput): Uint16Array | Uint32Array | null {
+  let values: number[];
+  if (ArrayBuffer.isView(input) || Array.isArray(input)) {
+    values = Array.from(input as ArrayLike<number>, Number);
+  } else {
+    const buffer = input as ArrayBuffer;
+    const byteLength = buffer.byteLength;
+    if (byteLength === 0 || byteLength % 2 !== 0) return null;
+    values = Array.from(
+      byteLength % 4 === 0
+        ? new Uint32Array(buffer)
+        : new Uint16Array(buffer),
+    );
+  }
+
+  if (values.length === 0) return null;
+  let maxIndex = 0;
+  const cleanValues: number[] = [];
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    cleanValues.push(value);
+    maxIndex = Math.max(maxIndex, value);
+  }
+  return maxIndex > 65535 ? new Uint32Array(cleanValues) : new Uint16Array(cleanValues);
+}
+
+type AudioEngine = {
+  context: AudioContext;
+  master: GainNode;
+  destination: MediaStreamAudioDestinationNode;
+  tracerOscillator: OscillatorNode;
+  tracerGain: GainNode;
+};
+
+function getAudioContextConstructor() {
+  if (typeof window === 'undefined') return undefined;
+  return window.AudioContext
+    ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+}
+
+function scheduleAudioBeat(engine: AudioEngine, frequency: number, strength = 1, when?: number) {
+  const now = Math.max(engine.context.currentTime, when ?? engine.context.currentTime);
+  const oscillator = engine.context.createOscillator();
+  const envelope = engine.context.createGain();
+  oscillator.type = 'triangle';
+  oscillator.frequency.setValueAtTime(Math.max(70, Math.min(260, frequency)), now);
+  oscillator.frequency.exponentialRampToValueAtTime(55, now + 0.12);
+  envelope.gain.setValueAtTime(0.0001, now);
+  envelope.gain.exponentialRampToValueAtTime(0.22 * strength, now + 0.006);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+  oscillator.connect(envelope);
+  envelope.connect(engine.master);
+  oscillator.start(now);
+  oscillator.stop(now + 0.16);
+}
+
+function canvasHasNonEmptyPixels(canvas: HTMLCanvasElement) {
+  try {
+    const context2d = canvas.getContext('2d');
+    if (context2d) {
+      const width = Math.max(1, Math.min(canvas.width, 320));
+      const height = Math.max(1, Math.min(canvas.height, 180));
+      const pixels = context2d.getImageData(0, 0, width, height).data;
+      for (let index = 0; index < pixels.length; index += 4) {
+        if (pixels[index + 3] > 0 && (pixels[index] > 42 || pixels[index + 1] > 42 || pixels[index + 2] > 42)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    const webgl = canvas.getContext('webgl2') ?? canvas.getContext('webgl');
+    if (!webgl) return false;
+    const pixel = new Uint8Array(4);
+    const samplePoints: Array<[number, number]> = [];
+    for (let row = 0; row < 5; row += 1) {
+      for (let column = 0; column < 5; column += 1) {
+        samplePoints.push([
+          Math.floor((column / 4) * Math.max(0, canvas.width - 1)),
+          Math.floor((row / 4) * Math.max(0, canvas.height - 1)),
+        ]);
+      }
+    }
+    return samplePoints.some(([x, y]) => {
+      webgl.readPixels(x, y, 1, 1, webgl.RGBA, webgl.UNSIGNED_BYTE, pixel);
+      return pixel[3] > 0 && (pixel[0] > 42 || pixel[1] > 42 || pixel[2] > 42);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function easeInOutCubic(value: number) {
+  const progress = Math.max(0, Math.min(1, value));
+  return progress < 0.5
+    ? 4 * progress * progress * progress
+    : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+}
+
+function detectSmartRange(equation: string, mode: StudioMode): GraphRange {
+  return resolveDynamicDomain(equation, mode === 'auto' ? detectSmartMode(equation) : mode);
+}
+
+function rangeWorldExtent(range: GraphRange) {
+  return Math.max(
+    Math.abs(range.xMin),
+    Math.abs(range.xMax),
+    Math.abs(range.yMin ?? range.xMin),
+    Math.abs(range.yMax ?? range.xMax),
+    Math.abs(range.worldExtent ?? 0),
+  );
+}
+
+function mergeGraphRanges(ranges: GraphRange[]): GraphRange {
+  const first = ranges[0];
+  if (!first) {
+    throw new Error('Cannot merge an empty set of graph ranges.');
+  }
+  return {
+    xMin: Math.min(...ranges.map((range) => range.xMin)),
+    xMax: Math.max(...ranges.map((range) => range.xMax)),
+    yMin: Math.min(...ranges.map((range) => range.yMin ?? range.xMin)),
+    yMax: Math.max(...ranges.map((range) => range.yMax ?? range.xMax)),
+    tMin: Math.min(...ranges.map((range) => range.tMin)),
+    tMax: Math.max(...ranges.map((range) => range.tMax)),
+    worldExtent: Math.max(
+      rangeWorldExtent(first),
+      ...ranges.map((range) => range.worldExtent ?? rangeWorldExtent(range)),
+    ),
+  };
+}
+
+function contourPointKey(point: ScreenPoint) {
+  return `${Math.round(point[0] * 1000)}:${Math.round(point[1] * 1000)}`;
+}
+
+function stitchContourSegments(segments: ContourSegment[]): ContourPolyline[] {
+  const endpointMap = new Map<string, Array<{ index: number; endpoint: 0 | 1 }>>();
+  segments.forEach((segment, index) => {
+    for (const [endpoint, point] of [[0, segment.start], [1, segment.end]] as const) {
+      const key = contourPointKey(point);
+      const references = endpointMap.get(key) ?? [];
+      references.push({ index, endpoint });
+      endpointMap.set(key, references);
+    }
+  });
+
+  const used = new Uint8Array(segments.length);
+  const polylines: ContourPolyline[] = [];
+  const extend = (polyline: ContourPolyline, fromStart: boolean) => {
+    let current = fromStart ? polyline[0] : polyline[polyline.length - 1];
+    while (current) {
+      const nextReference = endpointMap.get(contourPointKey(current))
+        ?.find((reference) => used[reference.index] === 0);
+      if (!nextReference) break;
+      used[nextReference.index] = 1;
+      const segment = segments[nextReference.index];
+      const nextPoint = nextReference.endpoint === 0 ? segment.end : segment.start;
+      if (fromStart) polyline.unshift(nextPoint);
+      else polyline.push(nextPoint);
+      current = nextPoint;
+    }
+  };
+
+  segments.forEach((segment, index) => {
+    if (used[index]) return;
+    used[index] = 1;
+    const polyline: ContourPolyline = [segment.start, segment.end];
+    extend(polyline, false);
+    extend(polyline, true);
+    polylines.push(polyline);
+  });
+  return polylines;
+}
+
+function createImplicitSurfaceGeometry(
+  expression: CompiledExpression,
+  phase: number,
+  speed: number,
+  resolution: number,
+  extent: number,
+) {
+  const size = resolution + 1;
+  const values = new Float32Array(size * size * size);
+  const indexOf = (x: number, y: number, z: number) => (z * size + y) * size + x;
+  const evaluate = (x: number, y: number, z: number) => {
+    try {
+      const value = Number(expression.evaluate({ x, y, z, t: phase, a: phase, b: speed }));
+      if (Number.isFinite(value)) return Math.max(-1e9, Math.min(1e9, value));
+      if (value === Number.POSITIVE_INFINITY) return 1e9;
+      if (value === Number.NEGATIVE_INFINITY) return -1e9;
+      return Number.NaN;
+    } catch {
+      return Number.NaN;
+    }
+  };
+  const step = (extent * 2) / resolution;
+  for (let z = 0; z <= resolution; z += 1) {
+    for (let y = 0; y <= resolution; y += 1) {
+      for (let x = 0; x <= resolution; x += 1) {
+        values[indexOf(x, y, z)] = evaluate(
+          -extent + x * step,
+          -extent + y * step,
+          -extent + z * step,
+        );
+      }
+    }
+  }
+
+  const positions: number[] = [];
+  const tetrahedra = [
+    [0, 5, 1, 6],
+    [0, 1, 2, 6],
+    [0, 2, 3, 6],
+    [0, 3, 7, 6],
+    [0, 7, 4, 6],
+    [0, 4, 5, 6],
+  ] as const;
+  const tetraEdges = [
+    [0, 1], [1, 2], [2, 3], [3, 0], [0, 2], [1, 3],
+  ] as const;
+  const cubeCorners = [
+    [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+    [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+  ] as const;
+
+  for (let z = 0; z < resolution; z += 1) {
+    for (let y = 0; y < resolution; y += 1) {
+      for (let x = 0; x < resolution; x += 1) {
+        const corners = cubeCorners.map(([dx, dy, dz]) => {
+          const px = -extent + (x + dx) * step;
+          const py = -extent + (y + dy) * step;
+          const pz = -extent + (z + dz) * step;
+          return {
+            point: [px, py, pz] as [number, number, number],
+            value: values[indexOf(x + dx, y + dy, z + dz)],
+          };
+        });
+        tetrahedra.forEach((tetrahedron) => {
+          const intersections: [number, number, number][] = [];
+          tetraEdges.forEach(([firstIndex, secondIndex]) => {
+            const first = corners[tetrahedron[firstIndex]];
+            const second = corners[tetrahedron[secondIndex]];
+            if (!Number.isFinite(first.value) || !Number.isFinite(second.value)) return;
+            if ((first.value < 0) === (second.value < 0)) return;
+            const denominator = first.value - second.value;
+            const amount = Math.max(0, Math.min(1, Math.abs(denominator) < 1e-12 ? 0.5 : first.value / denominator));
+            intersections.push([
+              first.point[0] + (second.point[0] - first.point[0]) * amount,
+              first.point[1] + (second.point[1] - first.point[1]) * amount,
+              first.point[2] + (second.point[2] - first.point[2]) * amount,
+            ]);
+          });
+          if (intersections.length < 3) return;
+          const appendTriangle = (triangle: [number, number, number]) => {
+            triangle.forEach((pointIndex) => positions.push(...intersections[pointIndex]));
+          };
+          appendTriangle([0, 1, 2]);
+          if (intersections.length >= 4) appendTriangle([0, 2, 3]);
+        });
+      }
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  if (positions.length === 0) return geometry;
+
+  // The tetrahedra pass deliberately emits independent triangles. Weld their
+  // shared edge vertices before calculating normals so Phong-style lighting
+  // can interpolate continuously across the extracted surface.
+  const smoothedGeometry = mergeVertices(geometry, Math.max(step * 0.08, 1e-5));
+  geometry.dispose();
+  smoothedGeometry.computeVertexNormals();
+  smoothedGeometry.computeBoundingSphere();
+  return smoothedGeometry;
+}
+
+function createHeightmapSurfaceGeometry(
+  expression: CompiledExpression,
+  phase: number,
+  speed: number,
+  resolution: number,
+  extent: number,
+  heightScale = 1,
+) {
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const heights = new Float32Array((resolution + 1) * (resolution + 1));
+  const step = (extent * 2) / resolution;
+  const indexOf = (x: number, y: number) => y * (resolution + 1) + x;
+  for (let y = 0; y <= resolution; y += 1) {
+    for (let x = 0; x <= resolution; x += 1) {
+      const worldX = -extent + x * step;
+      const worldY = extent - y * step;
+      try {
+        const value = Number(expression.evaluate({ x: worldX, y: worldY, z: 0, t: phase, a: phase, b: speed }));
+        heights[indexOf(x, y)] = Number.isFinite(value)
+          ? value * Math.max(0.25, Math.min(4, heightScale))
+          : Number.NaN;
+      } catch {
+        heights[indexOf(x, y)] = Number.NaN;
+      }
+    }
+  }
+  const vertexIndex = (x: number, y: number) => {
+    const height = heights[indexOf(x, y)];
+    if (!Number.isFinite(height)) return -1;
+    const index = positions.length / 3;
+    positions.push(
+      -extent + x * step,
+      extent - y * step,
+      height,
+    );
+    return index;
+  };
+  for (let y = 0; y < resolution; y += 1) {
+    for (let x = 0; x < resolution; x += 1) {
+      const topLeft = vertexIndex(x, y);
+      const topRight = vertexIndex(x + 1, y);
+      const bottomLeft = vertexIndex(x, y + 1);
+      const bottomRight = vertexIndex(x + 1, y + 1);
+      if ([topLeft, topRight, bottomLeft, bottomRight].some((index) => index < 0)) continue;
+      indices.push(topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  if (positions.length > 0) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  if (indices.length > 0) geometry.setIndex(indices);
+  if (geometry.getAttribute('position')) {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+  }
+  return geometry;
+}
+
+function splitEquationExpressions(input: string, mode: StudioMode) {
+  return parserSplitEquationExpressions(input, mode);
+  /*
+  const stripped = stripOuterCollections(normalizeForPreview(input));
+  if (!stripped) return [];
+  if (mode === 'points') return [stripped];
+
+  if (mode === 'parametric') {
+    if (/[;\n]/.test(stripped)) {
+      return splitTopLevelExpressions(stripped, new Set([';', '\n'])).flatMap((part) =>
+        part.trim().startsWith('(') ? splitTopLevelExpressions(part, new Set([','])) : [part],
+      );
+    }
+    if (/^\s*x\s*\(\s*t\s*\)\s*=/.test(stripped) || !stripped.trim().startsWith('(')) {
+      return [stripped];
+    }
+    const grouped = splitTopLevelExpressions(stripped, new Set([',']));
+    return grouped.length > 1 ? grouped : [stripped];
+  }
+
+  return splitTopLevelExpressions(stripped, new Set([',', ';', '\n']));
+  */
+}
+
+function normalizeForPreview(input: string) {
+  return parserNormalizeForPreview(input);
+}
+
+/*
+function parseManualPoints(input: string) {
+  return splitTopLevelExpressions(input, new Set([',', ';', '\n'])).flatMap((line): GraphPoint[] => {
+    const match = line.trim().match(/^\(\s*(-?(?:\d+\.?\d*|\.\d+))\s*,\s*(-?(?:\d+\.?\d*|\.\d+))\s*\)$/);
+    return match ? [{ x: Number(match[1]), y: Number(match[2]) }] : [];
+  });
+}
+
+function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator {
+  const input = normalizeForPreview(equation);
+  try {
+    if (mode === 'points') {
+      const points = parseManualPoints(input);
+      return points.length >= 2 ? { kind: 'points', points } : null;
+    }
+    if (mode === 'parametric') {
+      const parts = splitParametric(input);
+      if (!parts) return null;
+      return { kind: 'parametric', x: math.compile(parts[0]), y: math.compile(parts[1]) };
+    }
+    if (mode === 'vector') {
+      const parts = splitParametric(input);
+      if (!parts) return null;
+      return { kind: 'vector', x: math.compile(parts[0]), y: math.compile(parts[1]) };
+    }
+    if (mode === 'implicit' && evaluator?.kind === 'implicit') {
+      const equality = input.match(/^\s*(.+?)\s*=\s*(.+?)\s*$/);
+      if (!equality) return null;
+      return { kind: 'implicit', expression: math.compile(`(${equality[1]}) - (${equality[2]})`) };
+    }
+    if (mode === 'polar') {
+      const expression = input.match(/^\s*r\s*=\s*(.+)$/i)?.[1] ?? input;
+      return { kind: 'polar', expression: math.compile(expression) };
+    }
+    const expression = input.match(/^\s*y\s*=\s*(.+)$/i)?.[1] ?? input;
+    return { kind: 'function', expression: math.compile(expression) };
+  } catch {
+    return null;
+  }
+}
+*/
+
+function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator {
+  return parserBuildGraphEvaluator(equation, mode);
+}
+
+type HistoryItem = { equation: string; mode: ResolvedStudioMode; at: number; preview?: string };
+type EquationLayer = { id: number; equation: string; mode: ResolvedStudioMode; color: string; visible: boolean };
+type CanvasEntry = {
+  expression: string;
+  color: string;
+  mode: ResolvedStudioMode;
+  range: GraphRange;
+  implicitFields?: string[];
+};
+
+type RaymarchShader = {
+  vertexShader: string;
+  fragmentShader: string;
+  fieldCount: number;
+  maxSteps: number;
+  normalEpsilon: number;
+};
+
+const RAYMARCH_INTERACTION_SETTLE_MS = 220;
+type RenderQuality = 'low' | 'medium' | 'high';
+const RENDER_QUALITY_STORAGE_KEY = 'app_render_quality';
+const renderQualityOptions: Array<{ value: RenderQuality; label: string; detail: string }> = [
+  { value: 'low', label: 'Low', detail: '0.75x Performance' },
+  { value: 'medium', label: 'Medium', detail: '1.0x Balanced' },
+  { value: 'high', label: 'High', detail: 'Ultra HD' },
+];
+const renderQualitySteps: Record<RenderQuality, number> = {
+  low: 64,
+  medium: 96,
+  high: 160,
+};
+const isRenderQuality = (value: unknown): value is RenderQuality => value === 'low' || value === 'medium' || value === 'high';
+const ANIMATION_PHASE_LIMIT = Math.PI * 2;
+
+function phaseForProgress(progress: number, speed: number) {
+  const wrappedProgress = ((Number.isFinite(progress) ? progress : 0) % 1 + 1) % 1;
+  return wrappedProgress * ANIMATION_PHASE_LIMIT * Math.max(0.25, Math.min(2, speed));
+}
+
+const shaderMath = create(all);
+
+function compileGlslNode(
+  node: any,
+  bindings: Record<string, string> = {},
+  definitions: Map<string, string> = new Map(),
+  resolving: Set<string> = new Set(),
+): string | null {
+  if (!node) return null;
+  if (node.type === 'ParenthesisNode') return compileGlslNode(node.content, bindings, definitions, resolving);
+  if (node.type === 'ConstantNode') {
+    if (node.value === true || node.value === false) return node.value ? 'true' : 'false';
+    if (String(node.value).toLowerCase() === 'infinity') return '1.0e20';
+    const value = Number(node.value);
+    return Number.isFinite(value) ? value.toFixed(8) : null;
+  }
+  if (node.type === 'SymbolNode') {
+    const symbol = String(node.name ?? '').toLowerCase();
+    if (bindings[symbol]) return `(${bindings[symbol]})`;
+    const definition = definitions.get(symbol);
+    if (definition !== undefined) {
+      if (resolving.has(symbol)) return null;
+      const nextResolving = new Set(resolving);
+      nextResolving.add(symbol);
+      const resolved = compileGlslNode(shaderMath.parse(definition), bindings, definitions, nextResolving);
+      if (!resolved) return null;
+      bindings[symbol] = resolved;
+      return `(${resolved})`;
+    }
+    if (symbol === 'x') return 'p.x';
+    if (symbol === 'y') return 'p.y';
+    if (symbol === 'z') return 'p.z';
+    if (symbol === 't' || symbol === 'u' || symbol === 'theta' || symbol === 'a') return 'uPhase';
+    if (symbol === 'v' || symbol === 'r' || symbol === 'phi' || symbol === 'b') return 'uSpeed';
+    if (symbol === 'pi') return 'PI';
+    if (symbol === 'e') return 'E';
+    if (symbol === 'usurfaceheightscale') return 'uSurfaceHeightScale';
+    if (symbol === 'udomainextent') return 'uDomainExtent';
+    // User-authored parameters do not have a separate shader uniform yet.
+    // Treat an absent parameter as zero so a stale cue cannot invalidate the
+    // entire GPU program while the user is switching equations.
+    return '0.0';
+  }
+  if (node.type === 'OperatorNode') {
+    const args = Array.isArray(node.args)
+      ? node.args.map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving))
+      : [];
+    if (args.some((value: string | null) => value === null)) return null;
+    const [first, second] = args as [string, string?];
+    if (node.fn === 'unaryMinus' || node.op === 'unaryMinus') return `(-(${first}))`;
+    if (node.fn === 'unaryPlus' || node.op === 'unaryPlus') return first ?? null;
+    if (node.op === 'not' || node.op === '!') return `(!(${first}))`;
+    if (!second) return first ?? null;
+    if (node.op === '^') return `pow(${first}, ${second})`;
+    if (node.op === '%') return `mod(${first}, ${second})`;
+    if (['+', '-', '*', '/'].includes(node.op)) return `(${first} ${node.op} ${second})`;
+    if (['==', '!=', '<', '>', '<=', '>='].includes(node.op)) return `(${first} ${node.op} ${second})`;
+    if (node.op === 'and' || node.op === '&&') return `((${first}) && (${second}))`;
+    if (node.op === 'or' || node.op === '||') return `((${first}) || (${second}))`;
+    return null;
+  }
+  if (node.type === 'RelationalNode') {
+    const params = Array.isArray(node.params) ? node.params : [];
+    const values = params.map((parameter: any) => compileGlslNode(parameter, bindings, definitions, resolving));
+    if (values.some((value: string | null) => value === null)) return null;
+    const relation = String(node.condition ?? node.op ?? '==');
+    return values.slice(1).reduce(
+      (current: string, value: string | null) => `(${current} ${relation} ${value})`,
+      values[0] ?? 'false',
+    );
+  }
+  if (node.type === 'ConditionalNode') {
+    const condition = compileGlslNode(node.condition, bindings, definitions, resolving);
+    const trueBranch = compileGlslNode(node.trueExpr, bindings, definitions, resolving);
+    const falseBranch = compileGlslNode(node.falseExpr, bindings, definitions, resolving);
+    return condition && trueBranch && falseBranch ? `((${condition}) ? (${trueBranch}) : (${falseBranch}))` : null;
+  }
+  if (node.type === 'ArrayNode') {
+    const items = Array.isArray(node.items) ? node.items : [];
+    const values = items.map((item: any) => compileGlslNode(item, bindings, definitions, resolving));
+    if (values.some((value: string | null) => value === null) || values.length < 2 || values.length > 4) return null;
+    return `vec${values.length}(${(values as string[]).join(', ')})`;
+  }
+  if (node.type === 'AccessorNode') {
+    const object = compileGlslNode(node.object, bindings, definitions, resolving);
+    const indexNode = node.index?.dimensions?.[0] ?? node.index;
+    const index = compileGlslNode(indexNode, bindings, definitions, resolving);
+    return object && index ? `${object}[int(${index})]` : null;
+  }
+  if (node.type === 'FunctionNode') {
+    const name = String(node.fn?.name ?? node.name ?? '').toLowerCase();
+    const astArgs = Array.isArray(node.args) ? node.args : [];
+    const compileWithBinding = (argument: any, variable: string, value: string) => (
+      compileGlslNode(argument, { ...bindings, [variable.toLowerCase()]: value }, definitions, resolving)
+    );
+    const compileWithBindings = (argument: any, nextBindings: Record<string, string>) => (
+      compileGlslNode(argument, { ...bindings, ...nextBindings }, definitions, resolving)
+    );
+    const getVariableName = (argument: any, fallback: string) => {
+      const unwrapped = argument?.type === 'ParenthesisNode' ? argument.content : argument;
+      return unwrapped?.type === 'SymbolNode' ? String(unwrapped.name ?? fallback).toLowerCase() : fallback;
+    };
+    if (name === 'gradient') {
+      const expression = astArgs[0];
+      if (!expression) return null;
+      const components = ['x', 'y', 'z'].map((variable) => {
+        const coordinate = `p.${variable}`;
+        const forward = compileWithBinding(expression, variable, `(${coordinate} + 0.001)`);
+        const backward = compileWithBinding(expression, variable, `(${coordinate} - 0.001)`);
+        return forward && backward ? `((${forward} - ${backward}) / 0.002)` : null;
+      });
+      return components.every(Boolean) ? `vec3(${(components as string[]).join(', ')})` : null;
+    }
+    if (
+      name === 'derivative'
+      || name === 'differentiate'
+      || name === 'partial'
+      || name === 'gradx'
+      || name === 'grady'
+      || name === 'gradz'
+      || name.startsWith('derivative_d_')
+    ) {
+      const variable = name.startsWith('derivative_d_')
+        ? name.slice('derivative_d_'.length)
+        : name === 'gradx' ? 'x'
+          : name === 'grady' ? 'y'
+            : name === 'gradz' ? 'z'
+              : getVariableName(astArgs[1], 'x');
+      const expression = astArgs[0];
+      if (!expression || !variable) return null;
+      const coordinate = variable === 'x' || variable === 'y' || variable === 'z' ? `p.${variable}` : '0.0';
+      const step = '0.001';
+      const forward = compileWithBinding(expression, variable, `(${coordinate} + ${step})`);
+      const backward = compileWithBinding(expression, variable, `(${coordinate} - ${step})`);
+      return forward && backward ? `((${forward} - ${backward}) / (2.0 * ${step}))` : null;
+    }
+    if (name === 'int' || name === 'integral') {
+      const variable = astArgs.length >= 4 ? getVariableName(astArgs[1], 'x') : 'x';
+      const lowerIndex = astArgs.length >= 4 ? 2 : 1;
+      const upperIndex = astArgs.length >= 4 ? 3 : 2;
+      const lower = compileGlslNode(astArgs[lowerIndex], bindings, definitions, resolving);
+      const upper = compileGlslNode(astArgs[upperIndex], bindings, definitions, resolving);
+      const expression = astArgs[0];
+      if (!expression || !lower || !upper) return null;
+      const sampleCount = 16;
+      const samples: string[] = [];
+      for (let index = 0; index <= sampleCount; index += 1) {
+        const amount = (index / sampleCount).toFixed(8);
+        const sample = compileWithBinding(expression, variable, `mix(${lower}, ${upper}, ${amount})`);
+        if (!sample) return null;
+        samples.push(sample);
+      }
+      const weighted = samples.map((sample, index) => `${index === 0 || index === sampleCount ? 1 : index % 2 === 0 ? 2 : 4}.0 * (${sample})`);
+      return `(((${upper}) - (${lower})) / ${sampleCount * 3}.0) * (${weighted.join(' + ')})`;
+    }
+    if (name === 'integral2' || name === 'doubleintegral' || name === 'dblquad' || name === 'int2'
+      || name === 'integral3' || name === 'tripleintegral' || name === 'int3') {
+      const dimension = ['integral3', 'tripleintegral', 'int3'].includes(name) ? 3 : 2;
+      const expression = astArgs[0];
+      const bounds = Array.from({ length: dimension }, (_, boundIndex) => {
+        const offset = 1 + boundIndex * 3;
+        return {
+          variable: getVariableName(astArgs[offset], ['x', 'y', 'z'][boundIndex]!),
+          lower: compileGlslNode(astArgs[offset + 1], bindings, definitions, resolving),
+          upper: compileGlslNode(astArgs[offset + 2], bindings, definitions, resolving),
+        };
+      });
+      if (!expression || bounds.some((bound) => !bound.lower || !bound.upper)) return null;
+      const sampleCount = dimension === 3 ? 6 : 8;
+      const samples: string[] = [];
+      const visit = (depth: number, nextBindings: Record<string, string>, amounts: number[]) => {
+        const bound = bounds[depth];
+        if (!bound) {
+          const sample = compileWithBindings(expression, nextBindings);
+          if (sample) samples.push(`(${sample})`);
+          return;
+        }
+        for (let index = 0; index < sampleCount; index += 1) {
+          const amount = ((index + 0.5) / sampleCount).toFixed(8);
+          visit(depth + 1, {
+            ...nextBindings,
+            [bound.variable]: `mix(${bound.lower}, ${bound.upper}, ${amount})`,
+          }, [...amounts, index]);
+        }
+      };
+      visit(0, {}, []);
+      if (samples.length !== sampleCount ** dimension) return null;
+      const widths = bounds.map((bound) => `((${bound.upper}) - (${bound.lower}))`).join(' * ');
+      return `((${widths}) / ${sampleCount ** dimension}.0) * (${samples.join(' + ')})`;
+    }
+    if (name === 'sum') {
+      const variable = getVariableName(astArgs[1], 'n');
+      const lowerNode = astArgs[2];
+      const upperNode = astArgs[3];
+      const lowerValue = lowerNode?.type === 'ConstantNode' ? Number(lowerNode.value) : Number.NaN;
+      const upperValue = upperNode?.type === 'ConstantNode' ? Number(upperNode.value) : Number.NaN;
+      if (!Number.isInteger(lowerValue) || (!Number.isInteger(upperValue) && upperValue !== Number.POSITIVE_INFINITY)) return null;
+      const first = Math.ceil(lowerValue);
+      const last = upperValue === Number.POSITIVE_INFINITY
+        ? first + 63
+        : Math.min(first + 63, Math.floor(upperValue));
+      if (last < first) return '0.0';
+      const terms: string[] = [];
+      for (let index = first; index <= last; index += 1) {
+        const term = compileWithBinding(astArgs[0], variable, `${index.toFixed(8)}`);
+        if (!term) return null;
+        terms.push(`(${term})`);
+      }
+      return `(${terms.join(' + ')})`;
+    }
+    const args = astArgs.map((argument: any) => compileGlslNode(argument, bindings, definitions, resolving));
+    if (args.some((value: string | null) => value === null)) return null;
+    const compiledArgs = args as string[];
+    if (name === 'if' && compiledArgs.length >= 3) return `((${compiledArgs[0]}) ? (${compiledArgs[1]}) : (${compiledArgs[2]}))`;
+    if (name === 'piecewise' && compiledArgs.length >= 3) {
+      const hasFallback = compiledArgs.length % 2 === 1;
+      let result = hasFallback ? compiledArgs[compiledArgs.length - 1]! : '0.0';
+      const limit = hasFallback ? compiledArgs.length - 1 : compiledArgs.length;
+      for (let index = limit - 2; index >= 1; index -= 2) {
+        result = `((${compiledArgs[index]}) ? (${compiledArgs[index - 1]}) : (${result}))`;
+      }
+      return result;
+    }
+    if (name === 'mod' && compiledArgs.length === 2) return `mod(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'atan2' && compiledArgs.length === 2) return `atan(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'step' && compiledArgs.length === 1) return `stepSign(${compiledArgs[0]})`;
+    if (name === 'step' && compiledArgs.length === 2) return `step(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'smoothstep' && compiledArgs.length === 3) return `smoothstep(${compiledArgs.join(', ')})`;
+    if (name === 'gamma' && compiledArgs.length === 1) return `gammaApprox(${compiledArgs[0]})`;
+    if (name === 'dot' && compiledArgs.length === 2) return `dot(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'cross' && compiledArgs.length === 2) return `cross(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'ln' && compiledArgs.length === 1) return `log(${compiledArgs[0]})`;
+    if (name === 'log' && compiledArgs.length === 2) return `(log(${compiledArgs[0]}) / log(${compiledArgs[1]}))`;
+    if (name === 'log10' && compiledArgs.length === 1) return `(log(${compiledArgs[0]}) / log(10.0))`;
+    if (name === 'cbrt' && compiledArgs.length === 1) return `(sign(${compiledArgs[0]}) * pow(abs(${compiledArgs[0]}), 0.33333333))`;
+    if (name === 'sinh' && compiledArgs.length === 1) return `((exp(${compiledArgs[0]}) - exp(-(${compiledArgs[0]}))) * 0.5)`;
+    if (name === 'cosh' && compiledArgs.length === 1) return `((exp(${compiledArgs[0]}) + exp(-(${compiledArgs[0]}))) * 0.5)`;
+    if (name === 'tanh' && compiledArgs.length === 1) return `(sinh(${compiledArgs[0]}) / cosh(${compiledArgs[0]}))`;
+    if (name === 'asinh' && compiledArgs.length === 1) return `log(${compiledArgs[0]} + sqrt(${compiledArgs[0]} * ${compiledArgs[0]} + 1.0))`;
+    if (name === 'acosh' && compiledArgs.length === 1) return `log(${compiledArgs[0]} + sqrt(${compiledArgs[0]} * ${compiledArgs[0]} - 1.0))`;
+    if (name === 'atanh' && compiledArgs.length === 1) return `(0.5 * log((1.0 + ${compiledArgs[0]}) / (1.0 - ${compiledArgs[0]})))`;
+    if (name === 'sec' && compiledArgs.length === 1) return `(1.0 / cos(${compiledArgs[0]}))`;
+    if (name === 'csc' && compiledArgs.length === 1) return `(1.0 / sin(${compiledArgs[0]}))`;
+    if (name === 'cot' && compiledArgs.length === 1) return `(1.0 / tan(${compiledArgs[0]}))`;
+    if (name === 'sech' && compiledArgs.length === 1) return `(1.0 / cosh(${compiledArgs[0]}))`;
+    if (name === 'csch' && compiledArgs.length === 1) return `(1.0 / sinh(${compiledArgs[0]}))`;
+    if (name === 'coth' && compiledArgs.length === 1) return `(1.0 / tanh(${compiledArgs[0]}))`;
+    if (name === 'acot' && compiledArgs.length === 1) return `(PI * 0.5 - atan(${compiledArgs[0]}))`;
+    if (name === 'min' || name === 'max') {
+      if (compiledArgs.length < 2) return compiledArgs[0] ?? null;
+      return compiledArgs.slice(1).reduce((current, value) => `${name}(${current}, ${value})`, compiledArgs[0]!);
+    }
+    if (name === 'clamp' && compiledArgs.length === 3) return `clamp(${compiledArgs.join(', ')})`;
+    const directFunctions = new Set([
+      'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'abs', 'sqrt', 'exp', 'floor',
+      'ceil', 'round', 'sign', 'min', 'max', 'dot', 'cross',
+    ]);
+    if (directFunctions.has(name)) return `${name}(${compiledArgs.join(', ')})`;
+    return null;
+  }
+  return null;
+}
+
+function compileGlslExpression(source: string) {
+  try {
+    const statements = source.split(';').map((part) => part.trim()).filter(Boolean);
+    const renderExpression = statements.pop() ?? source;
+    const definitions = new Map<string, string>();
+    for (const statement of statements) {
+      const assignment = statement.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*(.+)$/);
+      if (!assignment) return null;
+      definitions.set(assignment[1].toLowerCase(), assignment[2]);
+    }
+    return compileGlslNode(shaderMath.parse(parserNormalizeForPreview(renderExpression)), {}, definitions);
+  } catch {
+    return null;
+  }
+}
+
+function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
+  const expressions = sources
+    .map((source) => compileGlslExpression(source))
+    .filter((source): source is string => Boolean(source));
+  if (expressions.length === 0 || expressions.length !== sources.length) return null;
+
+  const fieldFunctions = expressions.map((expression, index) => (
+    `float field${index}(vec3 p) {
+       float value = ${expression};
+       if (!(value == value)) return 1.0e6;
+       if (abs(value) > 1.0e19) return sign(value) * 1.0e19;
+       return value;
+     }`
+  )).join('\n');
+  const fieldCalls = expressions.map((_, index) => `field${index}(p)`);
+  const combinedField = fieldCalls.slice(1).reduce(
+    (current, field) => `sminPolynomial(${current}, ${field}, uSmoothness)`,
+    fieldCalls[0],
+  );
+  const fineFeatures = sources.length > 1 || sources.some((source) => /\b(?:sin|cos|tan|abs|sqrt|exp|log)\b|\^/i.test(source));
+  const maxSteps = fineFeatures ? 512 : 384;
+  const normalEpsilon = fineFeatures ? 0.0018 : 0.0032;
+
+  return {
+    fieldCount: expressions.length,
+    maxSteps,
+    normalEpsilon,
+    vertexShader: `
+      precision highp float;
+      precision highp int;
+      varying vec2 vScreenUv;
+      void main() {
+        vScreenUv = position.xy * 0.5 + 0.5;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      precision highp int;
+      #define PI 3.141592653589793
+      #define E 2.718281828459045
+      #define MAX_RAY_STEPS 512
+      uniform vec3 uCameraPosition;
+      uniform mat4 uCameraMatrix;
+      uniform vec3 uCameraRight;
+      uniform vec3 uCameraUp;
+      uniform vec3 uCameraForward;
+      uniform vec3 uBoundsMin;
+      uniform vec3 uBoundsMax;
+      uniform vec3 uColor;
+      uniform float uAspect;
+      uniform float uFovRadians;
+      uniform float uDomainExtent;
+      uniform float uSurfaceHeightScale;
+      uniform float uPhase;
+      uniform float uSpeed;
+      uniform float uSmoothness;
+      uniform float uNormalEpsilon;
+      uniform int uMaxSteps;
+      uniform int uInteractive;
+      varying vec2 vScreenUv;
+
+      float sminPolynomial(float a, float b, float k) {
+        float h = clamp(0.5 + 0.5 * (b - a) / max(k, 0.0001), 0.0, 1.0);
+        return mix(b, a, h) - k * h * (1.0 - h);
+      }
+
+      float stepSign(float value) {
+        return value < 0.0 ? 0.0 : 1.0;
+      }
+
+      float gammaLanczos(float value) {
+        float shifted = value - 1.0;
+        float accumulator = 0.99999994;
+        accumulator += 676.5204 / (shifted + 1.0);
+        accumulator -= 1259.1392 / (shifted + 2.0);
+        accumulator += 771.3234 / (shifted + 3.0);
+        accumulator -= 176.6150 / (shifted + 4.0);
+        accumulator += 12.50734 / (shifted + 5.0);
+        accumulator -= 0.138571 / (shifted + 6.0);
+        float base = shifted + 7.5;
+        return sqrt(2.0 * PI) * pow(base, shifted + 0.5) * exp(-base) * accumulator;
+      }
+
+      float gammaApprox(float value) {
+        if (value <= 0.0 && abs(value - floor(value)) < 0.0001) return 1.0e20;
+        if (value < 0.5) return PI / (sin(PI * value) * gammaLanczos(1.0 - value));
+        return gammaLanczos(value);
+      }
+
+      ${fieldFunctions}
+
+      float distanceField(vec3 p) {
+        return ${combinedField};
+      }
+
+      vec2 rayBox(vec3 origin, vec3 direction) {
+        vec3 safeDirection = vec3(
+          direction.x >= 0.0 ? max(direction.x, 0.00001) : min(direction.x, -0.00001),
+          direction.y >= 0.0 ? max(direction.y, 0.00001) : min(direction.y, -0.00001),
+          direction.z >= 0.0 ? max(direction.z, 0.00001) : min(direction.z, -0.00001)
+        );
+        vec3 inverseDirection = 1.0 / safeDirection;
+        vec3 first = (uBoundsMin - origin) * inverseDirection;
+        vec3 second = (uBoundsMax - origin) * inverseDirection;
+        vec3 nearPoint = min(first, second);
+        vec3 farPoint = max(first, second);
+        return vec2(max(max(nearPoint.x, nearPoint.y), nearPoint.z), min(min(farPoint.x, farPoint.y), farPoint.z));
+      }
+
+      float normalStep() {
+        return max(uNormalEpsilon, uDomainExtent / float(uMaxSteps) * 0.35);
+      }
+
+      vec3 fieldNormal(vec3 point) {
+        float e = normalStep();
+        vec3 k1 = vec3(1.0, -1.0, -1.0);
+        vec3 k2 = vec3(-1.0, -1.0, 1.0);
+        vec3 k3 = vec3(-1.0, 1.0, -1.0);
+        vec3 k4 = vec3(1.0, 1.0, 1.0);
+        return normalize(
+          k1 * distanceField(point + e * k1)
+          + k2 * distanceField(point + e * k2)
+          + k3 * distanceField(point + e * k3)
+          + k4 * distanceField(point + e * k4)
+        );
+      }
+
+      void main() {
+        vec2 ndc = vScreenUv * 2.0 - 1.0;
+        vec3 localRayDirection = normalize(
+          vec3(
+            ndc.x * uAspect * tan(uFovRadians * 0.5),
+            ndc.y * tan(uFovRadians * 0.5),
+            -1.0
+          )
+        );
+        // OrbitControls updates matrixWorld from the user's pitch/yaw. Transform
+        // both the camera-space ray and origin into the same world space so the
+        // raymarcher preserves true volumetric depth at every orbit angle.
+        vec3 rayOrigin = (uCameraMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        vec3 rayDirection = normalize((uCameraMatrix * vec4(localRayDirection, 0.0)).xyz);
+        vec2 interval = rayBox(rayOrigin, rayDirection);
+        if (interval.x > interval.y || interval.y < 0.0) discard;
+
+        float distanceAlongRay = max(interval.x, 0.0);
+        float previousField = distanceField(rayOrigin + rayDirection * distanceAlongRay);
+        float baseStep = (uDomainExtent * 2.0) / float(uMaxSteps);
+        vec3 hitPoint = vec3(0.0);
+        bool hit = false;
+
+        for (int stepIndex = 0; stepIndex < MAX_RAY_STEPS; stepIndex += 1) {
+          if (stepIndex >= uMaxSteps || distanceAlongRay > interval.y) break;
+          vec3 point = rayOrigin + rayDirection * distanceAlongRay;
+          float field = distanceField(point);
+          float adaptiveStep = baseStep * 0.86;
+          if (uInteractive == 0) {
+            float gradientProbe = max(
+              abs(distanceField(point + vec3(baseStep, 0.0, 0.0)) - field),
+              max(
+                abs(distanceField(point + vec3(0.0, baseStep, 0.0)) - field),
+                abs(distanceField(point + vec3(0.0, 0.0, baseStep)) - field)
+              )
+            );
+            float safeStep = abs(field) / max(gradientProbe / max(baseStep, 0.0001), 0.0001) * 0.72;
+            adaptiveStep = clamp(max(baseStep * 0.28, safeStep), baseStep * 0.28, baseStep * 1.8);
+          }
+
+          if (abs(field) < baseStep * 0.34 || (field < 0.0) != (previousField < 0.0)) {
+            float left = max(interval.x, distanceAlongRay - adaptiveStep);
+            float right = distanceAlongRay;
+            float leftField = distanceField(rayOrigin + rayDirection * left);
+            for (int refinement = 0; refinement < 6; refinement += 1) {
+              float middle = (left + right) * 0.5;
+              float middleField = distanceField(rayOrigin + rayDirection * middle);
+              if ((middleField < 0.0) == (leftField < 0.0)) {
+                left = middle;
+                leftField = middleField;
+              } else {
+                right = middle;
+              }
+            }
+            hitPoint = rayOrigin + rayDirection * ((left + right) * 0.5);
+            hit = true;
+            break;
+          }
+          previousField = field;
+          distanceAlongRay += adaptiveStep;
+        }
+        if (!hit) discard;
+
+        vec3 normal = fieldNormal(hitPoint);
+        vec3 lightDirection = normalize(vec3(-0.45, 0.72, 0.85));
+        float diffuse = 0.32 + 0.68 * max(dot(normal, lightDirection), 0.0);
+        float rim = pow(1.0 - max(dot(normal, normalize(uCameraPosition - hitPoint)), 0.0), 2.0);
+        vec3 shaded = uColor * diffuse + vec3(0.34, 0.52, 0.16) * rim * 0.42;
+        gl_FragColor = vec4(shaded, 0.96);
+      }
+    `,
+  };
+}
+
+const raymarchShaderCache = new Map<string, RaymarchShader | null>();
+
+function getCachedImplicitRaymarchShader(sources: string[]) {
+  const cacheKey = sources.join('\u001f');
+  if (!raymarchShaderCache.has(cacheKey)) {
+    raymarchShaderCache.set(cacheKey, buildImplicitRaymarchShader(sources));
+  }
+  return raymarchShaderCache.get(cacheKey) ?? null;
+}
+
+type SurfaceBlendMode = 'overlay' | 'union' | 'intersection' | 'additive';
+type StudioTheme = 'light' | 'dark' | 'neon';
+type StudioSessionState = {
+  equation: string;
+  mode: StudioMode;
+  layers: EquationLayer[];
+  activeLayerId: number;
+  theme: StudioTheme;
+  playing: boolean;
+  isLooping: boolean;
+  progress: number;
+  autoRange: boolean;
+  manualXMin: number;
+  manualXMax: number;
+  manualTMin: number;
+  manualTMax: number;
+  speed: number;
+  duration: number;
+  lineWidth: number;
+  color: string;
+  showGrid: boolean;
+  gridDensity: number;
+  showAxes: boolean;
+  showTrail: boolean;
+  pointStyle: 'line' | 'particles';
+  originView: boolean;
+  showFps: boolean;
+  showWatermark: boolean;
+  watermark: string;
+  filename: string;
+  fps: number;
+  pageZoom: number;
+  graphZoom: number;
+  surfaceHeightScale: number;
+  surfaceBlendMode: SurfaceBlendMode;
+  history: HistoryItem[];
+};
+
+const SESSION_STORAGE_KEY = 'second-solution-studio-session-v1';
+const DEFAULT_EQUATION = 'sin(x + t) * exp(-0.08 * x^2)';
+
+function isStudioMode(value: unknown): value is StudioMode {
+  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'surface3d', 'polar', 'vector', 'piecewise', 'points'].includes(String(value));
+}
+
+function isStudioTheme(value: unknown): value is StudioTheme {
+  return value === 'light' || value === 'dark' || value === 'neon';
+}
+
+function finiteNumber(value: unknown, fallback: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function clampPageZoom(value: number) {
+  return Math.min(2, Math.max(0.9, Number(value.toFixed(2))));
+}
+
+function clampGraphZoom(value: number) {
+  return Math.min(GRAPH_ZOOM_MAX, Math.max(GRAPH_ZOOM_MIN, Number(value.toFixed(3))));
+}
+
+const layerColors = ['#c7f36b', '#ff8b6d', '#72d8ff', '#d6a8ff', '#ffd166'];
+const multiGraphColors = ['#A8FF00', '#00E5FF', '#FF007F'];
+
+function implicitFieldSource(equation: string, mode: StudioMode, variableProgram = '') {
+  const field = mode === 'surface3d'
+    ? `(z) - ((${parserNormalizeSurfaceExpression(equation)}) * uSurfaceHeightScale)`
+    : parserNormalizeImplicitField(
+      equation,
+      mode === 'implicit3d' ? 'implicit3d' : 'implicit',
+    );
+  return variableProgram ? `${variableProgram}; ${field}` : field;
+}
+
+function combineImplicitFields(entries: Array<{ expression: string; mode: StudioMode }>, blendMode: SurfaceBlendMode) {
+  const fields = entries.map((entry) => implicitFieldSource(entry.expression, entry.mode));
+  if (blendMode === 'union') {
+    // Keep the shader CSG visually continuous at overlaps.
+    // Unlike binary min(), this preserves a continuous gradient.
+    return fields.slice(1).reduce(
+      (current, field) => `(0.5 * ((${current}) + (${field}) - sqrt(((${current}) - (${field}))^2 + 0.12^2)))`,
+      fields[0] ?? '0',
+    );
+  }
+  if (blendMode === 'intersection') return `max(${fields.map((field) => `(${field})`).join(', ')})`;
+  return fields.map((field) => `(${field})`).join(' + ');
+}
+
+function smartPatternLabel(equation: string, mode: StudioMode) {
+  const input = normalizeForPreview(equation).toLowerCase();
+  if (mode === 'parametric' || mode === 'parametric3d') return /t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(input) ? 'Spiral' : 'Parametric pattern';
+  if (mode === 'polar') return 'Polar field';
+  if (mode === 'vector') return 'Direction field';
+  if (mode === 'piecewise') return 'Piecewise function';
+  if (/\b(?:sin|cos|tan)\b/.test(input)) return 'Wave';
+  if (/\^|\b(?:poly|x\s*\*)/.test(input)) return 'Polynomial';
+  return mode === 'implicit' || mode === 'implicit3d' || mode === 'surface3d' ? 'Contour' : mode === 'points' ? 'Point trail' : 'Function';
+}
+
+function makeHistoryPreview(equation: string, mode: StudioMode, color = '#c7f36b') {
+  const seed = equation.length + mode.length;
+  const points = Array.from({ length: 12 }, (_, index) => {
+    const x = 4 + index * 7.5;
+    const y = 16 + Math.sin(index * 0.8 + seed) * 8 + Math.cos(index * 0.31) * 3;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="54" viewBox="0 0 96 54"><rect width="96" height="54" fill="#242936"/><path d="M0 27H96M48 0V54" stroke="#5b6270" stroke-width=".5" opacity=".42"/><polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+function filenameFromEquation(equation: string) {
+  const normalized = normalizeForPreview(equation)
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-_]+/gi, '')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase();
+  return normalized ? `second-solution-${normalized.slice(0, 54)}` : 'second-solution-scene';
+}
+
+const presets: Array<{ equation: string; label: string; mode: StudioMode; symbol: string }> = [
+  { equation: 'sin(x) * cos(t)', label: 'Interference', mode: 'function', symbol: '∿' },
+  { equation: 'x^2 / 8 - 2', label: 'Parabola', mode: 'function', symbol: '⌒' },
+  { equation: 'cos(t), sin(2*t)', label: 'Klein wave', mode: 'parametric', symbol: '◌' },
+  { equation: 'x^2 + y^2 = 4', label: 'Circle field', mode: 'implicit', symbol: '◎' },
+  { equation: '4 * cos(3 * theta)', label: 'Polar bloom', mode: 'polar', symbol: '✳' },
+  { equation: '(-y, x)', label: 'Orbit field', mode: 'vector', symbol: '↗' },
+  { equation: 'x < 0 ? sin(x) : cos(x)', label: 'Split wave', mode: 'piecewise', symbol: '⌁' },
+  { equation: '(1, 1)\n(2, 4)\n(3, 9)\n(4, 16)', label: 'Point trail', mode: 'points', symbol: '⋮' },
+  { equation: '[2 * cos(t)^3, 2 * sin(t)^3, 1.4 * sin(3 * t)]', label: '3D Rose Surface', mode: 'parametric3d', symbol: '✿' },
+  { equation: 'x^2 + y^2 + z^2 + 2*x*y*z = 1', label: '3D Heart Solid', mode: 'implicit3d', symbol: '♥' },
+  { equation: 'z = x^2 - y^2', label: 'Hyperbolic Paraboloid', mode: 'implicit3d', symbol: '⌁' },
+  { equation: 'x^2 / 4 - y^2 / 9 - z^2 / 16 = 1', label: 'Hyperbola Surface', mode: 'implicit3d', symbol: '∞' },
+  { equation: '[16 * sin(t)^3, 13 * cos(t) - 5 * cos(2*t) - 2 * cos(3*t) - cos(4*t), v * sin(t)]', label: '3D Heart Curve', mode: 'parametric3d', symbol: '♥' },
+  { equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1', label: 'Quadric Surface', mode: 'implicit3d', symbol: '◉' },
+  { equation: 'z = x^2 - y^2', label: 'Saddle Points', mode: 'implicit3d', symbol: '⌁' },
+];
+
+const modeDetails: Record<StudioMode, { title: string; helper: string; placeholder: string }> = {
+  auto: { title: 'Auto / Smart', helper: 'detect from variables', placeholder: 'Try any equation, curve, field, or point set' },
+  function: { title: 'Function', helper: 'y = f(x, t)', placeholder: 'sin(x + t) / (1 + 0.2x²)' },
+  parametric: { title: 'Parametric', helper: 'x(t), y(t)', placeholder: 'cos(t), sin(t)' },
+  parametric3d: { title: '3D Parametric', helper: 'x(t), y(t), z(t)', placeholder: '[cos(t), sin(t), 0.4t]' },
+  implicit: { title: 'Implicit', helper: 'F(x, y) = 0', placeholder: 'x² + y² = 4' },
+  implicit3d: { title: '3D Implicit', helper: 'F(x, y, z) = 0', placeholder: 'x² + y² + z² = 4' },
+  surface3d: { title: '3D Surface', helper: 'z = f(x, y)', placeholder: 'z = sin(x) * cos(y)' },
+  polar: { title: 'Polar', helper: 'r = f(θ, t)', placeholder: '4 * cos(3 * theta)' },
+  vector: { title: 'Vector field', helper: '(u, v)', placeholder: '(-y, x)' },
+  piecewise: { title: 'Piecewise', helper: 'conditional f(x)', placeholder: 'x < 0 ? sin(x) : cos(x)' },
+  points: { title: 'Points', helper: '(x, y) pairs', placeholder: '(1, 2)\n(2, 4)\n(3, 9)' },
+};
+
+function AppIcon({ className = 'icon' }: { className?: string }) {
+  return <Aperture className={className} />;
+}
+
+function GraphCanvas({
+  equation,
+  mode,
+  range,
+  playing,
+  progress,
+  speed,
+  showGrid,
+  gridDensity,
+  showAxes,
+  showTrail,
+  lineWidth,
+  color,
+  showBackdrop,
+  pointStyle,
+  graphZoom,
+  surfaceHeightScale,
+  originView,
+  cameraFrame,
+  cameraSource,
+  animationExpected,
+  renderQuality,
+  onAutoRenderQualityFallback,
+  implicitFields,
+  onGraphZoomChange,
+  onRenderStart,
+  onRenderStatus,
+  onRuntimeWarning,
+}: {
+  equation: string;
+  mode: StudioMode;
+  range: GraphRange;
+  playing: boolean;
+  progress: number;
+  speed: number;
+  showGrid: boolean;
+  gridDensity: number;
+  showAxes: boolean;
+  showTrail: boolean;
+  lineWidth: number;
+  color: string;
+  showBackdrop: boolean;
+  pointStyle: 'line' | 'particles';
+  graphZoom: number;
+  surfaceHeightScale: number;
+  originView: boolean;
+  cameraFrame: { scale: number; centerX: number; centerY: number };
+  cameraSource: boolean;
+  animationExpected: boolean;
+  renderQuality: RenderQuality;
+  onAutoRenderQualityFallback: () => void;
+  implicitFields?: string[];
+  onGraphZoomChange: (value: number) => void;
+  onRenderStart: () => void;
+  onRenderStatus: (status: 'ready' | 'error', message?: string) => void;
+  onRuntimeWarning: (message: string) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const webglCanvasRef = useRef<HTMLCanvasElement>(null);
+  const threeSceneRef = useRef<THREE.Scene | null>(null);
+  const threeCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const threeControlsRef = useRef<OrbitControls | null>(null);
+  const implicitContourCacheRef = useRef(new Map<string, ContourPolyline[]>());
+  const runtimeWarningRef = useRef(false);
+  const renderHealthFramesRef = useRef(0);
+  const pixelVerificationFramesRef = useRef(0);
+  const healthReportedRef = useRef(false);
+  const frameCacheRef = useRef<CachedFrame | null>(null);
+  const threeSurfaceGroupRef = useRef<THREE.Group | null>(null);
+  const threeSurfaceGeometryRef = useRef<THREE.BufferGeometry | null>(null);
+  const threeSurfaceReadyRef = useRef(false);
+  const surfaceColorRef = useRef(color);
+  const graphZoomRef = useRef(graphZoom);
+  const raymarchUniformsRef = useRef<Record<string, THREE.IUniform>>({});
+  const raymarchInteractionRef = useRef(false);
+  const raymarchSettleTimerRef = useRef<number | null>(null);
+  const raymarchFullStepsRef = useRef(512);
+  const raymarchUpdateRef = useRef<(camera: THREE.PerspectiveCamera) => void>(() => undefined);
+  const webglResizeRef = useRef<() => void>(() => undefined);
+  const renderQualityRef = useRef(renderQuality);
+  const lowPerformanceSinceRef = useRef<number | null>(null);
+  const autoFallbackRequestedRef = useRef(false);
+  const drawRef = useRef<() => void>(() => undefined);
+  const visibilityTargetRef = useRef<HTMLDivElement>(null);
+  const [isVisible, setIsVisible] = useState(true);
+  const [hoverPoint, setHoverPoint] = useState<{ point: THREE.Vector3; x: number; y: number } | null>(null);
+  const evaluator = useMemo(() => buildGraphEvaluator(equation, mode), [equation, mode]);
+  const cameraWorldExtent = Math.max(
+    1,
+    range.worldExtent ?? rangeWorldExtent(range),
+    mode === 'surface3d'
+      ? (range.worldExtent ?? rangeWorldExtent(range)) * Math.max(1, Math.abs(surfaceHeightScale))
+      : 0,
+  );
+  const implicitSources = useMemo(
+    () => implicitFields?.length
+      ? implicitFields
+      : [implicitFieldSource(equation, mode)],
+    [equation, implicitFields, mode],
+  );
+  const implicitSourceKey = implicitSources.join('\u001f');
+  const [implicitRaymarchShader, setImplicitRaymarchShader] = useState<RaymarchShader | null>(null);
+  useEffect(() => {
+    const isGpuRaymarchedMode = mode === 'implicit3d' || mode === 'surface3d';
+    if (!isGpuRaymarchedMode) {
+      setImplicitRaymarchShader(null);
+      return;
+    }
+    let cancelled = false;
+    const compileTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      const shader = getCachedImplicitRaymarchShader(implicitSources);
+      setImplicitRaymarchShader(shader);
+      if (!shader) {
+        onRuntimeWarning('The equation could not be compiled into a GPU fragment shader.');
+        onRenderStatus('error', 'This 3D equation uses syntax that the GPU shader compiler cannot translate.');
+      }
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(compileTimer);
+    };
+  }, [implicitSourceKey, implicitSources, mode, onRenderStatus, onRuntimeWarning]);
+  const setRaymarchInteraction = useCallback((active: boolean) => {
+    raymarchInteractionRef.current = active;
+    if (raymarchSettleTimerRef.current !== null) {
+      window.clearTimeout(raymarchSettleTimerRef.current);
+      raymarchSettleTimerRef.current = null;
+    }
+    const uniforms = raymarchUniformsRef.current;
+    if (uniforms.uMaxSteps) {
+      uniforms.uInteractive.value = active ? 1 : 0;
+      uniforms.uMaxSteps.value = raymarchFullStepsRef.current;
+    }
+    if (!active) return;
+    raymarchSettleTimerRef.current = window.setTimeout(() => {
+      raymarchSettleTimerRef.current = null;
+      raymarchInteractionRef.current = false;
+      const activeUniforms = raymarchUniformsRef.current;
+      if (activeUniforms.uMaxSteps) {
+        activeUniforms.uInteractive.value = 0;
+        activeUniforms.uMaxSteps.value = raymarchFullStepsRef.current;
+      }
+    }, RAYMARCH_INTERACTION_SETTLE_MS);
+  }, []);
+
+  useEffect(() => {
+    renderQualityRef.current = renderQuality;
+    lowPerformanceSinceRef.current = null;
+    autoFallbackRequestedRef.current = false;
+    webglResizeRef.current();
+    const uniforms = raymarchUniformsRef.current;
+    const maxSteps = renderQualitySteps[renderQuality];
+    raymarchFullStepsRef.current = maxSteps;
+    if (uniforms.uMaxSteps) uniforms.uMaxSteps.value = maxSteps;
+  }, [renderQuality]);
+  const viewportRangeRef = useRef(range);
+  const [viewportRange, setViewportRange] = useState(range);
+
+  useEffect(() => {
+    surfaceColorRef.current = color;
+  }, [color]);
+
+  useEffect(() => {
+    if ((mode !== 'implicit3d' && mode !== 'surface3d') || !implicitRaymarchShader) return;
+    setRaymarchInteraction(true);
+    const settleTimer = window.setTimeout(() => setRaymarchInteraction(false), RAYMARCH_INTERACTION_SETTLE_MS + 40);
+    return () => window.clearTimeout(settleTimer);
+  }, [equation, implicitRaymarchShader, mode, setRaymarchInteraction]);
+
+  useEffect(() => {
+    graphZoomRef.current = graphZoom;
+    const camera = threeCameraRef.current;
+    const controls = threeControlsRef.current;
+    if (!camera || !controls) return;
+    const direction = camera.position.clone().sub(controls.target);
+    if (direction.lengthSq() < 0.0001) direction.set(1, 1, 1);
+    direction.normalize();
+    const distance = THREE.MathUtils.clamp(
+      Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / graphZoom,
+      Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MAX,
+      Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MIN,
+    );
+    camera.position.copy(controls.target).add(direction.multiplyScalar(distance));
+    controls.update();
+  }, [cameraWorldExtent, graphZoom]);
+
+  useEffect(() => {
+    const target = visibilityTargetRef.current;
+    if (!target || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setIsVisible(Boolean(entry?.isIntersecting)),
+      { rootMargin: '0px', threshold: 0.01 },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, []);
+
+  const createFrameBuffer = useCallback((requestedProgress: number): CachedFrame => {
+    const frameProgress = Math.max(0, Math.min(1, requestedProgress));
+    const phase = phaseForProgress(frameProgress, speed);
+    const line: GraphPoint[] = [];
+    const trailOne: GraphPoint[] = [];
+    const trailTwo: GraphPoint[] = [];
+    const points = evaluator?.kind === 'points'
+      ? evaluatePointSet(evaluator.points, phase, speed)
+      : [];
+    const vector: CachedVectorArrow[] = [];
+    const contour: WorldContourPolyline[] = [];
+
+    const evaluateExpression = (expression: CompiledExpression, scope: Record<string, number>) => {
+      try {
+        const value = Number(expression.evaluate(scope));
+        return Number.isFinite(value) ? value : Number.NaN;
+      } catch {
+        return Number.NaN;
+      }
+    };
+    const sampleLine = (currentPhase: number) => {
+      if (!evaluator || evaluator.kind === 'points' || evaluator.kind === 'vector' || evaluator.kind === 'implicit' || evaluator.kind === 'surface') return [];
+      const sampleCount = evaluator.kind === 'function' ? 1000 : evaluator.kind === 'polar' ? 900 : 650;
+      const sampled: GraphPoint[] = [];
+      for (let index = 0; index <= sampleCount; index += 1) {
+        const amount = index / sampleCount;
+        let x = Number.NaN;
+        let y = Number.NaN;
+        if (evaluator.kind === 'function') {
+          x = range.xMin + amount * (range.xMax - range.xMin);
+          y = evaluateExpression(evaluator.expression, { x, t: currentPhase, a: currentPhase, b: speed, z: 0 });
+        } else if (evaluator.kind === 'parametric') {
+          const parameter = range.tMin + amount * (range.tMax - range.tMin);
+          x = evaluateExpression(evaluator.x, { t: parameter, a: currentPhase, b: speed, z: 0 });
+          y = evaluateExpression(evaluator.y, { t: parameter, a: currentPhase, b: speed, z: 0 });
+        } else if (evaluator.kind === 'polar') {
+          const theta = range.tMin + amount * (range.tMax - range.tMin);
+          const radius = evaluateExpression(evaluator.expression, { theta, t: currentPhase, a: currentPhase, b: speed, z: 0 });
+          x = radius * Math.cos(theta);
+          y = radius * Math.sin(theta);
+        }
+        if (Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) < 100 && Math.abs(y) < 100) {
+          sampled.push({ x, y });
+        } else {
+          sampled.push({ x: Number.NaN, y: Number.NaN });
+        }
+      }
+      return sampled;
+    };
+
+    if (evaluator?.kind === 'function' || evaluator?.kind === 'parametric' || evaluator?.kind === 'polar') {
+      line.push(...sampleLine(phase));
+      trailOne.push(...sampleLine(phase - 0.38));
+      trailTwo.push(...sampleLine(phase - 0.18));
+    }
+
+    if (evaluator?.kind === 'vector') {
+      const density = 8;
+      for (let row = -density; row <= density; row += 1) {
+        for (let column = -density; column <= density; column += 1) {
+          const xMin = range.xMin;
+          const xMax = range.xMax;
+          const yMin = range.yMin ?? range.xMin;
+          const yMax = range.yMax ?? range.xMax;
+          const x = xMin + ((column + density) / (density * 2)) * (xMax - xMin);
+          const y = yMin + ((row + density) / (density * 2)) * (yMax - yMin);
+          const vx = evaluateExpression(evaluator.x, { x, y, t: phase, a: phase, b: speed, z: 0 });
+          const vy = evaluateExpression(evaluator.y, { x, y, t: phase, a: phase, b: speed, z: 0 });
+          const magnitude = Math.hypot(vx, vy);
+          if (!Number.isFinite(magnitude) || magnitude < 1e-6) continue;
+          const length = Math.min(0.65, Math.max(0.18, magnitude * 0.16));
+          vector.push({ x, y, endX: x + (vx / magnitude) * length, endY: y + (vy / magnitude) * length });
+        }
+      }
+    }
+
+    if (evaluator?.kind === 'implicit') {
+      const resolution = IMPLICIT_GRID_RESOLUTION;
+      const values = new Float32Array((resolution + 1) * (resolution + 1));
+      const xMin = range.xMin;
+      const xMax = range.xMax;
+      const yMin = range.yMin ?? range.xMin;
+      const yMax = range.yMax ?? range.xMax;
+      const stepX = (xMax - xMin) / resolution;
+      const stepY = (yMax - yMin) / resolution;
+      for (let row = 0; row <= resolution; row += 1) {
+        const y = yMax - row * stepY;
+        const rowOffset = row * (resolution + 1);
+        for (let column = 0; column <= resolution; column += 1) {
+          const x = xMin + column * stepX;
+          values[rowOffset + column] = evaluateExpression(evaluator.expression, {
+            x,
+            y,
+            t: phase,
+            a: phase,
+            b: speed,
+            z: 0,
+          });
+        }
+      }
+
+      const segments: ContourSegment[] = [];
+      const interpolate = (
+        first: ScreenPoint,
+        second: ScreenPoint,
+        firstValue: number,
+        secondValue: number,
+      ): ScreenPoint => {
+        const denominator = firstValue - secondValue;
+        const amount = Math.abs(denominator) < 1e-12
+          ? 0.5
+          : Math.max(0, Math.min(1, firstValue / denominator));
+        return [
+          first[0] + (second[0] - first[0]) * amount,
+          first[1] + (second[1] - first[1]) * amount,
+        ];
+      };
+      for (let row = 0; row < resolution; row += 1) {
+        const topY = yMax - row * stepY;
+        const bottomY = topY - stepY;
+        const rowOffset = row * (resolution + 1);
+        const nextRowOffset = (row + 1) * (resolution + 1);
+        for (let column = 0; column < resolution; column += 1) {
+          const leftX = xMin + column * stepX;
+          const rightX = leftX + stepX;
+          const topLeftValue = values[rowOffset + column];
+          const topRightValue = values[rowOffset + column + 1];
+          const bottomRightValue = values[nextRowOffset + column + 1];
+          const bottomLeftValue = values[nextRowOffset + column];
+          if (![topLeftValue, topRightValue, bottomRightValue, bottomLeftValue].every(Number.isFinite)) continue;
+
+          const topLeft: ScreenPoint = [leftX, topY];
+          const topRight: ScreenPoint = [rightX, topY];
+          const bottomRight: ScreenPoint = [rightX, bottomY];
+          const bottomLeft: ScreenPoint = [leftX, bottomY];
+          const top = interpolate(topLeft, topRight, topLeftValue, topRightValue);
+          const right = interpolate(topRight, bottomRight, topRightValue, bottomRightValue);
+          const bottom = interpolate(bottomLeft, bottomRight, bottomLeftValue, bottomRightValue);
+          const left = interpolate(topLeft, bottomLeft, topLeftValue, bottomLeftValue);
+          const mask =
+            (topLeftValue < 0 ? 1 : 0)
+            | (topRightValue < 0 ? 2 : 0)
+            | (bottomRightValue < 0 ? 4 : 0)
+            | (bottomLeftValue < 0 ? 8 : 0);
+          const centerValue = (topLeftValue + topRightValue + bottomRightValue + bottomLeftValue) / 4;
+          const addSegment = (start: ScreenPoint, end: ScreenPoint) => segments.push({ start, end });
+
+          switch (mask) {
+            case 1: addSegment(left, top); break;
+            case 2: addSegment(top, right); break;
+            case 3: addSegment(left, right); break;
+            case 4: addSegment(right, bottom); break;
+            case 5:
+              if (centerValue < 0) {
+                addSegment(top, right);
+                addSegment(bottom, left);
+              } else {
+                addSegment(left, top);
+                addSegment(right, bottom);
+              }
+              break;
+            case 6: addSegment(top, bottom); break;
+            case 7: addSegment(left, bottom); break;
+            case 8: addSegment(bottom, left); break;
+            case 9: addSegment(top, bottom); break;
+            case 10:
+              if (centerValue < 0) {
+                addSegment(left, top);
+                addSegment(right, bottom);
+              } else {
+                addSegment(top, right);
+                addSegment(bottom, left);
+              }
+              break;
+            case 11: addSegment(right, bottom); break;
+            case 12: addSegment(left, right); break;
+            case 13: addSegment(top, right); break;
+            case 14: addSegment(left, top); break;
+            default: break;
+          }
+        }
+      }
+      contour.push(...stitchContourSegments(segments));
+    }
+
+    return { progress: frameProgress, phase, line, trailOne, trailTwo, points, vector, contour };
+  }, [evaluator, range, speed]);
+
+  useEffect(() => {
+    if (mode === 'implicit3d' || mode === 'surface3d') return;
+    frameCacheRef.current = null;
+    const cacheHandle = window.setTimeout(() => {
+      frameCacheRef.current = createFrameBuffer(0);
+      drawRef.current();
+    }, 0);
+    return () => {
+      window.clearTimeout(cacheHandle);
+    };
+  }, [createFrameBuffer, equation, mode, range]);
+
+  useEffect(() => {
+    const startRange = viewportRangeRef.current;
+    const startedAt = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      const amount = easeInOutCubic((now - startedAt) / 320);
+      const next = {
+        xMin: startRange.xMin + (range.xMin - startRange.xMin) * amount,
+        xMax: startRange.xMax + (range.xMax - startRange.xMax) * amount,
+        tMin: startRange.tMin + (range.tMin - startRange.tMin) * amount,
+        tMax: startRange.tMax + (range.tMax - startRange.tMax) * amount,
+      };
+      viewportRangeRef.current = next;
+      setViewportRange(next);
+      if (amount < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [range]);
+
+  useEffect(() => {
+    const canvas = webglCanvasRef.current;
+    if (!canvas) return;
+    const isThreeDimensional = mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d';
+    if (!isThreeDimensional) return;
+    let context: WebGL2RenderingContext | WebGLRenderingContext | null = null;
+    try {
+      context = canvas.getContext('webgl2', {
+        alpha: true,
+        antialias: true,
+        powerPreference: 'high-performance',
+        failIfMajorPerformanceCaveat: true,
+        preserveDrawingBuffer: true,
+      }) ?? canvas.getContext('webgl', {
+        alpha: true,
+        antialias: true,
+        powerPreference: 'high-performance',
+        failIfMajorPerformanceCaveat: true,
+        preserveDrawingBuffer: true,
+      });
+    } catch {
+      context = null;
+    }
+    if (!context) {
+      onRuntimeWarning('Hardware-accelerated WebGL is required for 3D rendering; the CPU canvas path is disabled.');
+      onRenderStatus('error', 'Hardware-accelerated WebGL is required for 3D Surface and 3D Implicit modes.');
+      return;
+    }
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        context,
+        alpha: true,
+        antialias: true,
+        preserveDrawingBuffer: true,
+        powerPreference: 'high-performance',
+      });
+    } catch {
+      onRuntimeWarning('Three.js could not initialize the hardware-accelerated WebGL renderer; the CPU canvas path is disabled.');
+      onRenderStatus('error', 'The hardware-accelerated WebGL renderer could not be initialized.');
+      return;
+    }
+    const getQualityPixelRatio = () => {
+      if (renderQualityRef.current === 'low') return 0.75;
+      if (renderQualityRef.current === 'medium') return 1;
+      return Math.min(window.devicePixelRatio || 1, 2);
+    };
+    renderer.setPixelRatio(getQualityPixelRatio());
+    const scene = new THREE.Scene();
+    threeSceneRef.current = scene;
+    const camera = new THREE.PerspectiveCamera(44, 1, 0.1, Math.max(400, cameraWorldExtent * 8));
+    // Recreate a clear isometric view whenever a 3D mode is entered. Keeping
+    // this in the WebGL setup also leaves 2D modes and user orbit state alone.
+    camera.position.set(8, 8, 8).setLength(
+      THREE.MathUtils.clamp(
+        Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / graphZoomRef.current,
+        Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MAX,
+        Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MIN,
+      ),
+    );
+    camera.lookAt(0, 0, 0);
+    threeCameraRef.current = camera;
+    const controls = new OrbitControls(camera, canvas);
+    threeControlsRef.current = controls;
+    canvas.style.touchAction = 'none';
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.enableRotate = true;
+    controls.rotateSpeed = 0.82;
+    // OrbitControls' spherical range now explicitly spans the complete
+    // sphere: top, bottom, front, back, and unrestricted azimuth.
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI;
+    controls.minAzimuthAngle = -Infinity;
+    controls.maxAzimuthAngle = Infinity;
+    controls.enablePan = true;
+    controls.screenSpacePanning = false;
+    controls.minDistance = Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MAX;
+    controls.maxDistance = Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6) / GRAPH_ZOOM_MIN;
+    controls.target.set(0, 0, 0);
+    controls.update();
+
+    const starPositions = new Float32Array(240 * 3);
+    for (let index = 0; index < starPositions.length; index += 3) {
+      starPositions[index] = (Math.random() - 0.5) * 12;
+      starPositions[index + 1] = (Math.random() - 0.5) * 8;
+      starPositions[index + 2] = (Math.random() - 0.5) * 4 - 1;
+    }
+    const starsGeometry = new THREE.BufferGeometry();
+    starsGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    const stars = new THREE.Points(
+      starsGeometry,
+      new THREE.PointsMaterial({
+        color: new THREE.Color('#c7f36b'),
+        size: 0.025,
+        transparent: true,
+        opacity: 0.55,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    scene.add(stars);
+    const surfaceGroup = new THREE.Group();
+    scene.add(surfaceGroup);
+    threeSurfaceGroupRef.current = surfaceGroup;
+
+    const resize = () => {
+      const cssWidth = Math.max(1, canvas.clientWidth || canvas.getBoundingClientRect().width);
+      const cssHeight = Math.max(1, canvas.clientHeight || canvas.getBoundingClientRect().height);
+      const qualityPixelRatio = getQualityPixelRatio();
+      const pixelWidth = Math.max(1, Math.floor(cssWidth * qualityPixelRatio));
+      const pixelHeight = Math.max(1, Math.floor(cssHeight * qualityPixelRatio));
+      renderer.setPixelRatio(qualityPixelRatio);
+      renderer.setSize(cssWidth, cssHeight, false);
+      // Keep the backing buffer explicit as well as letting Three.js update it.
+      // This prevents CSS-size drawing buffers from causing blurry Retina output.
+      if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+      if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+      camera.aspect = cssWidth / cssHeight;
+      camera.updateProjectionMatrix();
+    };
+    webglResizeRef.current = resize;
+    const observer = new ResizeObserver(resize);
+    observer.observe(canvas);
+    window.addEventListener('resize', resize, { passive: true });
+    resize();
+    const handleControlStart = () => {
+      isOrbiting = true;
+      setRaymarchInteraction(true);
+    };
+    const handleControlEnd = () => {
+      isOrbiting = false;
+      setRaymarchInteraction(false);
+    };
+    let lastReportedZoom = graphZoomRef.current;
+    const handleControlChange = () => {
+      const distance = camera.position.distanceTo(controls.target);
+      const cameraBaseDistance = Math.max(GRAPH_BASE_CAMERA_DISTANCE, cameraWorldExtent * 2.6);
+      const nextZoom = clampGraphZoom(cameraBaseDistance / Math.max(0.0001, distance));
+      if (Math.abs(nextZoom - lastReportedZoom) < 0.001) return;
+      lastReportedZoom = nextZoom;
+      onGraphZoomChange(nextZoom);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'q' && event.key !== 'e') return;
+      surfaceGroup.rotation.z += event.key === 'q' ? -0.08 : 0.08;
+      event.preventDefault();
+    };
+    canvas.style.pointerEvents = isThreeDimensional ? 'auto' : 'none';
+    canvas.tabIndex = isThreeDimensional ? 0 : -1;
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Line.threshold = 0.14;
+    const pointer = new THREE.Vector2();
+    let isOrbiting = false;
+    let pointerFrame = 0;
+    let pendingPointer: { clientX: number; clientY: number } | null = null;
+    const hoverIndicator = new THREE.Mesh(
+      new THREE.SphereGeometry(0.075, 12, 8),
+      new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.95 }),
+    );
+    hoverIndicator.visible = false;
+    scene.add(hoverIndicator);
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!isThreeDimensional || !threeSurfaceGroupRef.current) return;
+      if (isOrbiting) return;
+      pendingPointer = { clientX: event.clientX, clientY: event.clientY };
+      if (pointerFrame) return;
+      pointerFrame = requestAnimationFrame(() => {
+        pointerFrame = 0;
+        const nextPointer = pendingPointer;
+        pendingPointer = null;
+        if (!nextPointer || isOrbiting || !threeSurfaceGroupRef.current) return;
+        const bounds = canvas.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.height <= 0) return;
+        pointer.x = ((nextPointer.clientX - bounds.left) / bounds.width) * 2 - 1;
+        pointer.y = -((nextPointer.clientY - bounds.top) / bounds.height) * 2 + 1;
+        raycaster.setFromCamera(pointer, camera);
+        const intersections = raycaster.intersectObjects(threeSurfaceGroupRef.current.children, true);
+        const hit = intersections.find((intersection: any) => intersection.object !== hoverIndicator);
+        if (!hit) {
+          hoverIndicator.visible = false;
+          setHoverPoint(null);
+          return;
+        }
+        hoverIndicator.position.copy(hit.point);
+        hoverIndicator.visible = true;
+        setHoverPoint({ point: hit.point.clone(), x: nextPointer.clientX - bounds.left, y: nextPointer.clientY - bounds.top });
+      });
+    };
+    const handlePointerLeave = () => {
+      hoverIndicator.visible = false;
+      setHoverPoint(null);
+    };
+    const handlePassivePointerStart = () => {
+      if (!isThreeDimensional) return;
+      setRaymarchInteraction(true);
+    };
+    const handlePassivePointerEnd = () => {
+      if (!isThreeDimensional) return;
+    };
+    controls.addEventListener('start', handleControlStart);
+    controls.addEventListener('end', handleControlEnd);
+    controls.addEventListener('change', handleControlChange);
+    canvas.addEventListener('keydown', handleKeyDown);
+    canvas.addEventListener('pointerdown', handlePassivePointerStart, { passive: true });
+    canvas.addEventListener('pointermove', handlePointerMove, { passive: true });
+    canvas.addEventListener('pointerup', handlePassivePointerEnd, { passive: true });
+    canvas.addEventListener('pointercancel', handlePassivePointerEnd, { passive: true });
+    canvas.addEventListener('pointerleave', handlePointerLeave, { passive: true });
+    let frame = 0;
+    let fpsWindowStartedAt = performance.now();
+    let fpsWindowFrames = 0;
+    const render = (now: number) => {
+      stars.rotation.z = now * 0.000012;
+      stars.rotation.y = now * 0.000018;
+      controls.update();
+      raymarchUpdateRef.current(camera);
+      renderer.render(scene, camera);
+      fpsWindowFrames += 1;
+      if (now - fpsWindowStartedAt >= 1000) {
+        const measuredFps = fpsWindowFrames * 1000 / Math.max(1, now - fpsWindowStartedAt);
+        if (isThreeDimensional && renderQualityRef.current !== 'low' && measuredFps < 20) {
+          if (lowPerformanceSinceRef.current === null) lowPerformanceSinceRef.current = now;
+          if (
+            now - lowPerformanceSinceRef.current >= 5000
+            && !autoFallbackRequestedRef.current
+          ) {
+            autoFallbackRequestedRef.current = true;
+            onAutoRenderQualityFallback();
+          }
+        } else {
+          lowPerformanceSinceRef.current = null;
+        }
+        fpsWindowStartedAt = now;
+        fpsWindowFrames = 0;
+      }
+      frame = requestAnimationFrame(render);
+    };
+    frame = requestAnimationFrame(render);
+    return () => {
+      cancelAnimationFrame(frame);
+      controls.removeEventListener('start', handleControlStart);
+      controls.removeEventListener('end', handleControlEnd);
+      controls.removeEventListener('change', handleControlChange);
+      canvas.removeEventListener('keydown', handleKeyDown);
+      canvas.removeEventListener('pointerdown', handlePassivePointerStart);
+      canvas.removeEventListener('pointermove', handlePointerMove);
+      canvas.removeEventListener('pointerup', handlePassivePointerEnd);
+      canvas.removeEventListener('pointercancel', handlePassivePointerEnd);
+      canvas.removeEventListener('pointerleave', handlePointerLeave);
+      window.removeEventListener('resize', resize);
+      if (pointerFrame) cancelAnimationFrame(pointerFrame);
+      controls.dispose();
+      observer.disconnect();
+      starsGeometry.dispose();
+      stars.material.dispose();
+      scene.remove(hoverIndicator);
+      hoverIndicator.geometry.dispose();
+      hoverIndicator.material.dispose();
+      surfaceGroup.traverse((object: any) => {
+        const mesh = object as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (Array.isArray(mesh.material)) mesh.material.forEach((material: any) => material.dispose());
+        else if (mesh.material) mesh.material.dispose();
+      });
+      renderer.dispose();
+      threeSceneRef.current = null;
+      threeCameraRef.current = null;
+      threeControlsRef.current = null;
+      threeSurfaceGroupRef.current = null;
+      webglResizeRef.current = () => undefined;
+      threeSurfaceGeometryRef.current?.dispose();
+      threeSurfaceGeometryRef.current = null;
+      threeSurfaceReadyRef.current = false;
+      raymarchUniformsRef.current = {};
+      raymarchUpdateRef.current = () => undefined;
+      if (raymarchSettleTimerRef.current !== null) {
+        window.clearTimeout(raymarchSettleTimerRef.current);
+        raymarchSettleTimerRef.current = null;
+      }
+      setHoverPoint(null);
+    };
+  }, [cameraSource, cameraWorldExtent, isVisible, mode, onAutoRenderQualityFallback, setRaymarchInteraction]);
+
+  useEffect(() => {
+    const scene = threeSceneRef.current;
+    const camera = threeCameraRef.current;
+    if (!isVisible || (mode !== 'implicit3d' && mode !== 'surface3d') || !implicitRaymarchShader || !scene || !camera) return;
+
+    const baseExtent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    const extent = mode === 'surface3d'
+      ? Math.max(baseExtent, baseExtent * Math.max(1, Math.abs(surfaceHeightScale)))
+      : baseExtent;
+    const uniforms: Record<string, THREE.IUniform> = {
+      uCameraPosition: { value: new THREE.Vector3() },
+      uCameraMatrix: { value: new THREE.Matrix4() },
+      uCameraRight: { value: new THREE.Vector3(1, 0, 0) },
+      uCameraUp: { value: new THREE.Vector3(0, 1, 0) },
+      uCameraForward: { value: new THREE.Vector3(0, 0, -1) },
+      uBoundsMin: { value: new THREE.Vector3(-extent, -extent, -extent) },
+      uBoundsMax: { value: new THREE.Vector3(extent, extent, extent) },
+      uColor: { value: new THREE.Color(surfaceColorRef.current) },
+      uAspect: { value: 1 },
+      uFovRadians: { value: THREE.MathUtils.degToRad(camera.fov) },
+      uDomainExtent: { value: extent },
+      uSurfaceHeightScale: { value: Math.max(0.25, Math.min(4, surfaceHeightScale)) },
+      uPhase: { value: phaseForProgress(progress, speed) },
+      uSpeed: { value: speed },
+      uSmoothness: { value: Math.max(0.045, Math.min(0.32, extent / 42)) },
+      uNormalEpsilon: { value: implicitRaymarchShader.normalEpsilon },
+      uMaxSteps: { value: renderQualitySteps[renderQuality] },
+      uInteractive: { value: raymarchInteractionRef.current ? 1 : 0 },
+    };
+    raymarchFullStepsRef.current = renderQualitySteps[renderQuality];
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: implicitRaymarchShader.vertexShader,
+      fragmentShader: implicitRaymarchShader.fragmentShader,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const geometry = new THREE.PlaneGeometry(2, 2);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 1;
+    scene.add(mesh);
+    raymarchUniformsRef.current = uniforms;
+    const cachedRight = new THREE.Vector3();
+    const cachedUp = new THREE.Vector3();
+    const cachedForward = new THREE.Vector3();
+    raymarchUpdateRef.current = (activeCamera) => {
+      activeCamera.updateMatrixWorld();
+      cachedRight.setFromMatrixColumn(activeCamera.matrixWorld, 0).normalize();
+      cachedUp.setFromMatrixColumn(activeCamera.matrixWorld, 1).normalize();
+      activeCamera.getWorldDirection(cachedForward).normalize();
+      uniforms.uCameraPosition.value.copy(activeCamera.position);
+      uniforms.uCameraMatrix.value.copy(activeCamera.matrixWorld);
+      uniforms.uCameraRight.value.copy(cachedRight);
+      uniforms.uCameraUp.value.copy(cachedUp);
+      uniforms.uCameraForward.value.copy(cachedForward);
+      uniforms.uAspect.value = activeCamera.aspect;
+      uniforms.uFovRadians.value = THREE.MathUtils.degToRad(activeCamera.fov);
+    };
+    raymarchUpdateRef.current(camera);
+    threeSurfaceReadyRef.current = true;
+    onRenderStart();
+    onRenderStatus('ready');
+
+    return () => {
+      scene.remove(mesh);
+      geometry.dispose();
+      material.dispose();
+      if (raymarchUniformsRef.current === uniforms) raymarchUniformsRef.current = {};
+      raymarchUpdateRef.current = () => undefined;
+      threeSurfaceReadyRef.current = false;
+    };
+  }, [cameraWorldExtent, implicitRaymarchShader, isVisible, mode, onRenderStart, onRenderStatus]);
+
+  useEffect(() => {
+    const uniforms = raymarchUniformsRef.current;
+    if (!uniforms.uPhase) return;
+    const baseExtent = Math.max(0.05, range.worldExtent ?? rangeWorldExtent(range));
+    const extent = mode === 'surface3d'
+      ? Math.max(baseExtent, baseExtent * Math.max(1, Math.abs(surfaceHeightScale)))
+      : baseExtent;
+    uniforms.uPhase.value = phaseForProgress(progress, speed);
+    uniforms.uSpeed.value = speed;
+    uniforms.uColor.value.set(surfaceColorRef.current);
+    uniforms.uBoundsMin.value.set(-extent, -extent, -extent);
+    uniforms.uBoundsMax.value.set(extent, extent, extent);
+    uniforms.uDomainExtent.value = extent;
+    if (uniforms.uSurfaceHeightScale) {
+      uniforms.uSurfaceHeightScale.value = Math.max(0.25, Math.min(4, surfaceHeightScale));
+    }
+    uniforms.uSmoothness.value = Math.max(0.045, Math.min(0.32, extent / 42));
+  }, [progress, range, speed, surfaceHeightScale]);
+
+  useEffect(() => {
+    const group = threeSurfaceGroupRef.current;
+    if (!isVisible || mode !== 'parametric3d' || evaluator?.kind !== 'parametric' || !evaluator.z || !group) return;
+
+    const geometry = new THREE.BufferGeometry();
+    const positions: number[] = [];
+    const sampleCount = 720;
+    const phase = phaseForProgress(progress, speed);
+    for (let index = 0; index <= sampleCount; index += 1) {
+      const amount = index / sampleCount;
+      const parameter = range.tMin + amount * (range.tMax - range.tMin);
+      const scope = {
+        x: 0,
+        y: 0,
+        z: 0,
+        t: parameter,
+        u: parameter,
+        theta: parameter,
+        v: phase,
+        r: phase,
+        phi: phase,
+        a: phase,
+        b: speed,
+      };
+      try {
+        const x = Number(evaluator.x.evaluate(scope));
+        const y = Number(evaluator.y.evaluate(scope));
+        const z = Number(evaluator.z.evaluate(scope));
+        if ([x, y, z].every((value) => Number.isFinite(value) && Math.abs(value) < 100)) {
+          positions.push(x, y, z);
+        }
+      } catch {
+        // Invalid samples are omitted; the projected fallback reports health.
+      }
+    }
+    if (positions.length < 6) {
+      geometry.dispose();
+      return;
+    }
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeBoundingSphere();
+    const line = new THREE.Line(
+      geometry,
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.94 }),
+    );
+    group.add(line);
+    threeSurfaceGeometryRef.current = geometry;
+    threeSurfaceReadyRef.current = true;
+    onRenderStart();
+    onRenderStatus('ready');
+
+    return () => {
+      group.remove(line);
+      geometry.dispose();
+      line.material.dispose();
+      if (threeSurfaceGeometryRef.current === geometry) threeSurfaceGeometryRef.current = null;
+      threeSurfaceReadyRef.current = false;
+    };
+  }, [color, evaluator, isVisible, mode, onRenderStart, onRenderStatus, progress, range, speed]);
+
+  useEffect(() => {
+    const scene = threeSceneRef.current;
+    if (!isVisible || !scene || evaluator?.kind !== 'points') return;
+    const group = new THREE.Group();
+    const visibleCount = Math.min(evaluator.points.length, Math.max(1, Math.ceil(evaluator.points.length * easeInOutCubic(progress))));
+    const pointCoordinates = evaluatePointSet(evaluator.points, phaseForProgress(progress, speed), speed);
+    const visiblePoints = pointCoordinates.slice(0, Math.min(pointCoordinates.length, visibleCount));
+    const positions = new Float32Array(visiblePoints.flatMap((point) => [point.x, point.y, 0]));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    if (pointStyle === 'line' && visiblePoints.length >= 2) {
+      group.add(new THREE.Line(
+        geometry,
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.92 }),
+      ));
+    }
+    if (pointStyle === 'particles' || visiblePoints.length < 2) {
+      group.add(new THREE.Points(
+        geometry,
+        new THREE.PointsMaterial({
+          color,
+          size: 0.095,
+          transparent: true,
+          opacity: 0.95,
+          sizeAttenuation: true,
+          blending: THREE.AdditiveBlending,
+        }),
+      ));
+    }
+    scene.add(group);
+    return () => {
+      scene.remove(group);
+      geometry.dispose();
+      group.children.forEach((child: any) => {
+        if (child instanceof THREE.Line || child instanceof THREE.Points) {
+          const material = child.material;
+          if (Array.isArray(material)) material.forEach((item) => item.dispose());
+          else material.dispose();
+        }
+      });
+    };
+  }, [color, evaluator, isVisible, pointStyle, progress, speed]);
+
+  const draw = useCallback(() => {
+    const isGpuRaymarchedMode = mode === 'implicit3d' || mode === 'surface3d';
+    if (isGpuRaymarchedMode) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(1, Math.floor(bounds.width * dpr));
+    const height = Math.max(1, Math.floor(bounds.height * dpr));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = bounds.width;
+    const h = bounds.height;
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const normalizedEquation = normalizeForPreview(equation).toLowerCase();
+    // Cached static scenes avoid rebuilding expensive geometry on every paint.
+    // Animated traces bypass the cache and sample the exact transport position,
+    // so playback stays continuous without blocking the first paint.
+    const usesLiveSampling = Boolean(
+      animationExpected
+      && evaluator
+      && (evaluator.kind === 'function' || evaluator.kind === 'parametric' || evaluator.kind === 'polar'),
+    );
+    const cachedFrame = frameCacheRef.current;
+    if (!cachedFrame && !usesLiveSampling) return;
+    const liveFrame = usesLiveSampling ? createFrameBuffer(progress) : cachedFrame!;
+    const renderProgress = progress;
+    const isParametricSpiral = (mode === 'parametric' || mode === 'parametric3d')
+      && /(?:^|[,(]\s*)t\s*\*\s*(?:sin|cos)|(?:sin|cos)\s*\(\s*t\s*\)\s*\*\s*t/.test(normalizedEquation);
+    const isFunctionLike = mode === 'function' || mode === 'piecewise';
+    const phase = liveFrame.phase;
+    const pointCoordinates = evaluator?.kind === 'points'
+      ? liveFrame.points
+      : [];
+    let scale = isFunctionLike
+      ? Math.min(w / Math.max(1, viewportRange.xMax - viewportRange.xMin + 2), h / 22)
+      : isParametricSpiral
+        ? Math.min(w, h) / Math.max(2.4, viewportRange.tMax * 2.4)
+        : Math.min(w, h) * 0.105;
+    let plotCenterX = isFunctionLike ? (viewportRange.xMin + viewportRange.xMax) * 0.5 : 0;
+    let plotCenterY = 0;
+    if (!originView && (evaluator?.kind === 'function' || evaluator?.kind === 'parametric' || evaluator?.kind === 'polar')) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      liveFrame.line.forEach((point) => {
+        if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
+        minX = Math.min(minX, point.x);
+        maxX = Math.max(maxX, point.x);
+        minY = Math.min(minY, point.y);
+        maxY = Math.max(maxY, point.y);
+      });
+      if (Number.isFinite(minX) && Number.isFinite(maxX) && Number.isFinite(minY) && Number.isFinite(maxY)) {
+        const spanX = Math.max(1, maxX - minX);
+        const spanY = Math.max(1, maxY - minY);
+        scale = Math.min(w / (spanX + 2), h / (spanY + 2)) * 0.9;
+        plotCenterX = (minX + maxX) * 0.5;
+        plotCenterY = (minY + maxY) * 0.5;
+      }
+    }
+    if (!originView && evaluator?.kind === 'points' && pointCoordinates.length > 0) {
+      const xValues = pointCoordinates.map((point) => point.x);
+      const yValues = pointCoordinates.map((point) => point.y);
+      const minX = Math.min(...xValues);
+      const maxX = Math.max(...xValues);
+      const minY = Math.min(...yValues);
+      const maxY = Math.max(...yValues);
+      const spanX = Math.max(1, maxX - minX);
+      const spanY = Math.max(1, maxY - minY);
+      scale = Math.min(w / (spanX + 2), h / (spanY + 2));
+       plotCenterX = (minX + maxX) * 0.5;
+       plotCenterY = (minY + maxY) * 0.5;
+    }
+    if (originView) {
+      plotCenterX = 0;
+      plotCenterY = 0;
+    }
+    if (cameraSource) {
+      if (!cameraFrame.scale || !Number.isFinite(cameraFrame.scale)) {
+        cameraFrame.scale = scale;
+        cameraFrame.centerX = plotCenterX;
+        cameraFrame.centerY = plotCenterY;
+      } else {
+        // Ease toward new graph bounds so a new equation feels like a camera move.
+        const cameraEase = 0.16;
+        cameraFrame.scale += (scale - cameraFrame.scale) * cameraEase;
+        cameraFrame.centerX += (plotCenterX - cameraFrame.centerX) * cameraEase;
+        cameraFrame.centerY += (plotCenterY - cameraFrame.centerY) * cameraEase;
+      }
+    }
+    scale = cameraFrame.scale * graphZoom;
+    plotCenterX = cameraFrame.centerX;
+    plotCenterY = cameraFrame.centerY;
+    const originX = cx - plotCenterX * scale;
+    const originY = cy + plotCenterY * scale;
+    const drawProgress = easeInOutCubic(renderProgress);
+
+    ctx.clearRect(0, 0, w, h);
+    if (showBackdrop) {
+      ctx.fillStyle = '#171a24';
+      ctx.fillRect(0, 0, w, h);
+    }
+    if (showGrid) {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(221, 217, 208, 0.075)';
+       const gridStep = Math.max(14, scale * gridDensity);
+       for (let x = ((originX % gridStep) + gridStep) % gridStep; x < w; x += gridStep) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+       for (let y = ((originY % gridStep) + gridStep) % gridStep; y < h; y += gridStep) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+    }
+    if (showAxes) {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(221, 217, 208, 0.26)';
+      ctx.beginPath();
+      ctx.moveTo(0, originY);
+      ctx.lineTo(w, originY);
+      ctx.moveTo(originX, 0);
+      ctx.lineTo(originX, h);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(221, 217, 208, 0.42)';
+      ctx.font = '10px DM Mono, monospace';
+      ctx.fillText('x', w - 19, originY - 9);
+      ctx.fillText('y', originX + 9, 16);
+    }
+
+    let geometrySamples = 0;
+    const trace = (drawPoint: (u: number) => [number, number], stroke = color, widthValue = lineWidth) => {
+      ctx.beginPath();
+      let penDown = false;
+      const sampleCount = isFunctionLike ? 1000 : mode === 'polar' ? 900 : 650;
+      for (let i = 0; i <= sampleCount; i += 1) {
+        const normalized = i / sampleCount;
+        if ((isFunctionLike || mode === 'parametric' || mode === 'parametric3d' || mode === 'polar') && normalized > drawProgress) break;
+        const u = isFunctionLike
+           ? viewportRange.xMin + normalized * (viewportRange.xMax - viewportRange.xMin)
+          : mode === 'polar'
+            ? normalized * Math.PI * 2
+          : normalized * Math.PI * 7 - Math.PI * 3.5;
+        const [x, y] = drawPoint(u);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          penDown = false;
+          continue;
+        }
+        geometrySamples += 1;
+        if (!penDown) {
+          ctx.moveTo(originX + x * scale, originY - y * scale);
+          penDown = true;
+        } else {
+          ctx.lineTo(originX + x * scale, originY - y * scale);
+        }
+      }
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = widthValue;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    };
+    const traceCached = (points: GraphPoint[], stroke = color, widthValue = lineWidth, revealProgress = drawProgress) => {
+      const visibleCount = Math.max(1, Math.ceil(points.length * revealProgress));
+      geometrySamples += visibleCount;
+      ctx.beginPath();
+      let penDown = false;
+      points.slice(0, visibleCount).forEach((point) => {
+        if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+          penDown = false;
+          return;
+        }
+        if (!penDown) {
+          ctx.moveTo(originX + point.x * scale, originY - point.y * scale);
+          penDown = true;
+        } else {
+          ctx.lineTo(originX + point.x * scale, originY - point.y * scale);
+        }
+      });
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = widthValue;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    };
+
+    const renderImplicitContour = (currentPhase: number, stroke = color, widthValue = lineWidth, revealProgress = drawProgress) => {
+      if (evaluator?.kind !== 'implicit') return;
+
+      const usesAnimationValue = /(^|[^A-Za-z])(t|a|b)([^A-Za-z]|$)/i.test(equation);
+      const phaseKey = usesAnimationValue ? Math.round(currentPhase * 18) : 0;
+      const speedKey = /\bb\b/i.test(equation) ? speed.toFixed(3) : 'static';
+      const cacheKey = [
+        equation,
+        Math.round(w),
+        Math.round(h),
+        phaseKey,
+        speedKey,
+        IMPLICIT_GRID_RESOLUTION,
+      ].join('|');
+      let contour = implicitContourCacheRef.current.get(cacheKey);
+
+      if (!contour) {
+        const resolution = IMPLICIT_GRID_RESOLUTION;
+        const values = new Float32Array((resolution + 1) * (resolution + 1));
+        const cellWidth = w / resolution;
+        const cellHeight = h / resolution;
+
+        for (let row = 0; row <= resolution; row += 1) {
+          const screenY = row * cellHeight;
+          const y = (originY - screenY) / scale;
+          const rowOffset = row * (resolution + 1);
+          for (let column = 0; column <= resolution; column += 1) {
+            const screenX = column * cellWidth;
+            const x = (screenX - originX) / scale;
+            values[rowOffset + column] = evaluate(evaluator.expression, {
+              x,
+              y,
+              t: currentPhase,
+              a: currentPhase,
+              b: speed,
+              z: 0,
+            });
+          }
+        }
+
+        const segments: ContourSegment[] = [];
+        const interpolate = (
+          first: [number, number],
+          second: [number, number],
+          firstValue: number,
+          secondValue: number,
+        ): [number, number] => {
+          const denominator = firstValue - secondValue;
+          const amount = Math.abs(denominator) < 1e-12
+            ? 0.5
+            : Math.max(0, Math.min(1, firstValue / denominator));
+          return [
+            first[0] + (second[0] - first[0]) * amount,
+            first[1] + (second[1] - first[1]) * amount,
+          ];
+        };
+
+        for (let row = 0; row < resolution; row += 1) {
+          const y = row * cellHeight;
+          const nextY = y + cellHeight;
+          const rowOffset = row * (resolution + 1);
+          const nextRowOffset = (row + 1) * (resolution + 1);
+          for (let column = 0; column < resolution; column += 1) {
+            const x = column * cellWidth;
+            const nextX = x + cellWidth;
+            const topLeftValue = values[rowOffset + column];
+            const topRightValue = values[rowOffset + column + 1];
+            const bottomRightValue = values[nextRowOffset + column + 1];
+            const bottomLeftValue = values[nextRowOffset + column];
+
+            if (![topLeftValue, topRightValue, bottomRightValue, bottomLeftValue].every(Number.isFinite)) {
+              continue;
+            }
+
+            const topLeft: [number, number] = [x, y];
+            const topRight: [number, number] = [nextX, y];
+            const bottomRight: [number, number] = [nextX, nextY];
+            const bottomLeft: [number, number] = [x, nextY];
+            const top = interpolate(topLeft, topRight, topLeftValue, topRightValue);
+            const right = interpolate(topRight, bottomRight, topRightValue, bottomRightValue);
+            const bottom = interpolate(bottomLeft, bottomRight, bottomLeftValue, bottomRightValue);
+            const leftEdge = interpolate(topLeft, bottomLeft, topLeftValue, bottomLeftValue);
+            const mask =
+              (topLeftValue < 0 ? 1 : 0)
+              | (topRightValue < 0 ? 2 : 0)
+              | (bottomRightValue < 0 ? 4 : 0)
+              | (bottomLeftValue < 0 ? 8 : 0);
+            const centerValue = (topLeftValue + topRightValue + bottomRightValue + bottomLeftValue) / 4;
+
+            const addSegment = (start: ScreenPoint, end: ScreenPoint) => {
+              segments.push({ start, end });
+            };
+
+            switch (mask) {
+              case 1: addSegment(leftEdge, top); break;
+              case 2: addSegment(top, right); break;
+              case 3: addSegment(leftEdge, right); break;
+              case 4: addSegment(right, bottom); break;
+              case 5:
+                if (centerValue < 0) {
+                  addSegment(top, right);
+                  addSegment(bottom, leftEdge);
+                } else {
+                  addSegment(leftEdge, top);
+                  addSegment(right, bottom);
+                }
+                break;
+              case 6: addSegment(top, bottom); break;
+              case 7: addSegment(leftEdge, bottom); break;
+              case 8: addSegment(bottom, leftEdge); break;
+              case 9: addSegment(top, bottom); break;
+              case 10:
+                if (centerValue < 0) {
+                  addSegment(leftEdge, top);
+                  addSegment(right, bottom);
+                } else {
+                  addSegment(top, right);
+                  addSegment(bottom, leftEdge);
+                }
+                break;
+              case 11: addSegment(right, bottom); break;
+              case 12: addSegment(leftEdge, right); break;
+              case 13: addSegment(top, right); break;
+              case 14: addSegment(leftEdge, top); break;
+              default: break;
+            }
+          }
+        }
+
+        contour = stitchContourSegments(segments);
+        implicitContourCacheRef.current.set(cacheKey, contour);
+        while (implicitContourCacheRef.current.size > IMPLICIT_CACHE_LIMIT) {
+          const oldestKey = implicitContourCacheRef.current.keys().next().value;
+          if (!oldestKey) break;
+          implicitContourCacheRef.current.delete(oldestKey);
+        }
+      }
+
+      ctx.beginPath();
+      geometrySamples += contour.reduce((total, polyline) => total + Math.max(0, polyline.length - 1), 0);
+      contour.forEach((polyline) => {
+        if (polyline.length < 2) return;
+        const visibleCount = Math.max(2, Math.ceil(polyline.length * revealProgress));
+        ctx.moveTo(polyline[0][0], polyline[0][1]);
+        for (let index = 1; index < Math.min(polyline.length, visibleCount); index += 1) {
+          ctx.lineTo(polyline[index][0], polyline[index][1]);
+        }
+      });
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = widthValue;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.imageSmoothingEnabled = true;
+      ctx.stroke();
+    };
+    const renderCachedImplicitContour = (
+      polylines: WorldContourPolyline[],
+      stroke = color,
+      widthValue = lineWidth,
+      revealProgress = drawProgress,
+    ) => {
+      ctx.beginPath();
+      polylines.forEach((polyline) => {
+        if (polyline.length < 2) return;
+        const visibleCount = Math.max(2, Math.ceil(polyline.length * revealProgress));
+        const first = polyline[0];
+        ctx.moveTo(originX + first[0] * scale, originY - first[1] * scale);
+        for (let index = 1; index < Math.min(polyline.length, visibleCount); index += 1) {
+          const point = polyline[index];
+          ctx.lineTo(originX + point[0] * scale, originY - point[1] * scale);
+        }
+      });
+      geometrySamples += polylines.reduce((total, polyline) => total + Math.max(0, polyline.length - 1), 0);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = widthValue;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.imageSmoothingEnabled = true;
+      ctx.stroke();
+    };
+    const renderPoints = (points: GraphPoint[], stroke = color) => {
+      const visiblePoints = points.slice(0, Math.min(points.length, Math.max(1, Math.ceil(points.length * drawProgress))));
+      geometrySamples += visiblePoints.length;
+      if (pointStyle === 'line' && visiblePoints.length >= 2) {
+        ctx.beginPath();
+        visiblePoints.forEach((point, index) => {
+          const screenX = originX + point.x * scale;
+          const screenY = originY - point.y * scale;
+          if (index === 0) ctx.moveTo(screenX, screenY);
+          else ctx.lineTo(screenX, screenY);
+        });
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = lineWidth;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+      ctx.fillStyle = stroke;
+      visiblePoints.forEach((point) => {
+        ctx.beginPath();
+        ctx.arc(originX + point.x * scale, originY - point.y * scale, pointStyle === 'particles' ? 5 : 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    };
+
+    const reportRuntimeWarning = (detail: string) => {
+      if (runtimeWarningRef.current) return;
+      runtimeWarningRef.current = true;
+      const message = `Runtime evaluation warning in ${mode}: ${detail}`;
+      console.warn(`[Math Rendering] ${message}`);
+      onRuntimeWarning(message);
+    };
+
+    const renderVectorField = (field: Extract<GraphEvaluator, { kind: 'vector' }>, stroke = color) => {
+      const density = 8;
+      const total = (density * 2 + 1) ** 2;
+      const visibleCount = Math.max(1, Math.ceil(total * drawProgress));
+      const xMin = viewportRange.xMin;
+      const xMax = viewportRange.xMax;
+      const yMin = viewportRange.yMin ?? viewportRange.xMin;
+      const yMax = viewportRange.yMax ?? viewportRange.xMax;
+      let arrowIndex = 0;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = Math.max(1, lineWidth * 0.82);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (let row = -density; row <= density; row += 1) {
+        for (let column = -density; column <= density; column += 1) {
+          if (arrowIndex >= visibleCount) return;
+          arrowIndex += 1;
+          const x = xMin + ((column + density) / (density * 2)) * (xMax - xMin);
+          const y = yMin + ((row + density) / (density * 2)) * (yMax - yMin);
+          const vx = evaluate(field.x, { x, y, t: phase, a: phase, b: speed, z: 0 });
+          const vy = evaluate(field.y, { x, y, t: phase, a: phase, b: speed, z: 0 });
+          const magnitude = Math.hypot(vx, vy);
+          if (!Number.isFinite(magnitude) || magnitude < 1e-6) continue;
+           geometrySamples += 1;
+          const length = Math.min(0.65, Math.max(0.18, magnitude * 0.16));
+          const endX = x + (vx / magnitude) * length;
+          const endY = y + (vy / magnitude) * length;
+          const screenX = originX + x * scale;
+          const screenY = originY - y * scale;
+          const screenEndX = originX + endX * scale;
+          const screenEndY = originY - endY * scale;
+          const angle = Math.atan2(screenEndY - screenY, screenEndX - screenX);
+          const head = Math.min(7, Math.max(3, scale * 0.07));
+          ctx.beginPath();
+          ctx.moveTo(screenX, screenY);
+          ctx.lineTo(screenEndX, screenEndY);
+          ctx.moveTo(screenEndX, screenEndY);
+          ctx.lineTo(screenEndX - head * Math.cos(angle - Math.PI / 6), screenEndY - head * Math.sin(angle - Math.PI / 6));
+          ctx.moveTo(screenEndX, screenEndY);
+          ctx.lineTo(screenEndX - head * Math.cos(angle + Math.PI / 6), screenEndY - head * Math.sin(angle + Math.PI / 6));
+          ctx.stroke();
+        }
+      }
+    };
+    const renderCachedVectorField = (arrows: CachedVectorArrow[], stroke = color) => {
+      const visibleCount = Math.max(1, Math.ceil(arrows.length * drawProgress));
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = Math.max(1, lineWidth * 0.82);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      arrows.slice(0, visibleCount).forEach(({ x, y, endX, endY }) => {
+        const screenX = originX + x * scale;
+        const screenY = originY - y * scale;
+        const screenEndX = originX + endX * scale;
+        const screenEndY = originY - endY * scale;
+        const angle = Math.atan2(screenEndY - screenY, screenEndX - screenX);
+        const head = Math.min(7, Math.max(3, scale * 0.07));
+        ctx.beginPath();
+        ctx.moveTo(screenX, screenY);
+        ctx.lineTo(screenEndX, screenEndY);
+        ctx.moveTo(screenEndX, screenEndY);
+        ctx.lineTo(screenEndX - head * Math.cos(angle - Math.PI / 6), screenEndY - head * Math.sin(angle - Math.PI / 6));
+        ctx.moveTo(screenEndX, screenEndY);
+        ctx.lineTo(screenEndX - head * Math.cos(angle + Math.PI / 6), screenEndY - head * Math.sin(angle + Math.PI / 6));
+        ctx.stroke();
+      });
+    };
+
+    ctx.save();
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 14;
+    const evaluate = (expression: CompiledExpression, scope: Record<string, number>) => {
+      try {
+        const value = Number(expression.evaluate(scope));
+        if (!Number.isFinite(value)) {
+          reportRuntimeWarning('a sample returned a non-finite value; that sample was skipped.');
+          return Number.NaN;
+        }
+        return value;
+      } catch (error) {
+        reportRuntimeWarning(error instanceof Error ? error.message : 'a sample could not be evaluated; it was skipped.');
+        return Number.NaN;
+      }
+    };
+    const fn = (u: number, currentPhase = phase): [number, number] => {
+      if (evaluator?.kind === 'parametric') {
+        const normalized = (u + Math.PI * 3.5) / (Math.PI * 7);
+         const parameter = viewportRange.tMin
+           + (viewportRange.tMax - viewportRange.tMin) * normalized * Math.max(drawProgress, 0.001);
+        return [
+          evaluate(evaluator.x, { t: parameter, a: currentPhase, b: speed, z: 0 }),
+          evaluate(evaluator.y, { t: parameter, a: currentPhase, b: speed, z: 0 }),
+        ];
+      }
+      if (evaluator?.kind === 'polar') {
+        const normalized = u / (Math.PI * 2);
+        const theta = viewportRange.tMin
+          + (viewportRange.tMax - viewportRange.tMin) * normalized * Math.max(drawProgress, 0.001);
+        const radius = evaluate(evaluator.expression, { theta, t: currentPhase, a: currentPhase, b: speed, z: 0 });
+        return [radius * Math.cos(theta), radius * Math.sin(theta)];
+      }
+      if (evaluator?.kind === 'implicit') {
+        let bestRadius = Number.NaN;
+        let bestAbs = Number.POSITIVE_INFINITY;
+        let previous = Number.NaN;
+        const radialExtent = Math.max(1, rangeWorldExtent(viewportRange));
+        for (let step = 0; step <= 48; step += 1) {
+          const radius = (step / 48) * radialExtent;
+          const value = evaluate(evaluator.expression, {
+            x: radius * Math.cos(u),
+            y: radius * Math.sin(u),
+            t: currentPhase,
+            a: currentPhase,
+            b: speed,
+            z: 0,
+          });
+          if (Number.isFinite(value) && Math.abs(value) < bestAbs) {
+            bestAbs = Math.abs(value);
+            bestRadius = radius;
+          }
+          if (Number.isFinite(previous) && Number.isFinite(value) && previous * value < 0) {
+            bestRadius = radius - (1 / 48) * 2;
+            break;
+          }
+          previous = value;
+        }
+        return [bestRadius * Math.cos(u), bestRadius * Math.sin(u)];
+      }
+      if (evaluator?.kind === 'function') {
+        const x = u;
+        const rawY = evaluate(evaluator.expression, { x, t: currentPhase, a: currentPhase, b: speed, z: 0 });
+        const y = /(?:exp|e\^)/i.test(equation)
+          ? Number.isFinite(rawY) ? Math.max(-50, Math.min(50, rawY)) : Math.sign(rawY || 1) * 50
+          : rawY;
+        return [x, y];
+      }
+      return [Number.NaN, Number.NaN];
+    };
+    if (evaluator?.kind === 'points') {
+      if (showTrail) {
+        ctx.shadowBlur = 0;
+       renderPoints(pointCoordinates.slice(0, Math.max(0, Math.ceil(pointCoordinates.length * Math.max(drawProgress - 0.14, 0)))), 'rgba(199, 243, 107, .22)');
+        ctx.shadowBlur = 14;
+      }
+      renderPoints(pointCoordinates);
+    } else if (evaluator?.kind === 'vector') {
+      if (liveFrame.vector.length > 0) renderCachedVectorField(liveFrame.vector);
+      else renderVectorField(evaluator);
+    } else if (evaluator?.kind === 'implicit') {
+      if (showTrail) {
+        ctx.shadowBlur = 0;
+         if (liveFrame.contour.length > 0) {
+           renderCachedImplicitContour(liveFrame.contour, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75), Math.max(drawProgress - 0.14, 0));
+         } else {
+           renderImplicitContour(phase - 0.38, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75), Math.max(drawProgress - 0.14, 0));
+         }
+        ctx.shadowBlur = 14;
+      }
+       if (liveFrame.contour.length > 0) renderCachedImplicitContour(liveFrame.contour);
+       else renderImplicitContour(phase);
+       } else if (evaluator) {
+      if (liveFrame.line.length > 0) {
+        if (showTrail) {
+          ctx.shadowBlur = 0;
+          traceCached(liveFrame.trailOne, 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75));
+          traceCached(liveFrame.trailTwo, 'rgba(199, 243, 107, .3)', Math.max(1, lineWidth - 0.4));
+          ctx.shadowBlur = 14;
+        }
+        traceCached(liveFrame.line);
+      } else {
+        if (showTrail) {
+          ctx.shadowBlur = 0;
+          trace((u) => fn(u, phase - 0.38), 'rgba(199, 243, 107, .18)', Math.max(1, lineWidth - 0.75));
+          trace((u) => fn(u, phase - 0.18), 'rgba(199, 243, 107, .3)', Math.max(1, lineWidth - 0.4));
+          ctx.shadowBlur = 14;
+        }
+        trace(fn);
+      }
+    }
+    ctx.restore();
+
+    if (mode === 'implicit' && evaluator?.kind === 'implicit') {
+      ctx.save();
+      ctx.setLineDash([3, 6]);
+      trace((u) => [(1.45 + 0.12 * Math.sin(phase)) * Math.cos(u), (1.45 + 0.12 * Math.sin(phase)) * Math.sin(u)], '#ff8b6d', 1.1);
+      ctx.restore();
+    }
+    if (evaluator && evaluator.kind !== 'points' && evaluator.kind !== 'vector') {
+      ctx.fillStyle = 'rgba(199, 243, 107, .9)';
+      ctx.beginPath();
+       const markerParameter = isFunctionLike
+         ? viewportRange.xMin + drawProgress * (viewportRange.xMax - viewportRange.xMin)
+          : mode === 'parametric'
+          ? drawProgress * Math.PI * 7 - Math.PI * 3.5
+          : mode === 'polar'
+            ? drawProgress * Math.PI * 2
+            : phase;
+      const markerIndex = Math.min(
+        Math.max(0, liveFrame.line.length - 1),
+        Math.round(drawProgress * Math.max(0, liveFrame.line.length - 1)),
+      );
+      const marker = liveFrame.line.length > 0
+        ? [liveFrame.line[markerIndex].x, liveFrame.line[markerIndex].y] as [number, number]
+        : fn(markerParameter);
+      ctx.arc(originX + marker[0] * scale, originY - marker[1] * scale, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    let hasNonEmptyPixels = pixelVerificationFramesRef.current > 0;
+    if (!healthReportedRef.current) {
+      try {
+        const sampleWidth = Math.max(1, Math.min(canvas.width, 320));
+        const sampleHeight = Math.max(1, Math.min(canvas.height, 180));
+        const pixels = ctx.getImageData(0, 0, sampleWidth, sampleHeight).data;
+        for (let index = 0; index < pixels.length; index += 4) {
+          if (pixels[index + 3] > 0 && (pixels[index] > 42 || pixels[index + 1] > 42 || pixels[index + 2] > 42)) {
+            hasNonEmptyPixels = true;
+            break;
+          }
+        }
+      } catch {
+        hasNonEmptyPixels = false;
+      }
+    }
+    pixelVerificationFramesRef.current = hasNonEmptyPixels
+      ? pixelVerificationFramesRef.current + 1
+      : 0;
+    if (evaluator) {
+      if (geometrySamples === 0 || pixelVerificationFramesRef.current === 0) {
+        renderHealthFramesRef.current += 1;
+        if (renderHealthFramesRef.current >= 4 && !healthReportedRef.current) {
+          healthReportedRef.current = true;
+          onRenderStatus('error', geometrySamples === 0
+            ? 'Animation engine could not evaluate coordinates for this domain. Try Auto Range, reset the viewport, or simplify the expression.'
+            : 'The canvas is blank after rendering. Try Auto Range, reset the viewport, or simplify the expression.');
+        }
+      } else {
+        renderHealthFramesRef.current += 1;
+        if ((!animationExpected || renderHealthFramesRef.current >= 2) && pixelVerificationFramesRef.current >= 2 && !healthReportedRef.current) {
+          healthReportedRef.current = true;
+          onRenderStart();
+          onRenderStatus('ready');
+        }
+      }
+    }
+  }, [animationExpected, cameraFrame, cameraSource, color, createFrameBuffer, equation, evaluator, graphZoom, gridDensity, lineWidth, mode, onRenderStart, onRenderStatus, onRuntimeWarning, originView, pointStyle, progress, showAxes, showBackdrop, showGrid, showTrail, speed, viewportRange]);
+
+  drawRef.current = draw;
+  useEffect(() => {
+    runtimeWarningRef.current = false;
+    renderHealthFramesRef.current = 0;
+    pixelVerificationFramesRef.current = 0;
+    healthReportedRef.current = false;
+    implicitContourCacheRef.current.clear();
+  }, [animationExpected, equation, mode]);
+  useEffect(() => {
+    draw();
+  }, [draw]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => drawRef.current());
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div ref={visibilityTargetRef} className="graph-renderer">
+      {isVisible && (mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d') && (
+        <canvas ref={webglCanvasRef} className="webgl-canvas" aria-hidden="true" />
+      )}
+      {mode !== 'implicit3d' && mode !== 'surface3d' && (
+        <canvas ref={canvasRef} className="graph-canvas" data-testid="canvas-graph-renderer" aria-label={`Animated ${mode} graph for ${equation}`} />
+      )}
+      {hoverPoint && (mode === 'implicit3d' || mode === 'surface3d' || mode === 'parametric3d') && (
+        <div
+          className="three-hover-tooltip"
+          style={{ left: hoverPoint.x + 14, top: hoverPoint.y + 14 }}
+          role="status"
+          data-testid="tooltip-3d-coordinate"
+        >
+          <span className="three-hover-tooltip-label">SURFACE POINT</span>
+          <strong>({hoverPoint.point.x.toFixed(2)}, {hoverPoint.point.y.toFixed(2)}, {hoverPoint.point.z.toFixed(2)})</strong>
+          <small>{mode === 'surface3d' ? 'height field' : 'implicit layer'} · drag to orbit</small>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MainStudio() {
+  const { account, isDeveloper } = useDeveloperSession();
+  const [, setLocation] = useLocation();
+  const studioRootRef = useRef<HTMLDivElement>(null);
+  const launchParams = useMemo(
+    () => new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search),
+    [],
+  );
+  const launchEquation = launchParams.get('equation') || DEFAULT_EQUATION;
+  const launchModeParam = launchParams.get('mode');
+  const launchMode: StudioMode = isStudioMode(launchModeParam) ? launchModeParam : 'auto';
+  const launchResolvedMode: ResolvedStudioMode = launchMode === 'auto' ? detectSmartMode(launchEquation) : launchMode;
+  const launchRange = detectSmartRange(launchEquation, launchResolvedMode);
+  const [equation, setEquation] = useState(launchEquation);
+  const [mode, setMode] = useState<StudioMode>(launchMode);
+  const [layers, setLayers] = useState<EquationLayer[]>([
+    { id: 1, equation: launchEquation, mode: launchResolvedMode, color: '#c7f36b', visible: true },
+  ]);
+  const [activeLayerId, setActiveLayerId] = useState(1);
+  const [theme, setTheme] = useState<StudioTheme>(() => {
+    try {
+      if (typeof window === 'undefined') return 'dark';
+      const storedTheme = window.localStorage.getItem('second-solution-theme');
+      return isStudioTheme(storedTheme) ? storedTheme : 'dark';
+    } catch {
+      return 'dark';
+    }
+  });
+  const [playing, setPlaying] = useState(true);
+  const [isLooping, setIsLooping] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [autoRange, setAutoRange] = useState(true);
+  const [manualXMin, setManualXMin] = useState(launchRange.xMin);
+  const [manualXMax, setManualXMax] = useState(launchRange.xMax);
+  const [manualTMin, setManualTMin] = useState(launchRange.tMin);
+  const [manualTMax, setManualTMax] = useState(launchRange.tMax);
+  const [domainEditorOpen, setDomainEditorOpen] = useState(false);
+  const [domainMinDraft, setDomainMinDraft] = useState('');
+  const [domainMaxDraft, setDomainMaxDraft] = useState('');
+  const [domainEditorError, setDomainEditorError] = useState('');
+  const [speed, setSpeed] = useState(1);
+  const [duration, setDuration] = useState(8);
+  const [lineWidth, setLineWidth] = useState(2);
+  const [color, setColor] = useState('#c7f36b');
+  const [showGrid, setShowGrid] = useState(true);
+  const [gridDensity, setGridDensity] = useState(1);
+  const [showAxes, setShowAxes] = useState(true);
+  const [showTrail, setShowTrail] = useState(false);
+  const [pointStyle, setPointStyle] = useState<'line' | 'particles'>('line');
+  const [originView, setOriginView] = useState(false);
+  const [showFps, setShowFps] = useState(true);
+  const [renderQuality, setRenderQuality] = useState<RenderQuality>(() => {
+    try {
+      if (typeof window === 'undefined') return 'medium';
+      const storedQuality = window.localStorage.getItem(RENDER_QUALITY_STORAGE_KEY);
+      return isRenderQuality(storedQuality) ? storedQuality : 'medium';
+    } catch {
+      return 'medium';
+    }
+  });
+  const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
+  const [showWatermark, setShowWatermark] = useState(true);
+  const [pageZoom, setPageZoom] = useState(1);
+  const [graphZoom, setGraphZoom] = useState(1);
+  const [surfaceHeightScale, setSurfaceHeightScale] = useState(1);
+  const [surfaceBlendMode, setSurfaceBlendMode] = useState<SurfaceBlendMode>('overlay');
+  const [watermark, setWatermark] = useState('Second Solution Studio');
+  const [filename, setFilename] = useState('');
+  const [fps, setFps] = useState(60);
+  const [audioEnabled, setAudioEnabled] = useState(true);
+  const [renderStarted, setRenderStarted] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [topNotice, setTopNotice] = useState('');
+  const [parserWarning, setParserWarning] = useState('');
+  const [runtimeWarning, setRuntimeWarning] = useState('');
+  const [renderHealth, setRenderHealth] = useState<'checking' | 'ready' | 'error'>('checking');
+  const [renderHealthMessage, setRenderHealthMessage] = useState('');
+  const [showGraphMaker, setShowGraphMaker] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantPanel, setAssistantPanel] = useState<AssistantPanel>('overview');
+  const [assistantDiagnostics, setAssistantDiagnostics] = useState<DiagnosticItem[]>([]);
+  const [assistantDiagnosticsLoading, setAssistantDiagnosticsLoading] = useState(false);
+  const [assistantChatDraft, setAssistantChatDraft] = useState('');
+  const [assistantMessages, setAssistantMessages] = useState<AssistantChatMessage[]>([
+    { id: 'welcome', role: 'assistant', content: 'I can inspect the active equation, renderer, local scene, and authentication state without leaving this studio.' },
+  ]);
+  const [assistantPaymentStatus, setAssistantPaymentStatus] = useState<'idle' | 'connecting' | 'ready' | 'error'>('idle');
+  const [assistantPaymentMessage, setAssistantPaymentMessage] = useState('Stripe is not connected. You can connect it later from the workspace integration panel.');
+  const [assistantAuthModal, setAssistantAuthModal] = useState<'sign-in' | 'sign-up' | null>(null);
+  const [studioAuthModal, setStudioAuthModal] = useState<'sign-in' | 'sign-up' | null>(null);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RENDER_QUALITY_STORAGE_KEY, renderQuality);
+    } catch {
+      // Preference persistence is optional when storage is unavailable.
+    }
+  }, [renderQuality]);
+  const handleAutoRenderQualityFallback = useCallback(() => {
+    setRenderQuality((currentQuality) => {
+      if (currentQuality === 'low') return currentQuality;
+      toast({
+        description: 'Low performance detected. Switching to Low Quality mode for smoother experience',
+      });
+      return 'low';
+    });
+  }, []);
+  const handleRenderQualityChange = useCallback((quality: RenderQuality) => {
+    setRenderQuality(quality);
+    setQualityMenuOpen(false);
+  }, []);
+  useEffect(() => {
+    if (!qualityMenuOpen) return;
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !qualitySelectorRef.current?.contains(target)) {
+        setQualityMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handleOutsidePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handleOutsidePointerDown, true);
+  }, [qualityMenuOpen]);
+  const [history, setHistory] = useState<HistoryItem[]>(() => {
+    try {
+      if (typeof window === 'undefined') return [];
+      const raw = window.localStorage.getItem('second-solution-history')
+        || window.localStorage.getItem('mae-history')
+        || '[]';
+      return (JSON.parse(raw) as HistoryItem[]).slice(0, 8);
+    } catch {
+      return [];
+    }
+  });
+  const [editHistory, setEditHistory] = useState<string[]>([launchEquation]);
+  const [editHistoryIndex, setEditHistoryIndex] = useState(0);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [exportStatus, setExportStatus] = useState('');
+  const [parsedEquation, setParsedEquation] = useState(launchEquation);
+  const lastHistoryKey = useRef('');
+  const editHistoryRef = useRef<string[]>([launchEquation]);
+  const editHistoryIndexRef = useRef(0);
+  const progressRef = useRef(progress);
+  const sharedCameraFrameRef = useRef({ scale: 0, centerX: 0, centerY: 0 });
+  const pinchPointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchDistanceRef = useRef<number | null>(null);
+  const skipNextSceneResetRef = useRef(true);
+  const sessionSnapshotRef = useRef<StudioSessionState | null>(null);
+  const sessionSaveTimerRef = useRef<number | null>(null);
+  const captureActiveRef = useRef(false);
+  const captureRafRef = useRef<number | null>(null);
+  const captureStopTimerRef = useRef<number | null>(null);
+  const audioEngineRef = useRef<AudioEngine | null>(null);
+  const audioLastProgressRef = useRef(-1);
+  const audioLastYRef = useRef<number | null>(null);
+  const audioLastDirectionRef = useRef(0);
+  const audioLastBeatTimeRef = useRef(0);
+  const audioLastBeatIndexRef = useRef(-1);
+  const allowUnloadRef = useRef(false);
+  const canvasColumnRef = useRef<HTMLDivElement>(null);
+  const qualitySelectorRef = useRef<HTMLDivElement>(null);
+  const equationInputRef = useRef<HTMLTextAreaElement>(null);
+  const downloadPngRef = useRef<() => void>(() => undefined);
+  const validation = useEquationValidator(parsedEquation, mode);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setParsedEquation(equation), 300);
+    return () => window.clearTimeout(timer);
+  }, [equation]);
+  const localResult = validation.validatedKey === `${mode}:${parsedEquation.trim()}` ? validation.data : undefined;
+  const renderEquation = parsedEquation;
+  const localDetectedMode = useMemo(() => detectSmartMode(parsedEquation), [parsedEquation]);
+  const resolvedMode: ResolvedStudioMode = mode === 'auto' ? (localResult?.valid ? localResult.mode : localDetectedMode) : mode;
+  const animationExpected = localResult?.valid ? localResult.animatable : /\b(?:t|u|theta)\b/i.test(parsedEquation);
+  const details = modeDetails[mode];
+  const runAssistantDiagnostics = useCallback(async () => {
+    setAssistantDiagnosticsLoading(true);
+    setAssistantDiagnostics([]);
+    await new Promise((resolve) => window.setTimeout(resolve, 140));
+    const next: DiagnosticItem[] = [];
+    const evaluator = parserBuildGraphEvaluator(renderEquation, resolvedMode);
+    next.push({
+      id: 'equation',
+      label: 'Equation parser',
+      status: localResult?.valid && evaluator ? 'ok' : 'error',
+      detail: localResult?.valid && evaluator ? `${modeDetails[resolvedMode].title} expression compiled locally.` : localResult?.error || 'The active expression needs attention.',
+      timestamp: 'now',
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    let webglReady = false;
+    try {
+      const probe = document.createElement('canvas');
+      webglReady = Boolean(probe.getContext('webgl2') || probe.getContext('webgl'));
+    } catch {
+      webglReady = false;
+    }
+    next.push({
+      id: 'renderer',
+      label: 'Renderer health',
+      status: renderHealth === 'error' ? 'error' : renderHealth === 'ready' ? 'ok' : 'warning',
+       detail: renderHealth === 'ready' ? 'The active renderer has reported a ready frame.' : renderHealthMessage || 'Renderer is still warming up.',
+      timestamp: 'now',
+    });
+    next.push({
+       id: 'webgl',
+       label: 'GPU WebGL renderer',
+       status: webglReady ? 'ok' : 'error',
+       detail: webglReady ? 'Hardware-accelerated WebGL is available for 3D shader rendering.' : 'Hardware-accelerated WebGL is required for 3D shader rendering.',
+      timestamp: 'now',
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    let localStorageReady = false;
+    try {
+      const key = '__second_solution_assistant_probe__';
+      window.localStorage.setItem(key, 'ok');
+      localStorageReady = window.localStorage.getItem(key) === 'ok';
+      window.localStorage.removeItem(key);
+    } catch {
+      localStorageReady = false;
+    }
+    next.push({
+      id: 'scene-state',
+      label: 'Local scene state',
+      status: sessionReady && localStorageReady ? 'ok' : 'warning',
+      detail: sessionReady && localStorageReady ? 'Encrypted session persistence and local storage are available.' : 'The scene is still loading or browser storage is restricted.',
+      timestamp: 'now',
+    });
+    next.push({
+      id: 'authentication',
+      label: 'Authentication',
+      status: isDeveloper ? 'ok' : 'warning',
+      detail: isDeveloper ? 'Developer session is active.' : 'Guest mode is active; protected actions can open the Clerk flow.',
+      timestamp: 'now',
+    });
+    setAssistantDiagnostics(next);
+    setAssistantDiagnosticsLoading(false);
+  }, [isDeveloper, localResult, renderEquation, renderHealth, renderHealthMessage, resolvedMode, sessionReady]);
+  const handleAssistantChat = useCallback((value: string) => {
+    const prompt = value.trim();
+    if (!prompt) return;
+    const lower = prompt.toLowerCase();
+    const response = lower.includes('3d') || lower.includes('surface')
+      ? 'For 3D surfaces, start with Auto Range and keep the active layer visible. Union, intersection, and additive blends compile into one implicit field; overlay keeps each mesh separate.'
+      : lower.includes('login') || lower.includes('auth')
+        ? 'Use Authenticated login to open the protected sign-in or sign-up flow. The local scene remains usable while you are signed out.'
+        : lower.includes('bug') || lower.includes('error')
+          ? `Run Bug check first. The current renderer is ${renderHealth}; ${localResult?.valid ? 'the active equation currently compiles.' : 'the active equation still needs parser edits.'}`
+          : lower.includes('theme') || lower.includes('color')
+            ? 'Open Customization to switch between Studio, Midnight, and Paper presets. The selected studio theme is saved with the local session.'
+            : 'I can help with parser modes, layered surfaces, local persistence, renderer fallbacks, exports, and authentication. Ask about one of those paths.';
+    setAssistantMessages((current) => [
+      ...current,
+      { id: `user-${Date.now()}`, role: 'user', content: prompt },
+      { id: `assistant-${Date.now() + 1}`, role: 'assistant', content: response },
+    ]);
+    setAssistantChatDraft('');
+  }, [localResult, renderHealth]);
+  const handleAssistantQuickAction = useCallback((action: 'bug-check' | 'payment-setup' | 'chat' | 'customization' | 'database-sync' | 'authenticated-login') => {
+    if (action === 'bug-check') void runAssistantDiagnostics();
+    if (action === 'database-sync') {
+      setTopNotice(sessionReady ? 'Local scene sync is healthy' : 'Local scene is still loading');
+      if (sessionSnapshotRef.current) void saveEncryptedJson(SESSION_STORAGE_KEY, sessionSnapshotRef.current);
+    }
+    if (action === 'payment-setup') {
+      setAssistantPaymentStatus('error');
+      setAssistantPaymentMessage('Stripe was not connected, so checkout remains disabled. Re-open the integration setup when you are ready to add billing.');
+    }
+    if (action === 'authenticated-login') setAssistantAuthModal('sign-in');
+  }, [runAssistantDiagnostics, sessionReady]);
+  const assistantThemeOptions = [
+    { id: 'dark', label: 'Studio', description: 'Dark canvas, lime signal', swatch: '#202635', accent: '#c7f36b' },
+    { id: 'neon', label: 'Midnight', description: 'Electric contrast for 3D work', swatch: '#101728', accent: '#72d8ff' },
+    { id: 'light', label: 'Paper', description: 'Quiet surface, coral ink', swatch: '#f5f0e7', accent: '#ff8b6d' },
+  ];
+  useEffect(() => {
+    let cancelled = false;
+    const hasLaunchScene = launchParams.has('equation');
+    if (hasLaunchScene) {
+      try {
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem('second-solution-theme');
+          window.localStorage.removeItem('second-solution-history');
+        }
+      } catch {
+        // Legacy values are best-effort migration inputs only.
+      }
+      setSessionReady(true);
+      return () => { cancelled = true; };
+    }
+
+    void loadEncryptedJson<Partial<StudioSessionState>>(SESSION_STORAGE_KEY).then((saved) => {
+      if (cancelled) return;
+      if (saved) {
+        const restoredEquation = typeof saved.equation === 'string' ? saved.equation : launchEquation;
+        const restoredMode = isStudioMode(saved.mode) ? saved.mode : launchResolvedMode;
+        const restoredRange = detectSmartRange(restoredEquation, restoredMode);
+        setEquation(restoredEquation);
+        editHistoryRef.current = [restoredEquation];
+        editHistoryIndexRef.current = 0;
+        setEditHistory([restoredEquation]);
+        setEditHistoryIndex(0);
+        if (isStudioMode(saved.mode)) setMode(saved.mode);
+        if (Array.isArray(saved.layers)) {
+          const restoredLayers = saved.layers.filter((layer): layer is EquationLayer => (
+            Boolean(layer)
+            && typeof layer.id === 'number'
+            && typeof layer.equation === 'string'
+            && isStudioMode(layer.mode)
+            && typeof layer.color === 'string'
+          )).map((layer) => ({ ...layer, visible: layer.visible !== false }));
+          if (restoredLayers.length > 0) setLayers(restoredLayers);
+        }
+        if (typeof saved.activeLayerId === 'number') setActiveLayerId(saved.activeLayerId);
+        if (saved.theme === 'light' || saved.theme === 'dark' || saved.theme === 'neon') setTheme(saved.theme);
+        if (typeof saved.playing === 'boolean') setPlaying(saved.playing);
+        if (typeof saved.isLooping === 'boolean') setIsLooping(saved.isLooping);
+         setProgress(Math.min(1, Math.max(0, finiteNumber(saved.progress, 0))));
+        if (typeof saved.autoRange === 'boolean') setAutoRange(saved.autoRange);
+        setManualXMin(finiteNumber(saved.manualXMin, restoredRange.xMin));
+        setManualXMax(finiteNumber(saved.manualXMax, restoredRange.xMax));
+        setManualTMin(finiteNumber(saved.manualTMin, restoredRange.tMin));
+        setManualTMax(finiteNumber(saved.manualTMax, restoredRange.tMax));
+        setSpeed(finiteNumber(saved.speed, 1));
+        setDuration(finiteNumber(saved.duration, 8));
+        setLineWidth(finiteNumber(saved.lineWidth, 2));
+        if (typeof saved.color === 'string') setColor(saved.color);
+        if (typeof saved.showGrid === 'boolean') setShowGrid(saved.showGrid);
+        setGridDensity(finiteNumber(saved.gridDensity, 1));
+        if (typeof saved.showAxes === 'boolean') setShowAxes(saved.showAxes);
+        if (typeof saved.showTrail === 'boolean') setShowTrail(saved.showTrail);
+        if (saved.pointStyle === 'line' || saved.pointStyle === 'particles') setPointStyle(saved.pointStyle);
+        if (typeof saved.originView === 'boolean') setOriginView(saved.originView);
+        if (typeof saved.showFps === 'boolean') setShowFps(saved.showFps);
+        if (typeof saved.showWatermark === 'boolean') setShowWatermark(saved.showWatermark);
+        if (typeof saved.watermark === 'string') setWatermark(saved.watermark);
+        if (typeof saved.filename === 'string') setFilename(saved.filename);
+        if (saved.fps === 30 || saved.fps === 60) setFps(saved.fps);
+         if (saved.surfaceBlendMode === 'overlay' || saved.surfaceBlendMode === 'union' || saved.surfaceBlendMode === 'intersection' || saved.surfaceBlendMode === 'additive') setSurfaceBlendMode(saved.surfaceBlendMode);
+        setPageZoom(clampPageZoom(finiteNumber(saved.pageZoom, 1)));
+        setGraphZoom(clampGraphZoom(finiteNumber(saved.graphZoom, 1)));
+         setSurfaceHeightScale(Math.max(0.25, Math.min(4, finiteNumber(saved.surfaceHeightScale, 1))));
+         if (Array.isArray(saved.history)) {
+           setHistory(saved.history.filter((item) => (
+             Boolean(item)
+             && typeof item.equation === 'string'
+             && isStudioMode(item.mode)
+             && typeof item.at === 'number'
+           )).slice(0, 8));
+         }
+      }
+      try {
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem('second-solution-theme');
+          window.localStorage.removeItem('second-solution-history');
+        }
+      } catch {
+        // Legacy values are best-effort migration inputs only.
+      }
+      skipNextSceneResetRef.current = true;
+      setSessionReady(true);
+    });
+
+    return () => { cancelled = true; };
+  }, [launchParams]);
+  const updateActiveLayer = useCallback((patch: Partial<EquationLayer>) => {
+    setLayers((current) => current.map((layer) => layer.id === activeLayerId ? { ...layer, ...patch } : layer));
+  }, [activeLayerId]);
+  useEffect(() => {
+    updateActiveLayer({ equation: renderEquation, mode: resolvedMode });
+  }, [renderEquation, resolvedMode, updateActiveLayer]);
+  const changeEquation = useCallback((value: string) => {
+    setEquation(value);
+    updateActiveLayer({ equation: value });
+    const currentIndex = editHistoryIndexRef.current;
+    const current = editHistoryRef.current;
+    if (current[currentIndex] === value) return;
+    const next = [...current.slice(0, currentIndex + 1), value].slice(-50);
+    const nextIndex = next.length - 1;
+    editHistoryRef.current = next;
+    editHistoryIndexRef.current = nextIndex;
+    setEditHistory(next);
+    setEditHistoryIndex(nextIndex);
+  }, [updateActiveLayer]);
+  const changeLayerEquation = useCallback((id: number, value: string) => {
+    if (id === activeLayerId) {
+      changeEquation(value);
+      return;
+    }
+    setLayers((current) => current.map((layer) => layer.id === id ? { ...layer, equation: value } : layer));
+  }, [activeLayerId, changeEquation]);
+  const changeMode = useCallback((value: StudioMode) => {
+    setMode(value);
+    updateActiveLayer({ mode: value === 'auto' ? detectSmartMode(equation) : value });
+  }, [equation, updateActiveLayer]);
+  const applyEditHistory = useCallback((nextIndex: number) => {
+    const nextEquation = editHistoryRef.current[nextIndex];
+    if (nextEquation === undefined) return;
+    editHistoryIndexRef.current = nextIndex;
+    setEditHistoryIndex(nextIndex);
+    setEquation(nextEquation);
+    updateActiveLayer({ equation: nextEquation, mode: mode === 'auto' ? detectSmartMode(nextEquation) : mode });
+  }, [mode, updateActiveLayer]);
+  const undoEquationEdit = useCallback(() => {
+    if (editHistoryIndex > 0) applyEditHistory(editHistoryIndex - 1);
+  }, [applyEditHistory, editHistoryIndex]);
+  const redoEquationEdit = useCallback(() => {
+    if (editHistoryIndexRef.current < editHistoryRef.current.length - 1) {
+      applyEditHistory(editHistoryIndexRef.current + 1);
+    }
+  }, [applyEditHistory]);
+  const changeColor = useCallback((value: string) => {
+    setColor(value);
+    updateActiveLayer({ color: value });
+  }, [updateActiveLayer]);
+  const smartRange = useMemo(() => detectSmartRange(renderEquation, resolvedMode), [renderEquation, resolvedMode]);
+  const inputExpressions = useMemo(() => splitEquationExpressions(renderEquation, resolvedMode), [renderEquation, resolvedMode]);
+  const implicitVariableProgram = useMemo(() => {
+    const definitions = new Map<string, string>();
+    const collect = (source: string) => {
+      parserExtractEquationVariableDefinitions(source).definitions.forEach((definition) => {
+        definitions.delete(definition.name.toLowerCase());
+        definitions.set(definition.name.toLowerCase(), definition.source);
+      });
+    };
+    layers.filter((layer) => layer.visible).forEach((layer) => collect(layer.equation));
+    collect(renderEquation);
+    return [...definitions.entries()]
+      .map(([name, source]) => `${name} = ${source}`)
+      .join('; ');
+  }, [layers, renderEquation]);
+  const renderExpressions = useMemo(() => {
+    return inputExpressions.flatMap((expression, index) => (
+      parserExtractEquationVariableDefinitions(expression).renderExpression
+      && buildGraphEvaluator(
+        resolvedMode === 'surface3d' ? parserNormalizeSurfaceEquation(expression) : expression,
+        resolvedMode,
+      )
+        ? [{
+            expression: resolvedMode === 'surface3d' ? parserNormalizeSurfaceEquation(expression) : expression,
+            color: inputExpressions.length > 1
+              ? multiGraphColors[index % multiGraphColors.length]
+              : color,
+          }]
+        : []
+    ));
+  }, [color, inputExpressions, resolvedMode]);
+  const skippedExpressionCount = Math.max(0, inputExpressions.length - renderExpressions.length);
+  const activeRange = useMemo<GraphRange>(() => {
+    if (autoRange) return smartRange;
+    return {
+      xMin: Math.min(manualXMin, manualXMax - 0.001),
+      xMax: Math.max(manualXMax, manualXMin + 0.001),
+      yMin: Math.min(manualXMin, manualXMax - 0.001),
+      yMax: Math.max(manualXMax, manualXMin + 0.001),
+      tMin: Math.min(manualTMin, manualTMax - 0.001),
+      tMax: Math.max(manualTMax, manualTMin + 0.001),
+      worldExtent: Math.max(
+        Math.abs(manualXMin),
+        Math.abs(manualXMax),
+        ...(resolvedMode === 'parametric3d'
+          ? [Math.abs(manualTMin), Math.abs(manualTMax)]
+          : []),
+      ),
+    };
+  }, [autoRange, manualTMax, manualTMin, manualXMax, manualXMin, resolvedMode, smartRange]);
+  const audioEvaluator = useMemo(
+    () => parserBuildGraphEvaluator(renderEquation, resolvedMode),
+    [renderEquation, resolvedMode],
+  );
+  const ensureAudioEngine = useCallback(async () => {
+    if (audioEngineRef.current) {
+      try {
+        if (audioEngineRef.current.context.state === 'suspended') {
+          await audioEngineRef.current.context.resume();
+        }
+      } catch {
+        return null;
+      }
+      return audioEngineRef.current;
+    }
+    const AudioContextConstructor = getAudioContextConstructor();
+    if (!AudioContextConstructor) return null;
+    try {
+      const context = new AudioContextConstructor();
+      const master = context.createGain();
+      const destination = context.createMediaStreamDestination();
+      const tracerOscillator = context.createOscillator();
+      const tracerGain = context.createGain();
+      master.gain.value = audioEnabled ? 0.72 : 0;
+      master.connect(context.destination);
+      master.connect(destination);
+      tracerOscillator.type = 'sine';
+      tracerOscillator.frequency.value = AUDIO_MIN_HZ;
+      tracerGain.gain.value = 0.0001;
+      tracerOscillator.connect(tracerGain);
+      tracerGain.connect(master);
+      tracerOscillator.start();
+      await context.resume();
+      const engine = { context, master, destination, tracerOscillator, tracerGain };
+      audioEngineRef.current = engine;
+      return engine;
+    } catch {
+      return null;
+    }
+  }, [audioEnabled]);
+  const audioPosition = useCallback((currentProgress: number) => {
+    if (!audioEvaluator) return { height: 0, slope: 0 };
+    const traceProgress = easeInOutCubic(currentProgress);
+    const phase = phaseForProgress(currentProgress, speed);
+    const x = activeRange.xMin + traceProgress * (activeRange.xMax - activeRange.xMin);
+    const parameter = activeRange.tMin + traceProgress * (activeRange.tMax - activeRange.tMin);
+    const scope = {
+      x,
+      y: 0,
+      z: 0,
+      t: phase,
+      u: parameter,
+      theta: parameter,
+      v: phase,
+      r: phase,
+      phi: phase,
+      a: phase,
+      b: speed,
+    };
+    try {
+      if (audioEvaluator.kind === 'function') {
+        const height = Number(audioEvaluator.expression.evaluate(scope)) || 0;
+        return { height, slope: 0 };
+      }
+      if (audioEvaluator.kind === 'parametric') {
+        const y = Number(audioEvaluator.y.evaluate({ ...scope, t: parameter })) || 0;
+        return { height: y, slope: 0 };
+      }
+      if (audioEvaluator.kind === 'polar') {
+        const radius = Number(audioEvaluator.expression.evaluate({ ...scope, t: phase })) || 0;
+        return { height: radius * Math.sin(parameter), slope: 0 };
+      }
+      if (audioEvaluator.kind === 'vector') {
+        return { height: Number(audioEvaluator.y.evaluate(scope)) || 0, slope: 0 };
+      }
+      if (audioEvaluator.kind === 'points') {
+        const points = evaluatePointSet(audioEvaluator.points, phase, speed);
+        return {
+          height: points[Math.min(points.length - 1, Math.floor(traceProgress * points.length))]?.y ?? 0,
+          slope: 0,
+        };
+      }
+      if (audioEvaluator.kind === 'implicit' && resolvedMode === 'implicit3d') {
+        const theta = parameter;
+        const xCoordinate = Math.cos(theta) * 2.4;
+        const yCoordinate = Math.sin(theta) * 2.4;
+        let bestZ = 0;
+        let bestAbs = Number.POSITIVE_INFINITY;
+        for (let step = 0; step <= 36; step += 1) {
+          const zCoordinate = -3.4 + (step / 36) * 6.8;
+          const value = Number(audioEvaluator.expression.evaluate({ ...scope, x: xCoordinate, y: yCoordinate, z: zCoordinate }));
+          if (Number.isFinite(value) && Math.abs(value) < bestAbs) {
+            bestAbs = Math.abs(value);
+            bestZ = zCoordinate;
+          }
+        }
+        return { height: bestZ, slope: 0 };
+      }
+    } catch {
+      return { height: 0, slope: 0 };
+    }
+    return { height: 0, slope: 0 };
+  }, [activeRange, audioEvaluator, resolvedMode, speed]);
+
+  useEffect(() => {
+    audioLastProgressRef.current = -1;
+    audioLastYRef.current = null;
+    audioLastDirectionRef.current = 0;
+    audioLastBeatTimeRef.current = 0;
+    audioLastBeatIndexRef.current = -1;
+  }, [audioEnabled, renderEquation, resolvedMode]);
+
+  const syncAudioToProgress = useCallback((currentProgress: number) => {
+    if (!audioEnabled || !audioEngineRef.current) return;
+    const engine = audioEngineRef.current;
+    const position = audioPosition(currentProgress);
+    const height = position.height;
+    if (!Number.isFinite(height)) return;
+    const previousY = audioLastYRef.current;
+    const previousProgress = audioLastProgressRef.current;
+    const progressDelta = previousProgress >= 0 ? currentProgress - previousProgress : 0;
+    const slope = previousY === null || progressDelta === 0
+      ? 0
+      : Math.max(-12, Math.min(12, (height - previousY) / progressDelta));
+    const direction = previousY === null ? 0 : Math.sign(height - previousY);
+    const now = engine.context.currentTime;
+    const minInterval = Math.max(0.075, 0.18 / Math.max(0.25, speed));
+    const previousDirection = audioLastDirectionRef.current;
+    const changedDirection = direction !== 0
+      && previousDirection !== 0
+      && direction !== previousDirection;
+    const beatIndex = Math.floor(Math.max(0, Math.min(1, currentProgress)) * 16);
+    const fixedBeat = beatIndex > audioLastBeatIndexRef.current;
+    // Keep pitch tied to the tracer's instantaneous vertical coordinate. The
+    // slope still shapes the transient/gain, but never shifts the pitch away
+    // from the point currently drawn on the graph.
+    const normalizedHeight = Math.max(0, Math.min(1, (height + 4) / 8));
+    const normalizedSlope = Math.max(-1, Math.min(1, slope / 6));
+    const frequency = AUDIO_MIN_HZ
+      + normalizedHeight * (AUDIO_MAX_HZ - AUDIO_MIN_HZ);
+    try {
+      // The graph and this callback receive the same progress value. Updating
+      // one long-lived oscillator at the current AudioContext time avoids a
+      // scheduled tone or smoothing tail getting ahead of the visible tracer.
+      engine.tracerOscillator.frequency.setValueAtTime(
+        Math.max(AUDIO_MIN_HZ, Math.min(AUDIO_MAX_HZ, frequency)),
+        now,
+      );
+      engine.tracerGain.gain.setTargetAtTime(
+        playing ? 0.055 + Math.abs(normalizedSlope) * 0.035 : 0.0001,
+        now,
+        0.018,
+      );
+      if (playing && (changedDirection || fixedBeat) && now - audioLastBeatTimeRef.current > minInterval) {
+        const beatStrength = Math.max(0.45, Math.min(1.35, 0.6 + Math.abs(normalizedSlope) * 0.75 + normalizedHeight * 0.35));
+        const beatFrequency = 80 + normalizedHeight * 130 + Math.abs(normalizedSlope) * 35;
+        scheduleAudioBeat(engine, beatFrequency, beatStrength, now);
+        audioLastBeatTimeRef.current = now;
+      }
+    } catch {
+      // Web Audio is progressive enhancement and must not interrupt rendering.
+    }
+    if (direction !== 0) audioLastDirectionRef.current = direction;
+    audioLastBeatIndexRef.current = beatIndex;
+    audioLastYRef.current = height;
+    audioLastProgressRef.current = currentProgress;
+  }, [audioEnabled, audioPosition, playing, speed]);
+
+  useLayoutEffect(() => {
+    syncAudioToProgress(progress);
+  }, [progress, syncAudioToProgress]);
+
+  useEffect(() => {
+    if (!audioEnabled || typeof window === 'undefined') return;
+    const initializeAudioFromInteraction = () => {
+      void ensureAudioEngine();
+    };
+    window.addEventListener('pointerdown', initializeAudioFromInteraction, { once: true });
+    window.addEventListener('keydown', initializeAudioFromInteraction, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', initializeAudioFromInteraction);
+      window.removeEventListener('keydown', initializeAudioFromInteraction);
+    };
+  }, [audioEnabled, ensureAudioEngine]);
+
+  useEffect(() => () => {
+    audioEngineRef.current?.context.close();
+    audioEngineRef.current = null;
+  }, []);
+  const canvasEntries = useMemo(() => {
+    const entries = layers
+      .filter((layer) => layer.visible)
+      .flatMap((layer) => {
+        if (layer.id === activeLayerId) {
+          return renderExpressions.map((entry) => ({
+            ...entry,
+            mode: resolvedMode,
+            range: activeRange,
+          }));
+        }
+        if (
+          !parserExtractEquationVariableDefinitions(layer.equation).renderExpression
+          || !buildGraphEvaluator(layer.equation, layer.mode)
+        ) return [];
+        return [{
+          expression: layer.mode === 'surface3d' ? parserNormalizeSurfaceEquation(layer.equation) : layer.equation,
+          color: layer.color,
+          mode: layer.mode,
+          range: autoRange ? detectSmartRange(layer.equation, layer.mode) : activeRange,
+        }];
+      });
+    if (entries.length === 0) return [] as CanvasEntry[];
+    const compositeRange = autoRange
+      ? mergeGraphRanges(entries.map((entry) => entry.range))
+      : activeRange;
+    const coloredEntries: CanvasEntry[] = entries.map((entry, index) => ({
+      ...entry,
+      range: compositeRange,
+      color: entry.color || multiGraphColors[index % multiGraphColors.length],
+    }));
+    const threeDimensionalEntries = coloredEntries.filter((entry) => entry.mode === 'implicit3d' || entry.mode === 'surface3d');
+    const effectiveBlendMode = resolvedMode === 'implicit3d' ? 'union' : surfaceBlendMode;
+    if (effectiveBlendMode !== 'overlay' && threeDimensionalEntries.length > 1) {
+      return [{
+        expression: combineImplicitFields(threeDimensionalEntries, effectiveBlendMode),
+        color: threeDimensionalEntries[0].color,
+        mode: 'implicit3d' as const,
+        range: compositeRange,
+           implicitFields: threeDimensionalEntries.map((entry) => implicitFieldSource(entry.expression, entry.mode, implicitVariableProgram)),
+      }, ...coloredEntries.filter((entry) => entry.mode !== 'implicit3d' && entry.mode !== 'surface3d')];
+    }
+    return coloredEntries.map((entry) => (
+      entry.mode === 'implicit3d' || entry.mode === 'surface3d'
+         ? { ...entry, implicitFields: [implicitFieldSource(entry.expression, entry.mode, implicitVariableProgram)] }
+        : entry
+    ));
+  }, [activeLayerId, activeRange, autoRange, implicitVariableProgram, layers, renderExpressions, resolvedMode, surfaceBlendMode]);
+  useEffect(() => {
+    if (skippedExpressionCount === 0) {
+      setParserWarning('');
+      return;
+    }
+    const warning = `${skippedExpressionCount} expression${skippedExpressionCount === 1 ? '' : 's'} skipped; valid lines are still rendering.`;
+    setParserWarning(warning);
+    const timer = window.setTimeout(() => setParserWarning(''), 6500);
+    return () => window.clearTimeout(timer);
+  }, [equation, mode, skippedExpressionCount]);
+  const handleRenderStart = useCallback(() => setRenderStarted(true), []);
+  const handleRenderStatus = useCallback((status: 'ready' | 'error', message?: string) => {
+    setRenderHealth(status);
+    setRenderHealthMessage(message || '');
+  }, []);
+  const handleRuntimeWarning = useCallback((message: string) => {
+    setRuntimeWarning(message);
+  }, []);
+  useEffect(() => {
+    setRuntimeWarning('');
+    setRenderHealth('checking');
+    setRenderHealthMessage('');
+  }, [equation, mode, resolvedMode]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.title = 'Second Solution Studio — Visualize Mathematics Like Never Before';
+  }, []);
+
+  useEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    if (skipNextSceneResetRef.current) {
+      skipNextSceneResetRef.current = false;
+      return;
+    }
+    setRenderStarted(false);
+    setRenderHealth('checking');
+    setRenderHealthMessage('');
+    setProgress(0);
+    setPlaying(true);
+    setOriginView(false);
+  }, [equation, mode, sessionReady]);
+
+  useEffect(() => {
+    if (!sessionReady || !playing || captureActiveRef.current) return;
+    let frame = 0;
+    let previousTime = performance.now();
+    let elapsedSeconds = progressRef.current * duration;
+    const tick = (now: number) => {
+      const deltaSeconds = Math.max(0, (now - previousTime) / 1000);
+      previousTime = now;
+      elapsedSeconds += deltaSeconds;
+      const elapsedProgress = elapsedSeconds / Math.max(0.001, duration);
+      const nextProgress = isLooping
+        ? elapsedProgress - Math.floor(elapsedProgress)
+        : Math.min(1, elapsedProgress);
+      progressRef.current = nextProgress;
+      syncAudioToProgress(nextProgress);
+      setProgress(nextProgress);
+      if (!isLooping && nextProgress >= 1) {
+        setPlaying(false);
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [duration, isLooping, playing, sessionReady, syncAudioToProgress]);
+
+  useEffect(() => {
+    if (localResult?.valid && renderEquation.trim()) {
+      const key = `${resolvedMode}:${renderEquation.trim()}`;
+      if (key !== lastHistoryKey.current) {
+        lastHistoryKey.current = key;
+        setHistory((current) => {
+            const next = [{ equation: renderEquation.trim(), mode: resolvedMode, at: Date.now(), preview: makeHistoryPreview(renderEquation.trim(), resolvedMode, color) }, ...current.filter((item) => `${item.mode}:${item.equation}` !== key)].slice(0, 8);
+          return next;
+        });
+      }
+    }
+  }, [color, mode, renderEquation, resolvedMode, localResult]);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    const snapshot: StudioSessionState = {
+      equation,
+      mode,
+      layers,
+      activeLayerId,
+      theme,
+      playing,
+      isLooping,
+      progress,
+      autoRange,
+      manualXMin,
+      manualXMax,
+      manualTMin,
+      manualTMax,
+      speed,
+      duration,
+      lineWidth,
+      color,
+      showGrid,
+      gridDensity,
+      showAxes,
+      showTrail,
+      pointStyle,
+      originView,
+      showFps,
+      showWatermark,
+      watermark,
+      filename,
+      fps,
+      pageZoom,
+      graphZoom,
+      surfaceHeightScale,
+      surfaceBlendMode,
+      history,
+    };
+    sessionSnapshotRef.current = snapshot;
+    if (sessionSaveTimerRef.current !== null) return;
+    sessionSaveTimerRef.current = window.setTimeout(() => {
+      sessionSaveTimerRef.current = null;
+      const pendingSnapshot = sessionSnapshotRef.current;
+      if (pendingSnapshot) void saveEncryptedJson(SESSION_STORAGE_KEY, pendingSnapshot);
+    }, 350);
+  }, [
+    activeLayerId, autoRange, color, duration, equation, filename, fps, graphZoom,
+    gridDensity, history, layers, lineWidth, manualTMax, manualTMin, manualXMax,
+    manualXMin, mode, originView, pageZoom, playing, isLooping, pointStyle, progress,
+    sessionReady, showAxes, showFps, showGrid, showTrail, showWatermark, speed,
+    surfaceBlendMode, surfaceHeightScale,
+    theme, watermark,
+  ]);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    const message = 'Are you sure you want to reload? Your current equation state and unsaved animations will be lost.';
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (allowUnloadRef.current) return;
+      event.preventDefault();
+      event.returnValue = message;
+      return message;
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [sessionReady]);
+
+  const displayTime = (progress * duration).toFixed(1).padStart(4, '0');
+  const resetScene = () => {
+    setProgress(0);
+    setPlaying(true);
+  };
+  const resetViewToOrigin = () => {
+    setOriginView(true);
+    setGraphZoom(1);
+    setAutoRange(false);
+    setManualXMin(smartRange.xMin);
+    setManualXMax(smartRange.xMax);
+    setManualTMin(smartRange.tMin);
+    setManualTMax(smartRange.tMax);
+    setTopNotice('Viewport centered on origin');
+  };
+  const cycleTheme = () => {
+    const themes: StudioTheme[] = ['dark', 'neon', 'light'];
+    const nextTheme = themes[(themes.indexOf(theme) + 1) % themes.length];
+    setTheme(nextTheme);
+    setTopNotice(`${nextTheme === 'light' ? 'Minimal Light' : nextTheme === 'neon' ? 'Neon Glow' : 'Dark'} theme`);
+  };
+  const togglePlayback = () => {
+    void ensureAudioEngine();
+    if (progress >= 1) {
+      progressRef.current = 0;
+      syncAudioToProgress(0);
+      setProgress(0);
+      setPlaying(true);
+      return;
+    }
+    setPlaying((value) => !value);
+  };
+  const toggleAudio = () => {
+    const nextEnabled = !audioEnabled;
+    setAudioEnabled(nextEnabled);
+    const engine = audioEngineRef.current;
+    if (engine) {
+      engine.master.gain.setTargetAtTime(nextEnabled ? 0.72 : 0, engine.context.currentTime, 0.025);
+      if (nextEnabled && engine.context.state === 'suspended') {
+        void engine.context.resume().catch(() => setTopNotice('Audio synthesis is unavailable in this browser'));
+      }
+    } else if (nextEnabled) {
+      void ensureAudioEngine();
+    }
+    setTopNotice(nextEnabled ? 'Audio synthesis enabled' : 'Audio synthesis muted');
+  };
+  const zoomPage = (delta: number) => {
+    setPageZoom((value) => clampPageZoom(value + delta));
+  };
+  const zoomGraph = (delta: number) => {
+    setGraphZoom((value) => clampGraphZoom(value * Math.pow(GRAPH_ZOOM_BUTTON_FACTOR, delta)));
+  };
+  const handleGraphZoomChange = useCallback((value: number) => {
+    setGraphZoom(clampGraphZoom(value));
+  }, []);
+  const isGraphThreeDimensional = resolvedMode === 'implicit3d' || resolvedMode === 'surface3d' || resolvedMode === 'parametric3d';
+  const handleGraphWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    if (isGraphThreeDimensional || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+    event.preventDefault();
+    setGraphZoom((value) => clampGraphZoom(value * Math.exp(-event.deltaY * GRAPH_ZOOM_WHEEL_SENSITIVITY)));
+  };
+  const handleGraphPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isGraphThreeDimensional || event.pointerType !== 'touch') return;
+    pinchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchPointersRef.current.size === 2) {
+      const points = [...pinchPointersRef.current.values()];
+      pinchDistanceRef.current = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+    }
+  };
+  const handleGraphPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isGraphThreeDimensional || event.pointerType !== 'touch' || !pinchPointersRef.current.has(event.pointerId)) return;
+    pinchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchPointersRef.current.size !== 2) return;
+    const points = [...pinchPointersRef.current.values()];
+    const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+    const previousDistance = pinchDistanceRef.current;
+    if (!previousDistance || !Number.isFinite(distance) || distance <= 0) {
+      pinchDistanceRef.current = distance;
+      return;
+    }
+    pinchDistanceRef.current = distance;
+    setGraphZoom((value) => clampGraphZoom(value * (distance / previousDistance)));
+  };
+  const handleGraphPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    pinchPointersRef.current.delete(event.pointerId);
+    if (pinchPointersRef.current.size < 2) pinchDistanceRef.current = null;
+  };
+  const openDomainEditor = () => {
+    const usesParameterRange = resolvedMode === 'polar';
+    const currentMin = usesParameterRange ? activeRange.tMin : activeRange.xMin;
+    const currentMax = usesParameterRange ? activeRange.tMax : activeRange.xMax;
+    setDomainMinDraft(String(currentMin));
+    setDomainMaxDraft(String(currentMax));
+    setDomainEditorError('');
+    setDomainEditorOpen(true);
+  };
+  const applyDomainOverride = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const minimum = Number(domainMinDraft);
+    const maximum = Number(domainMaxDraft);
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) {
+      setDomainEditorError('Enter finite bounds with max greater than min.');
+      return;
+    }
+    if (resolvedMode === 'polar') {
+      setManualTMin(minimum);
+      setManualTMax(maximum);
+    } else {
+      setManualXMin(minimum);
+      setManualXMax(maximum);
+    }
+    setAutoRange(false);
+    setDomainEditorOpen(false);
+    setTopNotice(`Custom domain applied: ${minimum} … ${maximum}`);
+  };
+  const restoreAutomaticDomain = () => {
+    setAutoRange(true);
+    setDomainEditorOpen(false);
+    setDomainEditorError('');
+    setTopNotice('Automatic domain restored');
+  };
+  const hardResetSession = () => {
+    allowUnloadRef.current = true;
+    clearStoredSession(SESSION_STORAGE_KEY);
+    window.location.assign(`${import.meta.env.BASE_URL}studio`);
+  };
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping = target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT';
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) redoEquationEdit(); else undoEquationEdit();
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redoEquationEdit();
+        return;
+      }
+      if (isTyping) return;
+      if (event.key === 'Escape') {
+        setShowGraphMaker(false);
+        return;
+      }
+      if (event.code === 'Space') {
+        event.preventDefault();
+        togglePlayback();
+      }
+      if (event.key.toLowerCase() === 'r') {
+        setProgress(0);
+        setPlaying(true);
+      }
+      if (event.key.toLowerCase() === 'g') {
+        setShowGrid((value) => !value);
+        setTopNotice('Grid visibility toggled');
+      }
+      if (event.key.toLowerCase() === 'e') {
+        downloadPngRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [progress, redoEquationEdit, undoEquationEdit]);
+  const applyPreset = (preset: (typeof presets)[number]) => {
+    // Update only the selected input layer. Other layers keep their equations,
+    // modes, visibility, and colors while the global editor follows the active one.
+    const presetMode: ResolvedStudioMode = preset.mode === 'auto'
+      ? detectSmartMode(preset.equation)
+      : preset.mode;
+    const nextMode: ResolvedStudioMode = presetMode === 'function' ? 'function' : presetMode;
+    changeEquation(preset.equation);
+    setParsedEquation(preset.equation);
+    setMode(nextMode);
+    updateActiveLayer({ equation: preset.equation, mode: nextMode });
+    setProgress(0);
+    progressRef.current = 0;
+    setPlaying(true);
+  };
+  const selectLayer = (layer: EquationLayer) => {
+    setActiveLayerId(layer.id);
+    setEquation(layer.equation);
+    setParsedEquation(layer.equation);
+    setMode(layer.mode);
+    setColor(layer.color);
+    setOriginView(false);
+  };
+  const addLayer = () => {
+    const id = Math.max(...layers.map((layer) => layer.id), 0) + 1;
+    const is3d = resolvedMode === 'implicit3d' || resolvedMode === 'surface3d';
+    const nextMode: ResolvedStudioMode = is3d
+      ? resolvedMode
+      : 'function';
+    const nextLayer: EquationLayer = {
+      id,
+      equation: nextMode === 'surface3d'
+        ? 'z = 0.5 * sin(x) * cos(y)'
+        : nextMode === 'implicit3d'
+          ? 'x^2 + y^2 + z^2 = 3'
+          : 'cos(x - t) * 0.65',
+      mode: nextMode,
+      color: layerColors[(id - 1) % layerColors.length],
+      visible: true,
+    };
+    setLayers((current) => [...current, nextLayer]);
+    selectLayer(nextLayer);
+    setProgress(0);
+    setPlaying(true);
+  };
+  const removeLayer = (id: number) => {
+    if (layers.length === 1) return;
+    const remaining = layers.filter((layer) => layer.id !== id);
+    setLayers(remaining);
+    if (id === activeLayerId) selectLayer(remaining[0]);
+  };
+  const toggleLayer = (id: number) => {
+    setLayers((current) => current.map((layer) => layer.id === id ? { ...layer, visible: !layer.visible } : layer));
+  };
+  const removeHistory = (index: number) => {
+    setHistory((current) => {
+      const next = current.filter((_, itemIndex) => itemIndex !== index);
+      return next;
+    });
+  };
+  const clearHistory = () => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem('second-solution-history');
+        window.localStorage.removeItem('mae-history');
+      }
+    } catch { /* local storage is optional */ }
+    setHistory([]);
+  };
+
+  const downloadPng = () => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      setExportStatus('PNG export is not available outside a browser');
+      return;
+    }
+    const canvases = [
+      ...Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.webgl-canvas') ?? []),
+      ...Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.graph-canvas') ?? []),
+    ];
+    const canvas = canvases[0];
+    if (!canvas) return;
+    if (!canvases.some(canvasHasNonEmptyPixels)) {
+      setExportStatus('Wait for the local canvas pixel check to complete');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = canvas.width;
+    exportCanvas.height = canvas.height;
+    const context = exportCanvas.getContext('2d');
+    if (!context) return;
+    context.fillStyle = '#171a24';
+    context.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+    canvases.reverse().forEach((item) => context.drawImage(item, 0, 0, exportCanvas.width, exportCanvas.height));
+    context.fillStyle = 'rgba(241, 236, 222, .72)';
+    context.font = `${Math.max(12, exportCanvas.width / 75)}px DM Mono, monospace`;
+    context.fillText(BRAND_WATERMARK, 24, exportCanvas.height - 24);
+    if (showFps) {
+      context.fillStyle = '#ffcf75';
+      context.font = `${Math.max(11, exportCanvas.width / 88)}px DM Mono, monospace`;
+      context.fillText(`${fps} FPS`, exportCanvas.width - 80, 28);
+    }
+    const link = document.createElement('a');
+    link.download = `${filename.trim().replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || filenameFromEquation(renderEquation)}.png`;
+    try {
+      link.href = exportCanvas.toDataURL('image/png');
+      link.click();
+    } catch {
+      setExportStatus('PNG export is not supported in this browser');
+      window.setTimeout(() => setExportStatus(''), 2500);
+      return;
+    }
+    setExportStatus('PNG frame saved');
+    window.setTimeout(() => setExportStatus(''), 2500);
+  };
+  downloadPngRef.current = downloadPng;
+
+  const captureWebm = async () => {
+    if (captureActiveRef.current) return;
+    if (
+      typeof window === 'undefined'
+      || typeof document === 'undefined'
+      || typeof HTMLCanvasElement === 'undefined'
+      || typeof MediaRecorder === 'undefined'
+      || typeof MediaStream === 'undefined'
+      || typeof MediaRecorder.isTypeSupported !== 'function'
+    ) {
+      setExportStatus('HD video capture is not supported here');
+      return;
+    }
+    const audioEngine = await ensureAudioEngine();
+    if (!audioEngine) {
+      setExportStatus('Audio capture is not supported in this browser');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    const sourceCanvases = Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.graph-canvas') ?? []);
+    const webglCanvases = Array.from(canvasColumnRef.current?.querySelectorAll<HTMLCanvasElement>('canvas.webgl-canvas') ?? []);
+    if (sourceCanvases.length === 0 || !HTMLCanvasElement.prototype.captureStream) {
+      setExportStatus('HD video capture is not supported here');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    if (![...webglCanvases, ...sourceCanvases].some(canvasHasNonEmptyPixels)) {
+      setExportStatus('Wait for the local canvas pixel check to complete');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    const exportFps = 60;
+    const captureCanvas = document.createElement('canvas');
+    captureCanvas.width = 1280;
+    captureCanvas.height = 720;
+    const captureContext = captureCanvas.getContext('2d');
+    if (!captureContext) {
+      setExportStatus('HD video capture is not supported here');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    const drawCaptureSource = (source: HTMLCanvasElement) => {
+      const sourceAspect = source.width / Math.max(1, source.height);
+      const targetAspect = captureCanvas.width / captureCanvas.height;
+      const drawWidth = sourceAspect > targetAspect
+        ? captureCanvas.width
+        : captureCanvas.height * sourceAspect;
+      const drawHeight = sourceAspect > targetAspect
+        ? captureCanvas.width / sourceAspect
+        : captureCanvas.height;
+      captureContext.drawImage(
+        source,
+        (captureCanvas.width - drawWidth) / 2,
+        (captureCanvas.height - drawHeight) / 2,
+        drawWidth,
+        drawHeight,
+      );
+    };
+    const paintCaptureFrame = () => {
+      captureContext.fillStyle = '#171a24';
+      captureContext.fillRect(0, 0, captureCanvas.width, captureCanvas.height);
+      webglCanvases.slice().reverse().forEach(drawCaptureSource);
+      sourceCanvases.slice().reverse().forEach(drawCaptureSource);
+      captureContext.fillStyle = 'rgba(241, 236, 222, .78)';
+      captureContext.font = '16px DM Mono, monospace';
+      captureContext.textAlign = 'right';
+      captureContext.fillText(watermark || BRAND_WATERMARK, captureCanvas.width - 28, captureCanvas.height - 26);
+      if (showFps) {
+        captureContext.fillStyle = '#ffcf75';
+        captureContext.font = '14px DM Mono, monospace';
+        captureContext.fillText(`${fps} FPS`, captureCanvas.width - 28, 30);
+      }
+      captureContext.textAlign = 'start';
+    };
+    paintCaptureFrame();
+    const videoStream = captureCanvas.captureStream(exportFps);
+    const audioTrack = audioEngine.destination.stream.getAudioTracks()[0]?.clone();
+    if (!audioTrack) {
+      videoStream.getTracks().forEach((track) => track.stop());
+      setExportStatus('Audio capture is not supported in this browser');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    let stream: MediaStream;
+    try {
+      stream = new MediaStream([
+        ...videoStream.getVideoTracks(),
+        audioTrack,
+      ]);
+    } catch {
+      videoStream.getTracks().forEach((track) => track.stop());
+      setExportStatus('HD video capture is not supported here');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    const videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
+    const selectedMimeType = [
+      'video/mp4;codecs=avc1.640028,mp4a.40.2',
+      'video/mp4',
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+    ].find((type) => MediaRecorder.isTypeSupported(type));
+    if (!selectedMimeType) {
+      stream.getTracks().forEach((track) => track.stop());
+      setExportStatus('HD video capture is not supported here');
+      window.setTimeout(() => setExportStatus(''), 3000);
+      return;
+    }
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: selectedMimeType });
+    } catch {
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch {
+        stream.getTracks().forEach((track) => track.stop());
+        setExportStatus('HD video capture is not supported here');
+        window.setTimeout(() => setExportStatus(''), 3000);
+        return;
+      }
+    }
+    const recordingMimeType = recorder.mimeType || selectedMimeType;
+    const previousProgress = progressRef.current;
+    const previousPlaying = playing;
+    captureActiveRef.current = true;
+    setPlaying(true);
+    setExportStatus('Capturing live canvas at 60 FPS…');
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    recorder.onstop = () => {
+      if (captureRafRef.current !== null) {
+        cancelAnimationFrame(captureRafRef.current);
+        captureRafRef.current = null;
+      }
+      if (captureStopTimerRef.current !== null) {
+        window.clearTimeout(captureStopTimerRef.current);
+        captureStopTimerRef.current = null;
+      }
+      captureActiveRef.current = false;
+      progressRef.current = previousProgress;
+      setProgress(previousProgress);
+      setPlaying(previousPlaying);
+      stream.getTracks().forEach((track) => track.stop());
+       captureContext.clearRect(0, 0, captureCanvas.width, captureCanvas.height);
+      if (chunks.length === 0) {
+        setExportStatus('Video capture did not produce any frames');
+        window.setTimeout(() => setExportStatus(''), 3000);
+        return;
+      }
+      const isMp4 = recordingMimeType.includes('mp4');
+      const extension = isMp4 ? 'mp4' : 'webm';
+      const url = URL.createObjectURL(new Blob(chunks, { type: recordingMimeType }));
+      const link = document.createElement('a');
+      link.download = `${filename.trim().replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || filenameFromEquation(renderEquation)}.${extension}`;
+      link.href = url;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExportStatus(`${isMp4 ? 'MP4' : 'WebM'} HD scene saved`);
+      window.setTimeout(() => setExportStatus(''), 2500);
+    };
+    const startedAt = performance.now();
+    const captureFrame = (now: number) => {
+      const nextProgress = Math.min(1, (now - startedAt) / (duration * 1000));
+      progressRef.current = nextProgress;
+      setProgress(nextProgress);
+      // requestFrame is supported by manual canvas streams in Chromium. With a
+      // 60 FPS stream it is harmless elsewhere and makes keyframes explicit.
+      window.requestAnimationFrame(() => {
+        paintCaptureFrame();
+        videoTrack?.requestFrame?.();
+        if (nextProgress >= 1) {
+          captureStopTimerRef.current = window.setTimeout(() => {
+            if (recorder.state !== 'inactive') recorder.stop();
+          }, 50);
+        } else {
+          captureRafRef.current = requestAnimationFrame(captureFrame);
+        }
+      });
+    };
+    recorder.start(250);
+    progressRef.current = 0;
+    setProgress(0);
+    captureRafRef.current = requestAnimationFrame(captureFrame);
+  };
+
+  const validatorState = validation.isPending
+    ? { label: 'Validating locally', className: 'state-pending' }
+    : { label: 'Validator active', className: localResult?.valid === false ? 'state-error' : 'state-valid' };
+  const autocompleteOptions = ['sin(', 'cos(', 'tan(', 'log(', 'sqrt('];
+  const autocompleteSuggestions = autocompleteOptions.filter((item) => !equation.toLowerCase().includes(item.slice(0, -1))).slice(0, 5);
+  const usingSafeFallback = Boolean(renderEquation.trim() && (validation.isError || (localResult && !localResult.valid)));
+  const recoverWithFallback = () => {
+    changeEquation('sin(x + t) * exp(-0.08 * x^2)');
+    changeMode('function');
+    setTopNotice('Safe wave fallback loaded');
+    setPlaying(true);
+  };
+  const insertSuggestion = (suggestion: string) => {
+    const input = equationInputRef.current;
+    const cursor = input?.selectionStart ?? equation.length;
+    const next = `${equation.slice(0, cursor)}${suggestion}${equation.slice(input?.selectionEnd ?? cursor)}`;
+    changeEquation(next);
+    window.requestAnimationFrame(() => {
+      input?.focus();
+      const nextCursor = cursor + suggestion.length;
+      input?.setSelectionRange(nextCursor, nextCursor);
+    });
+  };
+  const domainReadout = resolvedMode === 'function' || resolvedMode === 'piecewise'
+    ? `x ${activeRange.xMin} … ${activeRange.xMax}`
+    : resolvedMode === 'parametric' || resolvedMode === 'polar'
+      ? `${resolvedMode === 'polar' ? 'θ' : 't'} ${activeRange.tMin.toFixed(2)} … ${activeRange.tMax.toFixed(2)}`
+      : `x ${activeRange.xMin} … ${activeRange.xMax} · y ${activeRange.yMin ?? activeRange.xMin} … ${activeRange.yMax ?? activeRange.xMax}`;
+
+  return (
+      <div ref={studioRootRef} className={`studio-app theme-${theme}`} style={{ '--page-zoom': pageZoom } as CSSProperties}>
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark"><AppIcon /></div>
+          <div>
+            <div className="brand-title-row">
+              <div className="brand-name">Second Solution Studio</div>
+              <span className="version-badge">v1.0.1 - Live</span>
+            </div>
+            <div className="brand-sub mono">studio / scene 01</div>
+            <div className="tagline">Visualize Mathematics Like Never Before</div>
+          </div>
+        </div>
+        <div className="topbar-center">
+          <span className="live-dot" />
+          <span className="mono">LIVE RENDER</span>
+          <span className="muted">·</span>
+          <span>{topNotice || 'GPU / GLSL accelerated'}</span>
+        </div>
+        <div className="top-actions">
+          <span className="shortcut">SPACE · R · E · G</span>
+           <button className="studio-home-btn" type="button" onClick={() => setLocation('/')} data-testid="button-main-page" aria-label="Return to Main Page">
+             <House className="icon" /> <span>Main Page</span>
+           </button>
+            <button className="graph-maker-btn" type="button" onClick={() => setShowGraphMaker(true)} data-testid="button-graph-maker" aria-label="Open Graph Maker">
+              <Waves className="icon" /> Graph Maker
+            </button>
+           <button className="icon-btn theme-cycle-btn" type="button" onClick={cycleTheme} data-testid="button-cycle-theme" aria-label={`Switch theme, currently ${theme}`} title={`Theme: ${theme}`}><Palette className="icon" /></button>
+          <div className="zoom-control" aria-label="Page zoom controls">
+            <button className="icon-btn" type="button" onClick={() => zoomPage(-0.1)} data-testid="button-page-zoom-out" aria-label="Zoom page out"><Minus className="icon" /></button>
+             <input
+               className="page-zoom-range"
+               type="range"
+               min="90"
+               max="200"
+               step="10"
+               value={Math.round(pageZoom * 100)}
+               onChange={(event) => setPageZoom(clampPageZoom(Number(event.target.value) / 100))}
+               aria-label="Page zoom from 90% to 200%"
+               data-testid="input-page-zoom"
+             />
+            <span className="zoom-value mono">{Math.round(pageZoom * 100)}%</span>
+            <button className="icon-btn" type="button" onClick={() => zoomPage(0.1)} data-testid="button-page-zoom-in" aria-label="Zoom page in"><Plus className="icon" /></button>
+          </div>
+          <button className="icon-btn studio-help-btn" type="button" onClick={() => setShowGuide(true)} data-testid="button-open-help" aria-label="Open help and keyboard shortcuts" title="Help and shortcuts">
+            <CircleHelp className="icon" />
+          </button>
+          <button className="icon-btn" type="button" onClick={() => setTopNotice('Inspector controls are live on the right')} data-testid="button-settings" aria-label="Open studio settings"><Settings2 className="icon" /></button>
+          <AccountMenu identity={account} onAuth={setStudioAuthModal} />
+        </div>
+        <span className="creator-credit creator-credit-studio">Made by SOHAIB KHAN</span>
+      </header>
+        {showGraphMaker && (
+          <div className="graph-maker-modal" role="dialog" aria-modal="true" aria-labelledby="graph-maker-title">
+            <div className="graph-maker-panel">
+              <div className="graph-maker-header">
+                <div>
+                  <p className="eyebrow">external studio</p>
+                  <h2 id="graph-maker-title">Graph Maker</h2>
+                </div>
+                <button className="icon-btn graph-maker-close" type="button" onClick={() => setShowGraphMaker(false)} data-testid="button-close-graph-maker" aria-label="Close Graph Maker">
+                  <X className="icon" />
+                </button>
+              </div>
+              <div className="graph-maker-frame-wrap">
+                <iframe
+                  className="graph-maker-frame"
+                  src="https://www.desmos.com/calculator?lang=en"
+                  title="Desmos Graphing Calculator"
+                  allow="fullscreen"
+                />
+              </div>
+              <div className="graph-maker-footer">
+                <span>Interactive graphing powered by Desmos.</span>
+                <a href="https://www.desmos.com/calculator" target="_blank" rel="noreferrer">Open full calculator <span aria-hidden="true">↗</span></a>
+              </div>
+            </div>
+          </div>
+        )}
+
+      <main className="studio-layout">
+         <aside className="left-panel">
+           <section className="panel-section">
+             <div className="panel-heading">
+               <div>
+                 <h2>{resolvedMode === 'points' ? 'Point layers' : 'Equation layers'}</h2>
+                 <span className="panel-subtitle">Each input renders as a native scene layer.</span>
+               </div>
+               <button className="add-layer-inline" type="button" onClick={addLayer} data-testid="button-add-layer-top">
+                 <Plus className="icon" /> Add equation
+               </button>
+             </div>
+             <div className="layer-list equation-layer-list">
+               {layers.map((layer, index) => {
+                 const isActive = layer.id === activeLayerId;
+                 const layerDetails = modeDetails[layer.mode];
+                 return (
+                   <div className={`layer-card equation-layer-card ${isActive ? 'active' : ''}`} key={layer.id}>
+                     <div className="equation-layer-header">
+                       <span className="layer-swatch" style={{ '--layer-color': layer.color } as CSSProperties} />
+                       <span className="eyebrow">INPUT {String(index + 1).padStart(2, '0')}</span>
+                       <span className="layer-mode-pill mono">{layerDetails.title}</span>
+                       <div className="layer-actions">
+                         <button className={`layer-toggle ${layer.visible ? 'on' : ''}`} type="button" onClick={() => toggleLayer(layer.id)} aria-label={`${layer.visible ? 'Hide' : 'Show'} input ${index + 1}`} aria-pressed={layer.visible}>
+                           {layer.visible ? <Eye className="icon" /> : <EyeOff className="icon" />}
+                         </button>
+                         <button className="icon-btn" type="button" onClick={() => removeLayer(layer.id)} disabled={layers.length === 1} aria-label={`Delete input ${index + 1}`} title={layers.length === 1 ? 'Keep one equation input' : 'Delete equation input'}><Trash2 className="icon" /></button>
+                       </div>
+                     </div>
+                     <textarea
+                       ref={isActive ? equationInputRef : undefined}
+                       className={`equation-input layer-equation-input ${layer.mode === 'points' ? 'points-input' : ''}`}
+                       value={layer.equation}
+                       onFocus={() => selectLayer(layer)}
+                       onChange={(event) => changeLayerEquation(layer.id, event.target.value)}
+                       placeholder={layerDetails.placeholder}
+                       rows={layer.mode === 'points' ? 5 : undefined}
+                       spellCheck={false}
+                       data-testid={`input-equation-layer-${index}`}
+                       aria-label={`Equation input ${index + 1}`}
+                     />
+                     <div className="input-footer">
+                       <span className="input-hint mono">{layer.mode === 'points' ? 'One (x, y) pair per line' : isActive && mode === 'auto' ? `Detected as ${layerDetails.title} · use t for time` : 'Use t for time'}</span>
+                       {isActive && <div className="input-edit-tools">
+                         <div className="edit-history-buttons" aria-label="Equation edit history">
+                           <button className="icon-btn" type="button" onClick={undoEquationEdit} disabled={editHistoryIndex === 0} aria-label="Undo equation edit" title="Undo (Ctrl/Cmd+Z)"><Undo2 className="icon" /></button>
+                           <button className="icon-btn" type="button" onClick={redoEquationEdit} disabled={editHistoryIndex >= editHistory.length - 1} aria-label="Redo equation edit" title="Redo (Ctrl/Cmd+Y)"><Redo2 className="icon" /></button>
+                         </div>
+                         <span className={`validate-state ${validatorState.className}`} data-testid="status-validation">
+                           <span className="state-dot" /> {validatorState.label}
+                         </span>
+                       </div>}
+                     </div>
+                     {isActive && layer.mode !== 'points' && autocompleteSuggestions.length > 0 && (
+                       <div className="autocomplete-row">
+                         <span className="autocomplete-label">Function palette</span>
+                         {autocompleteSuggestions.map((suggestion) => (
+                           <button className="autocomplete-chip" type="button" key={suggestion} onClick={() => insertSuggestion(suggestion)}>{suggestion}</button>
+                         ))}
+                       </div>
+                     )}
+                   </div>
+                 );
+               })}
+             </div>
+           </section>
+
+          <section className="panel-section">
+              <div className="panel-heading">
+                <h2>Start from a shape</h2>
+                <span className="eyebrow">presets</span>
+              </div>
+              <div className="preset-grid">
+                {presets.map((preset) => (
+                  <button className="preset-card" type="button" key={preset.label} onClick={() => applyPreset(preset)} data-testid={`button-preset-${preset.label.toLowerCase().replaceAll(' ', '-')}`}>
+                    <span className="preset-symbol">{preset.symbol}</span>
+                    <span className="preset-name">{preset.label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel-section">
+            <div className="panel-heading">
+              <h2>Interpret as</h2>
+              <span className="eyebrow">mode</span>
+            </div>
+            <select
+              className="mode-select"
+              value={mode}
+              onChange={(event) => changeMode(event.target.value as StudioMode)}
+              data-testid="select-mode"
+              aria-label="Equation mode"
+            >
+              {(Object.keys(modeDetails) as StudioMode[]).map((item) => (
+                <option key={item} value={item}>{modeDetails[item].title} · {modeDetails[item].helper}</option>
+              ))}
+            </select>
+          </section>
+
+          <section className="panel-section">
+            <div className="panel-heading">
+               <button className="section-toggle" type="button" onClick={() => setHistoryOpen((value) => !value)} aria-expanded={historyOpen} aria-controls="equation-history-drawer">
+                 <h2>Equation history</h2><span className="eyebrow">{historyOpen ? 'open' : 'closed'}</span>
+               </button>
+               <div className="panel-heading-actions">
+                 {history.length > 0 && <button className="icon-btn" type="button" onClick={clearHistory} data-testid="button-clear-history" aria-label="Clear equation history"><Trash2 className="icon" /></button>}
+               </div>
+            </div>
+             {historyOpen && (history.length > 0 ? (
+              <div className="history-list">
+                {history.map((item, index) => (
+                  <div className="history-row" key={`${item.mode}-${item.equation}-${item.at}`}>
+                     <img className="history-thumb" src={item.preview || makeHistoryPreview(item.equation, item.mode)} alt="" />
+                     <button className="history-load" type="button" onClick={() => { changeEquation(item.equation); changeMode(item.mode); }} data-testid={`button-history-${index}`}>
+                      <span className="history-equation">{item.equation}</span>
+                      <span className="history-meta mono">{item.mode} · {new Date(item.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                    </button>
+                    <button className="icon-btn" type="button" onClick={() => removeHistory(index)} data-testid={`button-delete-history-${index}`} aria-label={`Remove history item ${index + 1}`}><X className="icon" /></button>
+                  </div>
+                ))}
+              </div>
+             ) : <div className="empty-history" id="equation-history-drawer">Validated cues will stay here for quick returns.</div>)}
+          </section>
+        </aside>
+
+        <section className="canvas-column" ref={canvasColumnRef}>
+          <div className="canvas-toolbar">
+            <div className="scene-id">
+              <span className="scene-index mono">01</span>
+                <span className="scene-name">{smartPatternLabel(renderEquation, resolvedMode)} / {renderEquation || 'Untitled scene'}</span>
+               <span className="scene-status mono">{renderHealth === 'ready' ? 'READY' : renderHealth === 'error' ? 'CHECK' : 'PREVIEW'}</span>
+            </div>
+            {canvasEntries.length > 0 && <div className="multi-legend" aria-label="Active line colors">
+              {canvasEntries.map((entry, index) => <span className="multi-legend-item" key={`${entry.mode}-${entry.expression}-${index}`}><i style={{ backgroundColor: entry.color, boxShadow: `0 0 8px ${entry.color}` }} /> L{index + 1}</span>)}
+            </div>}
+            <div className="canvas-actions">
+               <button className="dark-icon-btn" type="button" onClick={resetScene} data-testid="button-reset-scene" aria-label="Reset scene"><RotateCcw className="icon" /></button>
+                <button className="dark-icon-btn" type="button" onClick={resetViewToOrigin} data-testid="button-reset-origin" aria-label="Reset viewport to origin">0</button>
+                 <button className="dark-icon-btn" type="button" onClick={() => zoomGraph(-1)} data-testid="button-graph-zoom-out" aria-label={`Zoom graph out, minimum ${GRAPH_ZOOM_MIN}x`}><Minus className="icon" /></button>
+                 <span className="graph-zoom-value mono" aria-live="polite" title={`Graph zoom range: ${GRAPH_ZOOM_MIN}x to ${GRAPH_ZOOM_MAX}x`}>{graphZoom.toFixed(2)}×</span>
+                 <button className="dark-icon-btn" type="button" onClick={() => zoomGraph(1)} data-testid="button-graph-zoom-in" aria-label={`Zoom graph in, maximum ${GRAPH_ZOOM_MAX}x`}><Plus className="icon" /></button>
+               <button className="dark-icon-btn" type="button" onClick={downloadPng} data-testid="button-export-png" aria-label="Export PNG"><Download className="icon" /></button>
+            </div>
+          </div>
+          <div
+            className="canvas-wrap"
+            onWheel={handleGraphWheel}
+            onPointerDown={handleGraphPointerDown}
+            onPointerMove={handleGraphPointerMove}
+            onPointerUp={handleGraphPointerEnd}
+            onPointerCancel={handleGraphPointerEnd}
+            onPointerLeave={handleGraphPointerEnd}
+          >
+             <div className="canvas-layer-stack">
+                {canvasEntries.map((entry, index) => (
+                  <GraphCanvas
+                    key={`${entry.mode}-${entry.expression}-${index}`}
+                    equation={entry.expression}
+                    mode={entry.mode}
+                    range={entry.range}
+                    playing={playing}
+                    progress={progress}
+                    speed={speed}
+                     showGrid={showGrid && index === 0}
+                    gridDensity={gridDensity}
+                    showAxes={showAxes && index === 0}
+                    showTrail={showTrail}
+                    lineWidth={lineWidth}
+                    color={entry.color}
+                    implicitFields={entry.implicitFields}
+                     showBackdrop={index === 0}
+                    pointStyle={pointStyle}
+                     graphZoom={graphZoom}
+                    surfaceHeightScale={surfaceHeightScale}
+                    originView={originView}
+                     cameraFrame={sharedCameraFrameRef.current}
+                     cameraSource={index === 0}
+                     animationExpected={animationExpected}
+                    renderQuality={renderQuality}
+                    onAutoRenderQualityFallback={handleAutoRenderQualityFallback}
+                    onGraphZoomChange={handleGraphZoomChange}
+                    onRenderStart={handleRenderStart}
+                     onRenderStatus={handleRenderStatus}
+                    onRuntimeWarning={handleRuntimeWarning}
+                  />
+                ))}
+              </div>
+            <div className="canvas-overlay">
+              <div className="scan-line" />
+               <div className="canvas-watermark mono" aria-label="Permanent watermark">{BRAND_WATERMARK}</div>
+               <div className="canvas-readout mono">
+                  <div>MODE <strong>{resolvedMode.toUpperCase()}</strong> <span className="muted">· {smartPatternLabel(renderEquation, resolvedMode)}</span>{usingSafeFallback && <span className="fps-readout"> · SAFE</span>}</div>
+                <div>FRAME <strong>{String(Math.round(progress * 240)).padStart(3, '0')}</strong> / 240</div>
+                 {showFps && <div className="fps-readout">FPS <strong>{fps}</strong></div>}
+                  <div className="quality-selector" ref={qualitySelectorRef}>
+                    <button
+                      type="button"
+                      className="quality-menu-trigger"
+                      aria-label="Render Quality"
+                      aria-haspopup="menu"
+                      aria-expanded={qualityMenuOpen}
+                      onClick={() => setQualityMenuOpen((isOpen) => !isOpen)}
+                    >
+                      <span>Quality: {renderQualityOptions.find((option) => option.value === renderQuality)?.label ?? 'Medium'}</span>
+                      <ChevronDown className="icon" aria-hidden="true" />
+                    </button>
+                    {qualityMenuOpen && (
+                      <div className="quality-menu" role="menu" aria-label="Choose render quality">
+                        {renderQualityOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`quality-menu-option ${renderQuality === option.value ? 'active' : ''}`}
+                            role="menuitemradio"
+                            aria-checked={renderQuality === option.value}
+                            onClick={() => handleRenderQualityChange(option.value)}
+                          >
+                            <span>{option.label}</span>
+                            <span>{option.detail}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="domain-readout-wrap">
+                    <button
+                      className="domain-readout-button"
+                      type="button"
+                      onClick={openDomainEditor}
+                      aria-expanded={domainEditorOpen}
+                      aria-controls="domain-editor-popover"
+                      title="Click to edit the graph domain"
+                      data-testid="button-domain-editor"
+                    >
+                      <span>DOMAIN</span> <strong>{domainReadout}</strong>
+                    </button>
+                    {domainEditorOpen && (
+                      <form
+                        className="domain-editor-popover"
+                        id="domain-editor-popover"
+                        onSubmit={applyDomainOverride}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <div className="domain-editor-title">
+                          <strong>Custom domain</strong>
+                          <button type="button" className="domain-editor-close" onClick={() => setDomainEditorOpen(false)} aria-label="Close domain editor">×</button>
+                        </div>
+                        <div className="domain-editor-fields">
+                          <label>
+                            Min
+                            <input
+                              className="range-number"
+                              type="number"
+                              step="any"
+                              value={domainMinDraft}
+                              onChange={(event) => setDomainMinDraft(event.target.value)}
+                              autoFocus
+                              data-testid="input-domain-min"
+                            />
+                          </label>
+                          <label>
+                            Max
+                            <input
+                              className="range-number"
+                              type="number"
+                              step="any"
+                              value={domainMaxDraft}
+                              onChange={(event) => setDomainMaxDraft(event.target.value)}
+                              data-testid="input-domain-max"
+                            />
+                          </label>
+                        </div>
+                        {domainEditorError && <div className="domain-editor-error" role="alert">{domainEditorError}</div>}
+                        <div className="domain-editor-actions">
+                          <button type="button" className="domain-editor-secondary" onClick={restoreAutomaticDomain}>Use auto</button>
+                          <button type="submit" className="domain-editor-apply">Apply</button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+              </div>
+                 <div className="canvas-legend"><span className="legend-line" /> {canvasEntries.length > 1 ? `${canvasEntries.length} active traces` : canvasEntries.length === 0 ? 'no active traces' : 'active trace'} <span className="muted">·</span> t = {displayTime}s</div>
+                  <div className={`canvas-empty ${canvasEntries.length > 0 && (playing || progress >= 1) ? 'is-hidden' : ''}`} aria-hidden={canvasEntries.length > 0 && (playing || progress >= 1)}>
+                  <div className="canvas-empty-card">
+                       <h3>{canvasEntries.length === 0 ? 'No visible equations' : 'Scene paused at the cue'}</h3>
+                     <p>
+                        {canvasEntries.length === 0
+                          ? 'Turn a layer back on to continue exploring the scene.'
+                          : localResult?.valid
+                         ? localResult.verificationMessage
+                         : localResult?.error || 'Try a simpler expression, then keep iterating.'}
+                     </p>
+                  </div>
+               </div>
+                  {renderHealth === 'error' && resolvedMode !== 'implicit3d' && resolvedMode !== 'surface3d' && resolvedMode !== 'parametric3d' && <div className="render-health-alert" role="alert"><strong>Render check</strong><span>{renderHealthMessage}</span></div>}
+            </div>
+          </div>
+          <div className="transport">
+             {!isLooping && progress >= 1 && renderHealth === 'ready' && <strong className="scene-complete-status" role="status">Scene complete.</strong>}
+             <button className="play-btn" type="button" onClick={togglePlayback} data-testid="button-playback" aria-label={playing ? 'Pause animation' : 'Play animation'}>
+              {playing ? <Pause className="icon" /> : <Play className="icon" />}
+            </button>
+            <button
+              className={`loop-btn ${isLooping ? 'is-on' : ''}`}
+              type="button"
+              onClick={() => setIsLooping((value) => !value)}
+              aria-pressed={isLooping}
+              aria-label={isLooping ? 'Disable infinite looping' : 'Enable infinite looping'}
+              title={isLooping ? 'Disable infinite looping' : 'Enable infinite looping'}
+              data-testid="button-infinite-loop"
+            >
+              ∞
+            </button>
+            <span className="transport-time mono">{displayTime}s</span>
+            <input className="timeline" type="range" min="0" max="1" step="0.001" value={progress} onChange={(event) => setProgress(Number(event.target.value))} data-testid="input-timeline" aria-label="Animation timeline" />
+             <div className="transport-progress" role="progressbar" aria-label="Drawing progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}><span style={{ width: `${progress * 100}%` }} /></div>
+             <span className="transport-percent mono">{Math.round(progress * 100)}%</span>
+            <span className="transport-speed mono">{speed.toFixed(1)}×</span>
+            <div className="transport-audio-actions">
+              <button
+                className={`audio-toggle ${audioEnabled ? 'is-on' : ''}`}
+                type="button"
+                onClick={toggleAudio}
+                aria-pressed={audioEnabled}
+                aria-label={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
+                title={audioEnabled ? 'Mute audio synthesis' : 'Unmute audio synthesis'}
+                data-testid="button-audio-toggle"
+              >
+                {audioEnabled ? <Volume2 className="icon" /> : <VolumeX className="icon" />}
+                <span>{audioEnabled ? 'Audio ON' : 'Audio muted'}</span>
+              </button>
+              <button className="transport-help" type="button" onClick={() => setShowGuide(true)} aria-label="Open math mode guide and troubleshooting" data-testid="button-open-guide">
+                <CircleHelp className="icon" />
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {showGuide && (
+          <div className="guide-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowGuide(false); }}>
+          <aside className="guide-drawer" role="dialog" aria-modal="true" aria-labelledby="studio-guide-title" aria-label="Math mode guide and troubleshooting">
+            <div className="guide-drawer-header">
+              <div><span className="landing-eyebrow">Studio guide</span><h2 id="studio-guide-title">Make the render make sense.</h2></div>
+              <button className="icon-btn" type="button" onClick={() => setShowGuide(false)} aria-label="Close guide">×</button>
+            </div>
+            <div className="guide-drawer-content">
+              <section className="guide-block">
+                <h3>Mode guides</h3>
+                <div className="guide-mode-grid">
+                  {(Object.keys(modeDetails) as StudioMode[]).map((guideMode) => (
+                    <button type="button" key={guideMode} className={mode === guideMode ? 'active' : ''} onClick={() => { changeMode(guideMode); setShowGuide(false); }}>
+                      <strong>{modeDetails[guideMode].title}</strong><span>{modeDetails[guideMode].placeholder}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+              <section className="guide-block">
+                <h3>Keyboard shortcuts</h3>
+                <ul className="guide-shortcuts">
+                  <li><kbd>Space</kbd><span>Play or pause the current scene</span></li>
+                  <li><kbd>R</kbd><span>Reset the animation to its first frame</span></li>
+                  <li><kbd>E</kbd><span>Open export controls</span></li>
+                  <li><kbd>G</kbd><span>Open Graph Maker</span></li>
+                </ul>
+              </section>
+              <section className="guide-block">
+                <h3>Graph control tips</h3>
+                <ol>
+                  <li>Use Auto Range first, then tune the viewport manually when comparing scenes.</li>
+                  <li>Drag the graph to pan and use the graph zoom controls for detail.</li>
+                  <li>Motion trail adds history; disable it when exploring dense point sets.</li>
+                  <li>3D Surface and 3D Implicit modes require hardware-accelerated WebGL shaders.</li>
+                </ol>
+              </section>
+              <section className="guide-block">
+                <h3>Quick setup</h3>
+                <p className="guide-copy">Choose a preset or type an equation, select the matching mode, confirm the local validator accepts it, then press play. Add layers when you want to compare several expressions in one scene.</p>
+              </section>
+              <section className="guide-reset-card">
+                <div><strong>Hard Reset Session</strong><span>Clear encrypted local scene data and reopen the studio.</span></div>
+                <button type="button" onClick={hardResetSession}>Reset safely</button>
+              </section>
+            </div>
+          </aside>
+          </div>
+        )}
+
+        <aside className="right-panel">
+           <section className="panel-section">
+             <div className="panel-heading"><h2>Studio atmosphere</h2><Palette className="icon muted" /></div>
+             <select className="theme-select" value={theme} onChange={(event) => setTheme(event.target.value as StudioTheme)} aria-label="Studio theme" data-testid="select-theme">
+               <option value="light">Minimal Light</option>
+               <option value="dark">Dark</option>
+               <option value="neon">Neon Glow</option>
+             </select>
+             <p className="setting-desc">Affects the workspace, not the math.</p>
+           </section>
+          <section className="panel-section">
+            <div className="panel-heading"><h2>Scene timing</h2><Gauge className="icon muted" /></div>
+            <div className="control-row">
+              <label className="control-label" htmlFor="duration">Duration <span className="control-value">{duration}s</span></label>
+              <input id="duration" className="range-input" type="range" min="2" max="20" step="1" value={duration} onChange={(event) => setDuration(Number(event.target.value))} data-testid="input-duration" />
+            </div>
+            <div className="control-row">
+              <label className="control-label" htmlFor="speed">Playback rate <span className="control-value">{speed.toFixed(1)}×</span></label>
+              <input id="speed" className="range-input" type="range" min="0.25" max="2" step="0.25" value={speed} onChange={(event) => setSpeed(Number(event.target.value))} data-testid="input-speed" />
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <div className="panel-heading"><h2>Range &amp; framing</h2><span className="eyebrow">{autoRange ? 'smart' : 'manual'}</span></div>
+            <div className="setting-row">
+              <div className="setting-copy">Auto Range <span className="setting-desc">Fit the active scene automatically</span></div>
+              <button className={`switch ${autoRange ? 'on' : ''}`} type="button" onClick={() => setAutoRange((value) => !value)} data-testid="button-toggle-auto-range" aria-label="Toggle automatic range" aria-pressed={autoRange} />
+            </div>
+            {autoRange ? (
+              <div className="range-summary mono">
+                 {(resolvedMode === 'function' || resolvedMode === 'piecewise') && <>x: {smartRange.xMin} → {smartRange.xMax}</>}
+                {(resolvedMode === 'parametric' || resolvedMode === 'polar') && <>{resolvedMode === 'polar' ? 'θ' : 't'}: {smartRange.tMin.toFixed(2)} → {smartRange.tMax.toFixed(2)}</>}
+                {resolvedMode === 'points' && <>Sequential: first → last point</>}
+                 {(resolvedMode === 'implicit3d' || resolvedMode === 'surface3d' || resolvedMode === 'implicit') && <>x: {smartRange.xMin} → {smartRange.xMax} · y: {smartRange.yMin} → {smartRange.yMax}</>}
+                 {resolvedMode === 'vector' && <>Adaptive direction-field viewport</>}
+              </div>
+             ) : resolvedMode === 'points' || resolvedMode === 'implicit' || resolvedMode === 'implicit3d' || resolvedMode === 'vector' ? (
+               <div className="range-summary">Manual range is not needed for {resolvedMode} scenes.</div>
+            ) : (
+              <div className="range-fields">
+                  <label> {resolvedMode === 'polar' ? 'θ min' : 'X min'} <input className="range-number" type="number" step="0.1" value={resolvedMode === 'polar' ? manualTMin : manualXMin} onChange={(event) => resolvedMode === 'polar' ? setManualTMin(Number(event.target.value)) : setManualXMin(Number(event.target.value))} data-testid={resolvedMode === 'polar' ? 'input-theta-min' : 'input-x-min'} /></label>
+                  <label> {resolvedMode === 'polar' ? 'θ max' : 'X max'} <input className="range-number" type="number" step="0.1" value={resolvedMode === 'polar' ? manualTMax : manualXMax} onChange={(event) => resolvedMode === 'polar' ? setManualTMax(Number(event.target.value)) : setManualXMax(Number(event.target.value))} data-testid={resolvedMode === 'polar' ? 'input-theta-max' : 'input-x-max'} /></label>
+                  {resolvedMode !== 'polar' && <label> T min <input className="range-number" type="number" step="0.1" value={manualTMin} onChange={(event) => setManualTMin(Number(event.target.value))} data-testid="input-t-min" /></label>}
+                  {resolvedMode !== 'polar' && <label> T max <input className="range-number" type="number" step="0.1" value={manualTMax} onChange={(event) => setManualTMax(Number(event.target.value))} data-testid="input-t-max" /></label>}
+              </div>
+            )}
+          </section>
+
+          <section className="panel-section">
+            <div className="panel-heading"><h2>Trace treatment</h2><Waves className="icon muted" /></div>
+             {resolvedMode === 'surface3d' && (
+               <div className="control-row">
+                 <label className="control-label" htmlFor="surface-height-scale">
+                   Z-height scale <span className="control-value">{surfaceHeightScale.toFixed(2)}×</span>
+                 </label>
+                 <input
+                   id="surface-height-scale"
+                   className="range-input"
+                   type="range"
+                   min="0.25"
+                   max="4"
+                   step="0.25"
+                   value={surfaceHeightScale}
+                   onChange={(event) => setSurfaceHeightScale(Number(event.target.value))}
+                   data-testid="input-surface-height-scale"
+                   aria-label="Z-height scale multiplier"
+                 />
+                 <span className="setting-desc">Auto-normalized height displacement multiplier</span>
+               </div>
+             )}
+              {(resolvedMode === 'surface3d' || resolvedMode === 'implicit3d') && (
+                <div className="control-row">
+                  <label className="control-label" htmlFor="surface-blend-mode">
+                    Composite render <span className="control-value">{resolvedMode === 'implicit3d' ? 'CSG union' : surfaceBlendMode}</span>
+                  </label>
+                  <select
+                    id="surface-blend-mode"
+                    className="select-control"
+                    value={resolvedMode === 'implicit3d' ? 'union' : surfaceBlendMode}
+                    onChange={(event) => setSurfaceBlendMode(event.target.value as SurfaceBlendMode)}
+                    disabled={resolvedMode === 'implicit3d'}
+                    data-testid="select-surface-blend-mode"
+                    aria-label="Composite render mode"
+                  >
+                    <option value="overlay">Overlay colored meshes</option>
+                    <option value="union">Union / peak blend</option>
+                    <option value="intersection">Intersection / valley blend</option>
+                    <option value="additive">Additive field blend</option>
+                  </select>
+                    <span className="setting-desc">{resolvedMode === 'implicit3d' ? 'Active solids use GPU polynomial smooth-min CSG with adaptive raymarching.' : '3D surfaces are evaluated directly in the GPU fragment shader.'}</span>
+                </div>
+              )}
+            <div className="control-row">
+              <label className="control-label" htmlFor="line-width">Line weight <span className="control-value">{lineWidth}px</span></label>
+              <input id="line-width" className="range-input" type="range" min="1" max="5" step="0.5" value={lineWidth} onChange={(event) => setLineWidth(Number(event.target.value))} data-testid="input-line-width" />
+            </div>
+            <div className="control-row swatch-row">
+              <label className="control-label" htmlFor="trace-color">Trace color <span className="control-value">{color}</span></label>
+               <input id="trace-color" className="color-input" type="color" value={color} onChange={(event) => changeColor(event.target.value)} data-testid="input-trace-color" />
+            </div>
+             {resolvedMode === 'points' && (
+              <div className="control-row">
+                <label className="control-label" htmlFor="point-style">Point render</label>
+                <select id="point-style" className="select-control" value={pointStyle} onChange={(event) => setPointStyle(event.target.value as 'line' | 'particles')} data-testid="select-point-style">
+                  <option value="line">Connected line</option>
+                  <option value="particles">Particles</option>
+                </select>
+              </div>
+            )}
+            <div className="setting-row">
+              <div className="setting-copy">Grid <span className="setting-desc">Coordinate scaffolding</span></div>
+              <button className={`switch ${showGrid ? 'on' : ''}`} type="button" onClick={() => setShowGrid((value) => !value)} data-testid="button-toggle-grid" aria-label="Toggle grid" aria-pressed={showGrid} />
+            </div>
+             <div className="control-row">
+               <label className="control-label" htmlFor="grid-density">Grid density <span className="control-value">{gridDensity.toFixed(1)}×</span></label>
+               <input id="grid-density" className="range-input" type="range" min="0.5" max="2" step="0.25" value={gridDensity} onChange={(event) => setGridDensity(Number(event.target.value))} data-testid="input-grid-density" />
+             </div>
+            <div className="setting-row">
+              <div className="setting-copy">Axes <span className="setting-desc">x / y references</span></div>
+              <button className={`switch ${showAxes ? 'on' : ''}`} type="button" onClick={() => setShowAxes((value) => !value)} data-testid="button-toggle-axes" aria-label="Toggle axes" aria-pressed={showAxes} />
+            </div>
+            <div className="setting-row">
+              <div className="setting-copy">Motion trail <span className="setting-desc">Echo previous frames</span></div>
+              <button className={`switch ${showTrail ? 'on' : ''}`} type="button" onClick={() => setShowTrail((value) => !value)} data-testid="button-toggle-trail" aria-label="Toggle motion trail" aria-pressed={showTrail} />
+            </div>
+          </section>
+
+          <section className="panel-section">
+            <div className="panel-heading"><h2>Local validation</h2><Activity className="icon muted" /></div>
+            {validation.isPending ? (
+              <div className="local-result"><div className="result-title"><span className="status-dot state-pending" /> Validating locally</div><p className="result-copy">Checking structure and finding variables in your browser…</p></div>
+            ) : localResult ? (
+              <div className={`local-result ${localResult.valid ? 'valid' : 'invalid'}`} data-testid="status-local-result">
+                <div className={`result-title ${localResult.valid ? 'state-valid' : 'state-error'}`}><span className="status-dot" /> {localResult.valid ? 'Expression accepted' : 'Expression needs edits'}</div>
+                <p className="result-copy">{localResult.valid ? `Detected as ${modeDetails[localResult.mode].title}. ${localResult.verificationMessage}` : localResult.verificationMessage}</p>
+                {localResult.valid && <div className="verification-badges"><span>{localResult.animatable ? 'Dynamic coordinates' : 'Static plot'}</span><span>{localResult.supports2dFallback ? '2D fallback ready' : 'No 2D fallback'}</span></div>}
+                {localResult.variables.length > 0 && <div className="variable-list">{localResult.variables.map((variable) => <span className="variable" key={variable}>{variable}</span>)}</div>}
+                {localResult.suggestions.length > 0 && <div className="suggestion-list">{localResult.suggestions.map((suggestion) => <span className="suggestion" key={suggestion}>{suggestion}</span>)}</div>}
+                {!localResult.valid && <div className="failure-recovery"><span>Local preview can keep you moving.</span><button className="recovery-btn" type="button" onClick={recoverWithFallback}>Load safe fallback</button></div>}
+              </div>
+            ) : (
+              <div className="local-result"><div className="result-title"><span className="status-dot state-pending" /> Awaiting a cue</div><p className="result-copy">The local engine will classify your expression as you type.</p></div>
+            )}
+          </section>
+
+          <section className="panel-section">
+            <div className="panel-heading"><h2>Render out</h2><ArrowDownToLine className="icon muted" /></div>
+             <div className="export-options">
+                <label className="export-field">Filename
+                  <input className="export-input" value={filename} placeholder={filenameFromEquation(renderEquation)} onChange={(event) => setFilename(event.target.value)} aria-label="Export filename" />
+               </label>
+                <div className="export-field watermark-lock"><span>Watermark</span><strong>{BRAND_WATERMARK}</strong><small>Permanent on canvas and exports</small></div>
+                <div className="export-field"><span>Video profile</span><strong className="export-profile-value">HD 1280×720 · 60 FPS</strong><small>Browser chooses MP4 when available, otherwise WebM</small></div>
+               <label className="check-row"><input type="checkbox" checked={showFps} onChange={(event) => setShowFps(event.target.checked)} /> Include FPS readout</label>
+             </div>
+            <div className="export-stack">
+               <button className="export-btn primary" type="button" onClick={captureWebm} data-testid="button-export-webm"><MonitorPlay className="icon" /> Capture HD 720p / 60 FPS</button>
+              <button className="export-btn" type="button" onClick={downloadPng} data-testid="button-export-png-secondary"><Upload className="icon" /> Save PNG frame</button>
+            </div>
+            {exportStatus && <p className="result-copy" style={{ marginTop: 9 }} data-testid="status-export">{exportStatus}</p>}
+          </section>
+        </aside>
+      </main>
+       <footer className="studio-footer">
+         <span>Second Solution Studio</span>
+         <span className="footer-tagline">Visualize Mathematics Like Never Before</span>
+         <span className="mono">LOCAL-FIRST · GPU GLSL</span>
+       </footer>
+       <DeveloperAiAssistant
+         open={assistantOpen}
+         onToggle={() => setAssistantOpen(true)}
+         onClose={() => setAssistantOpen(false)}
+         activePanel={assistantPanel}
+         onPanelChange={setAssistantPanel}
+         onQuickAction={handleAssistantQuickAction}
+         isAuthenticated={isDeveloper}
+         accountLabel={account.username || 'Developer session'}
+         diagnostics={assistantDiagnostics}
+         diagnosticsLoading={assistantDiagnosticsLoading}
+         onRefreshDiagnostics={() => void runAssistantDiagnostics()}
+         messages={assistantMessages}
+         chatDraft={assistantChatDraft}
+         onChatDraftChange={setAssistantChatDraft}
+         onSendMessage={handleAssistantChat}
+         paymentStatus={assistantPaymentStatus}
+         paymentMessage={assistantPaymentMessage}
+         onPaymentSetup={() => {
+           setAssistantPaymentStatus('error');
+           setAssistantPaymentMessage('Stripe setup is not connected in this workspace. No checkout or charges were created.');
+         }}
+         themeOptions={assistantThemeOptions}
+         selectedTheme={theme}
+         onThemeChange={(themeId) => {
+           if (themeId === 'dark' || themeId === 'light' || themeId === 'neon') {
+             setTheme(themeId);
+             setTopNotice(`${themeId === 'light' ? 'Minimal Light' : themeId === 'neon' ? 'Neon Glow' : 'Dark'} theme`);
+           }
+         }}
+         onAuthenticate={(authMode) => setAssistantAuthModal(authMode)}
+       />
+       {assistantAuthModal && (
+         <AuthModalRoute
+           mode={assistantAuthModal}
+           onClose={() => setAssistantAuthModal(null)}
+           onModeChange={setAssistantAuthModal}
+            onDeveloperUnlock={() => {
+             setAssistantAuthModal(null);
+             setAssistantPanel('auth');
+           }}
+         />
+       )}
+        {studioAuthModal && (
+          <AuthModalRoute
+            mode={studioAuthModal}
+            onClose={() => setStudioAuthModal(null)}
+            onModeChange={setStudioAuthModal}
+            onDeveloperUnlock={() => {
+              setStudioAuthModal(null);
+              setTopNotice('Account authenticated');
+            }}
+          />
+        )}
+      <DeveloperTextEditor rootRef={studioRootRef} isDeveloper={isDeveloper} />
+    </div>
+  );
+}
+
+function LandingRoute() {
+  const [, setLocation] = useLocation();
+  const { isDeveloper, account } = useDeveloperSession();
+  const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up' | null>(null);
+  return (
+    <>
+      <LandingPage
+        isDeveloper={isDeveloper}
+        account={account}
+        onAuth={(nextMode) => setAuthMode(nextMode)}
+      onStart={(example) => {
+        if (!example) {
+          setLocation('/studio');
+          return;
+        }
+        setLocation(`/studio?mode=${encodeURIComponent(example.mode)}&equation=${encodeURIComponent(example.equation)}`);
+      }}
+      />
+      {authMode && <AuthModalRoute mode={authMode} onClose={() => setAuthMode(null)} onModeChange={setAuthMode} onDeveloperUnlock={() => { setAuthMode(null); setLocation('/studio'); }} />}
+    </>
+  );
+}
+
+function AuthModalRoute({
+  mode,
+  onModeChange,
+  onClose,
+  onDeveloperUnlock,
+}: {
+  mode: 'sign-in' | 'sign-up';
+  onModeChange: (mode: 'sign-in' | 'sign-up') => void;
+  onClose: () => void;
+  onDeveloperUnlock: () => void;
+}) {
+  const account = useAccountIdentity(DEVELOPER_EMAIL);
+  const [developerSequenceActive, setDeveloperSequenceActive] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('');
+  const [authError, setAuthError] = useState('');
+  useEffect(() => {
+    if (account.isSignedIn && account.isPrivileged && !developerSequenceActive) {
+      setDeveloperSequenceActive(true);
+    }
+  }, [account.isPrivileged, account.isSignedIn, developerSequenceActive]);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanUsername = username.trim() || cleanEmail.split('@')[0] || 'member';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || password.length < 4) {
+      setAuthError('Enter a valid email and a password with at least 4 characters.');
+      return;
+    }
+    const isDeveloper = cleanEmail === DEVELOPER_EMAIL && password === DEVELOPER_PASSWORD;
+    setStoredAccount({
+      email: cleanEmail,
+      username: isDeveloper ? 'phoenix-developer' : cleanUsername,
+      roleLabel: isDeveloper ? 'Developer' : 'Member',
+    });
+    setAuthError('');
+    if (isDeveloper) setDeveloperSequenceActive(true);
+    else onDeveloperUnlock();
+  };
+
+  return (
+    <div className="auth-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+        <div className="auth-modal-heading">
+          <div><span className="landing-eyebrow">Second Solution Studio account</span><h2 id="auth-modal-title">{mode === 'sign-in' ? 'Welcome back.' : 'Start your next proof.'}</h2><p>Your local studio account keeps this workspace ready on this browser.</p></div>
+          <button className="icon-btn" type="button" onClick={onClose} aria-label="Close authentication dialog"><X className="icon" /></button>
+        </div>
+        <div className="auth-mode-tabs" role="tablist" aria-label="Authentication mode">
+          <button type="button" role="tab" aria-selected={mode === 'sign-in'} className={mode === 'sign-in' ? 'active' : ''} onClick={() => onModeChange('sign-in')}>Login</button>
+          <button type="button" role="tab" aria-selected={mode === 'sign-up'} className={mode === 'sign-up' ? 'active' : ''} onClick={() => onModeChange('sign-up')}>Sign up</button>
+        </div>
+        <div className="auth-component-wrap">
+          <form className="local-auth-form" onSubmit={submit}>
+            {mode === 'sign-up' && (
+              <label>Username<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label>
+            )}
+            <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label>
+            <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'} required /></label>
+            {authError && <p className="auth-form-error" role="alert">{authError}</p>}
+            <button className="auth-submit-button" type="submit">{mode === 'sign-in' ? 'Login to studio' : 'Create local account'}</button>
+            <p className="auth-form-note">Guest mode remains available. Developer tools unlock with the configured developer account.</p>
+          </form>
+        </div>
+        <DeveloperAccessSequence active={developerSequenceActive} onUnlock={onDeveloperUnlock} />
+      </div>
+    </div>
+  );
+}
+
+function SignInPage() {
+  return <FreshAuthPage mode="sign-in" />;
+}
+
+function SignUpPage() {
+  return <FreshAuthPage mode="sign-up" />;
+}
+
+function FreshAuthPage({ mode }: { mode: 'sign-in' | 'sign-up' }) {
+  const [, setLocation] = useLocation();
+  return (
+    <div className="auth-page-shell">
+      <AuthModalRoute
+        mode={mode}
+        onClose={() => setLocation('/')}
+        onModeChange={(nextMode) => setLocation(nextMode === 'sign-in' ? '/sign-in' : '/sign-up')}
+        onDeveloperUnlock={() => setLocation('/studio')}
+      />
+    </div>
+  );
+}
+
+function Router() {
+  return (
+    <Switch>
+      <Route path="/" component={LandingRoute} />
+      <Route path="/sign-in/*?" component={SignInPage} />
+      <Route path="/sign-up/*?" component={SignUpPage} />
+      <Route path="/studio" component={MainStudio} />
+      <Route component={NotFound} />
+    </Switch>
+  );
+}
+
+function RoutedErrorBoundary({ children }: { children: ReactNode }) {
+  const [location] = useLocation();
+  return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;
+}
+
+function LocalSessionBridge() {
+  const account = useAccountIdentity(DEVELOPER_EMAIL);
+  const isDeveloper = account.isSignedIn && account.isPrivileged;
+  return (
+    <DeveloperSessionContext.Provider value={{ isDeveloper, account, grantDeveloperSession: () => undefined, resetDeveloperSession: () => undefined }}>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <RoutedErrorBoundary><Router /></RoutedErrorBoundary>
+          <Toaster />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </DeveloperSessionContext.Provider>
+  );
+}
+
+function App() {
+  return <WouterRouter base={basePath}><LocalSessionBridge /></WouterRouter>;
+}
+
+export default App;

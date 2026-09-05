@@ -1,0 +1,1 @@
+- [Vercel import porting](vercel-port.md) — nested imported exports may require an explicit client directory and API client regeneration.
