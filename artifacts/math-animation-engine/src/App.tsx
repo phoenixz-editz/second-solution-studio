@@ -3504,6 +3504,11 @@ function MainStudio() {
     audioLastProgressRef.current = currentProgress;
   }, [audioEnabled, audioPosition, playing, speed]);
 
+  // Keep the animation loop from restarting every time playback advances.
+  // The callback reads the latest audio/render state through this ref instead.
+  const syncAudioToProgressRef = useRef(syncAudioToProgress);
+  syncAudioToProgressRef.current = syncAudioToProgress;
+
   useLayoutEffect(() => {
     syncAudioToProgress(progress);
   }, [progress, syncAudioToProgress]);
@@ -3640,7 +3645,7 @@ function MainStudio() {
         ? elapsedProgress - Math.floor(elapsedProgress)
         : Math.min(1, elapsedProgress);
       progressRef.current = nextProgress;
-      syncAudioToProgress(nextProgress);
+      syncAudioToProgressRef.current(nextProgress);
       setProgress(nextProgress);
       if (!isLooping && nextProgress >= 1) {
         setPlaying(false);
@@ -3650,7 +3655,7 @@ function MainStudio() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [duration, isLooping, playing, sessionReady, syncAudioToProgress]);
+  }, [duration, isLooping, playing, sessionReady]);
 
   useEffect(() => {
     if (localResult?.valid && renderEquation.trim()) {
