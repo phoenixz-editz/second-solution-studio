@@ -20,6 +20,7 @@ type CancelRequest = {
 type WorkerRequest = GenerateRequest | CancelRequest;
 
 let activeRequestId = 0;
+const FIELD_LIMIT = 1e6;
 
 function compileSurfaceEquation(source: string, mode: 'implicit3d' | 'surface3d') {
   const evaluator = buildGraphEvaluator(source, mode);
@@ -44,9 +45,9 @@ function safeEvaluate(expression: { evaluate: (scope: Record<string, number>) =>
       a: phase,
       b: speed,
     }));
-    if (Number.isFinite(value)) return Math.max(-1e9, Math.min(1e9, value));
-    if (value === Number.POSITIVE_INFINITY) return 1e9;
-    if (value === Number.NEGATIVE_INFINITY) return -1e9;
+    if (Number.isFinite(value)) return Math.max(-FIELD_LIMIT, Math.min(FIELD_LIMIT, value));
+    if (value === Number.POSITIVE_INFINITY) return FIELD_LIMIT;
+    if (value === Number.NEGATIVE_INFINITY) return -FIELD_LIMIT;
     return Number.NaN;
   } catch {
     return Number.NaN;
@@ -68,7 +69,7 @@ function clamp(value: number, minimum: number, maximum: number) {
 async function generateSurface(request: GenerateRequest) {
   const mode = request.mode ?? 'implicit3d';
   const expression = compileSurfaceEquation(request.equation, mode);
-  const resolution = Math.max(8, Math.min(96, Math.round(request.resolution)));
+  const resolution = Math.max(16, Math.min(160, Math.round(request.resolution)));
   const extent = isUsableExtent(request.extent) ? request.extent : 3.4;
   const heightScale = mode === 'surface3d'
     ? clamp(request.heightScale ?? 1, 0.25, 4)
@@ -88,7 +89,8 @@ async function generateSurface(request: GenerateRequest) {
         const worldX = -extent + x * step;
         const worldY = extent - y * step;
         const height = safeEvaluate(expression, worldX, worldY, 0, request.phase, request.speed) * heightScale;
-        heights[indexOf(x, y)] = Number.isFinite(height)
+        const maxHeight = extent * 2.5;
+        heights[indexOf(x, y)] = Number.isFinite(height) && Math.abs(height) <= maxHeight
           ? height
           : Number.NaN;
       }
@@ -191,7 +193,11 @@ async function generateSurface(request: GenerateRequest) {
 
   for (let z = 0; z < resolution; z += 1) {
     for (let y = 0; y < resolution; y += 1) {
-      for (let x = 0; x < resolution; x += 1) {
+    for (let x = 0; x < resolution; x += 1) {
+        // A clamped field is intentionally not treated as a signed-distance
+        // field at the outermost cells. Skipping those cells prevents an
+        // overflowed expression from turning the sampling box into a cube.
+        if (x === 0 || y === 0 || z === 0 || x === resolution - 1 || y === resolution - 1 || z === resolution - 1) continue;
         const corners = cubeCorners.map(([dx, dy, dz]) => {
           const px = -extent + (x + dx) * step;
           const py = -extent + (y + dy) * step;
@@ -212,12 +218,10 @@ async function generateSurface(request: GenerateRequest) {
             const linearAmount = Math.abs(denominator) < 1e-12
               ? 0.5
               : first.value / denominator;
-            // Gradient-aware intersection bias acts like a dynamic raymarch
-            // step: steep fields use shorter steps near the zero crossing,
-            // while shallow fields avoid excessive micro-stepping.
-            const gradient = Math.abs(first.value - second.value);
-            const adaptiveStep = clamp(1 / (0.8 + gradient * step * 0.035), 0.72, 1.18);
-            const amount = clamp(linearAmount + (adaptiveStep - 1) * 0.012, 0, 1);
+            // Linear interpolation is the least biased estimate of the
+            // zero-crossing. Do not nudge it based on field magnitude: that
+            // visibly rounds small features and can create boundary faces.
+            const amount = clamp(linearAmount, 0, 1);
             intersections.push([
               first.point[0] + (second.point[0] - first.point[0]) * amount,
               first.point[1] + (second.point[1] - first.point[1]) * amount,

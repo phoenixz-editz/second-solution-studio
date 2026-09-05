@@ -34,6 +34,7 @@ const MAX_CALCULUS_TERMS = 16_384;
 const MAX_INTEGRAL_STEPS = 256;
 const MAX_MULTIVARIABLE_INTEGRAL_STEPS = 24;
 const DOMAIN_SAFETY_LIMIT = 4096;
+const RUNTIME_VALUE_LIMIT = 1e6;
 const astCache = new Map<string, any>();
 const compiledAstCache = new Map<string, CompiledExpression>();
 const gammaApproximation = (value: number): number => {
@@ -87,6 +88,50 @@ const piecewiseFunction = (...values: unknown[]) => {
   }
   return hasFallback ? values[values.length - 1] : Number.NaN;
 };
+
+function clampRuntimeValue(value: number) {
+  if (Number.isNaN(value)) return Number.NaN;
+  if (value === Number.POSITIVE_INFINITY) return RUNTIME_VALUE_LIMIT;
+  if (value === Number.NEGATIVE_INFINITY) return -RUNTIME_VALUE_LIMIT;
+  return Math.max(-RUNTIME_VALUE_LIMIT, Math.min(RUNTIME_VALUE_LIMIT, value));
+}
+
+function safePower(base: number, exponent: number) {
+  if (!Number.isFinite(base) || !Number.isFinite(exponent)) {
+    return Math.sign(base || 1) * RUNTIME_VALUE_LIMIT;
+  }
+  if (base === 0 && exponent < 0) return RUNTIME_VALUE_LIMIT;
+  if (base < 0 && Math.abs(exponent - Math.round(exponent)) > 1e-10) return Number.NaN;
+  const magnitude = Math.abs(base);
+  if (magnitude === 0) return exponent === 0 ? 1 : 0;
+  const logMagnitude = exponent * Math.log(magnitude);
+  if (logMagnitude > Math.log(RUNTIME_VALUE_LIMIT)) {
+    return base < 0 && Math.abs(Math.round(exponent)) % 2 === 1 ? -RUNTIME_VALUE_LIMIT : RUNTIME_VALUE_LIMIT;
+  }
+  if (logMagnitude < -Math.log(RUNTIME_VALUE_LIMIT)) return 0;
+  const result = Math.exp(logMagnitude);
+  return clampRuntimeValue(
+    base < 0 && Math.abs(Math.round(exponent)) % 2 === 1 ? -result : result,
+  );
+}
+
+function safeExponential(value: number) {
+  if (!Number.isFinite(value)) return value < 0 ? 0 : RUNTIME_VALUE_LIMIT;
+  return clampRuntimeValue(Math.exp(Math.max(-40, Math.min(40, value))));
+}
+
+function safeSquareRoot(value: number) {
+  return Math.sqrt(Math.max(0, clampRuntimeValue(Number(value))));
+}
+
+function safeLogarithm(value: number) {
+  return Math.log(Math.max(Math.abs(clampRuntimeValue(Number(value))), 1e-12));
+}
+
+function safeTangent(value: number) {
+  return clampRuntimeValue(Math.tan(value));
+}
+
 math.import({
   gamma: gammaApproximation,
   step: stepFunction,
@@ -94,6 +139,12 @@ math.import({
   dot: dotFunction,
   cross: crossFunction,
   piecewise: piecewiseFunction,
+  pow: safePower,
+  exp: safeExponential,
+  sqrt: safeSquareRoot,
+  log: safeLogarithm,
+  ln: safeLogarithm,
+  tan: safeTangent,
 }, { override: true });
 const mathFunctions = new Set([
   'abs', 'acos', 'acosh', 'acot', 'acoth', 'acsc', 'acsch', 'asec', 'asech',
@@ -200,8 +251,8 @@ function withAliases(scope: Record<string, any>) {
   // Keep parameter aliases aligned without letting a cartesian x coordinate
   // overwrite an explicit animation parameter. This matters for vector fields
   // that use both x/y and t/u in the same expression.
-  const parameter = next.u ?? next.theta ?? next.t ?? next.x ?? 0;
-  const secondary = next.v ?? next.r ?? next.phi ?? next.y ?? next.b ?? 0;
+  const parameter = next.t ?? next.u ?? next.theta ?? next.a ?? 0;
+  const secondary = next.v ?? next.r ?? next.phi ?? next.b ?? 0;
   next.u ??= parameter;
   next.theta ??= parameter;
   next.t ??= parameter;
@@ -486,6 +537,12 @@ function evaluateCalculusOperation(operation: CalculusOperation, scope: Record<s
   return direction * (step / 3) * total;
 }
 
+function clampEvaluatedValue(value: unknown): unknown {
+  if (typeof value === 'number') return clampRuntimeValue(value);
+  if (Array.isArray(value)) return value.map((item) => clampEvaluatedValue(item));
+  return value;
+}
+
 function compileMathExpression(source: string): CompiledExpression {
   const normalized = normalizeCalculusNotation(source);
   const cached = compiledAstCache.get(normalized);
@@ -515,9 +572,9 @@ function compileMathExpression(source: string): CompiledExpression {
         runtimeScope[operation.placeholder] = evaluateCalculusOperation(operation, runtimeScope);
       });
       helperPrograms.forEach(({ name, compiled: helper }) => {
-        runtimeScope[name] = helper.evaluate(runtimeScope);
+          runtimeScope[name] = clampEvaluatedValue(helper.evaluate(runtimeScope));
       });
-      return compiled.evaluate(runtimeScope);
+      return clampEvaluatedValue(compiled.evaluate(runtimeScope));
     },
   };
   return rememberCached(compiledAstCache, normalized, result);

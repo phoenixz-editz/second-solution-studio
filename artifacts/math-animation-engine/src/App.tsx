@@ -114,6 +114,7 @@ type CachedFrame = {
 
 const IMPLICIT_GRID_RESOLUTION = 96;
 const IMPLICIT_CACHE_LIMIT = 24;
+const IMPLICIT_FIELD_LIMIT = 1e6;
 const GRAPH_ZOOM_MIN = 0.05;
 const GRAPH_ZOOM_MAX = 20;
 const GRAPH_ZOOM_BUTTON_FACTOR = 1.25;
@@ -341,9 +342,9 @@ function createImplicitSurfaceGeometry(
   const evaluate = (x: number, y: number, z: number) => {
     try {
       const value = Number(expression.evaluate({ x, y, z, t: phase, a: phase, b: speed }));
-      if (Number.isFinite(value)) return Math.max(-1e9, Math.min(1e9, value));
-      if (value === Number.POSITIVE_INFINITY) return 1e9;
-      if (value === Number.NEGATIVE_INFINITY) return -1e9;
+       if (Number.isFinite(value)) return Math.max(-IMPLICIT_FIELD_LIMIT, Math.min(IMPLICIT_FIELD_LIMIT, value));
+       if (value === Number.POSITIVE_INFINITY) return IMPLICIT_FIELD_LIMIT;
+       if (value === Number.NEGATIVE_INFINITY) return -IMPLICIT_FIELD_LIMIT;
       return Number.NaN;
     } catch {
       return Number.NaN;
@@ -450,8 +451,10 @@ function createHeightmapSurfaceGeometry(
       const worldY = extent - y * step;
       try {
         const value = Number(expression.evaluate({ x: worldX, y: worldY, z: 0, t: phase, a: phase, b: speed }));
-        heights[indexOf(x, y)] = Number.isFinite(value)
-          ? value * Math.max(0.25, Math.min(4, heightScale))
+         const scaledHeight = value * Math.max(0.25, Math.min(4, heightScale));
+         const maxHeight = extent * 2.5;
+         heights[indexOf(x, y)] = Number.isFinite(scaledHeight) && Math.abs(scaledHeight) <= maxHeight
+           ? scaledHeight
           : Number.NaN;
       } catch {
         heights[indexOf(x, y)] = Number.NaN;
@@ -590,9 +593,9 @@ const renderQualityOptions: Array<{ value: RenderQuality; label: string; detail:
   { value: 'high', label: 'High', detail: 'Ultra HD' },
 ];
 const renderQualitySteps: Record<RenderQuality, number> = {
-  low: 64,
-  medium: 96,
-  high: 160,
+  low: 128,
+  medium: 256,
+  high: 384,
 };
 const isRenderQuality = (value: unknown): value is RenderQuality => value === 'low' || value === 'medium' || value === 'high';
 const ANIMATION_PHASE_LIMIT = Math.PI * 2;
@@ -655,7 +658,7 @@ function compileGlslNode(
     if (node.fn === 'unaryPlus' || node.op === 'unaryPlus') return first ?? null;
     if (node.op === 'not' || node.op === '!') return `(!(${first}))`;
     if (!second) return first ?? null;
-    if (node.op === '^') return `pow(${first}, ${second})`;
+    if (node.op === '^') return `safePow(${first}, ${second})`;
     if (node.op === '%') return `mod(${first}, ${second})`;
     if (['+', '-', '*', '/'].includes(node.op)) return `(${first} ${node.op} ${second})`;
     if (['==', '!=', '<', '>', '<=', '>='].includes(node.op)) return `(${first} ${node.op} ${second})`;
@@ -836,7 +839,8 @@ function compileGlslNode(
     if (name === 'ln' && compiledArgs.length === 1) return `log(${compiledArgs[0]})`;
     if (name === 'log' && compiledArgs.length === 2) return `(log(${compiledArgs[0]}) / log(${compiledArgs[1]}))`;
     if (name === 'log10' && compiledArgs.length === 1) return `(log(${compiledArgs[0]}) / log(10.0))`;
-    if (name === 'cbrt' && compiledArgs.length === 1) return `(sign(${compiledArgs[0]}) * pow(abs(${compiledArgs[0]}), 0.33333333))`;
+    if (name === 'pow' && compiledArgs.length === 2) return `safePow(${compiledArgs[0]}, ${compiledArgs[1]})`;
+    if (name === 'cbrt' && compiledArgs.length === 1) return `(sign(${compiledArgs[0]}) * safePow(abs(${compiledArgs[0]}), 0.33333333))`;
     if (name === 'sinh' && compiledArgs.length === 1) return `((exp(${compiledArgs[0]}) - exp(-(${compiledArgs[0]}))) * 0.5)`;
     if (name === 'cosh' && compiledArgs.length === 1) return `((exp(${compiledArgs[0]}) + exp(-(${compiledArgs[0]}))) * 0.5)`;
     if (name === 'tanh' && compiledArgs.length === 1) return `(sinh(${compiledArgs[0]}) / cosh(${compiledArgs[0]}))`;
@@ -859,6 +863,9 @@ function compileGlslNode(
       'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'abs', 'sqrt', 'exp', 'floor',
       'ceil', 'round', 'sign', 'min', 'max', 'dot', 'cross',
     ]);
+    if (name === 'sqrt' && compiledArgs.length === 1) return `safeSqrt(${compiledArgs[0]})`;
+    if (name === 'exp' && compiledArgs.length === 1) return `safeExp(${compiledArgs[0]})`;
+    if (name === 'log' && compiledArgs.length === 1) return `safeLog(${compiledArgs[0]})`;
     if (directFunctions.has(name)) return `${name}(${compiledArgs.join(', ')})`;
     return null;
   }
@@ -890,9 +897,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
   const fieldFunctions = expressions.map((expression, index) => (
     `float field${index}(vec3 p) {
        float value = ${expression};
-       if (!(value == value)) return 1.0e6;
-       if (abs(value) > 1.0e19) return sign(value) * 1.0e19;
-       return value;
+        return safeField(value);
      }`
   )).join('\n');
   const fieldCalls = expressions.map((_, index) => `field${index}(p)`);
@@ -922,7 +927,9 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       precision highp int;
       #define PI 3.141592653589793
       #define E 2.718281828459045
-      #define MAX_RAY_STEPS 512
+       #define MAX_RAY_STEPS 512
+       #define FIELD_LIMIT 1000000.0
+       #define LOG_FIELD_LIMIT 13.815510558
       uniform vec3 uCameraPosition;
       uniform mat4 uCameraMatrix;
       uniform vec3 uCameraRight;
@@ -943,7 +950,41 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       uniform int uInteractive;
       varying vec2 vScreenUv;
 
-      float sminPolynomial(float a, float b, float k) {
+        float safeField(float value) {
+          if (!(value == value)) return FIELD_LIMIT;
+          if (value > FIELD_LIMIT) return FIELD_LIMIT;
+          if (value < -FIELD_LIMIT) return -FIELD_LIMIT;
+          return value;
+       }
+
+       float safePow(float base, float exponent) {
+          float boundedExponent = clamp(exponent, -32.0, 32.0);
+          float boundedBase = max(abs(base), 0.000001);
+          if (base < 0.0 && abs(boundedExponent - floor(boundedExponent + 0.5)) > 0.0001) return FIELD_LIMIT;
+          float logResult = boundedExponent * log(boundedBase);
+          if (logResult > LOG_FIELD_LIMIT) {
+            float signValue = base < 0.0 && mod(abs(floor(boundedExponent + 0.5)), 2.0) > 0.5 ? -1.0 : 1.0;
+            return signValue * FIELD_LIMIT;
+          }
+          if (logResult < -LOG_FIELD_LIMIT) return 0.0;
+          float result = exp(logResult);
+          if (base < 0.0 && mod(abs(floor(boundedExponent + 0.5)), 2.0) > 0.5) result = -result;
+          return safeField(result);
+       }
+
+       float safeSqrt(float value) {
+         return sqrt(max(value, 0.0));
+       }
+
+       float safeExp(float value) {
+          return exp(clamp(value, -LOG_FIELD_LIMIT, LOG_FIELD_LIMIT));
+       }
+
+       float safeLog(float value) {
+          return log(max(abs(safeField(value)), 0.000001));
+       }
+
+       float sminPolynomial(float a, float b, float k) {
         float h = clamp(0.5 + 0.5 * (b - a) / max(k, 0.0001), 0.0, 1.0);
         return mix(b, a, h) - k * h * (1.0 - h);
       }
@@ -962,7 +1003,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
         accumulator += 12.50734 / (shifted + 5.0);
         accumulator -= 0.138571 / (shifted + 6.0);
         float base = shifted + 7.5;
-        return sqrt(2.0 * PI) * pow(base, shifted + 0.5) * exp(-base) * accumulator;
+         return safeSqrt(2.0 * PI) * safePow(base, shifted + 0.5) * safeExp(-base) * accumulator;
       }
 
       float gammaApprox(float value) {
@@ -974,7 +1015,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       ${fieldFunctions}
 
       float distanceField(vec3 p) {
-        return ${combinedField};
+        return safeField(${combinedField});
       }
 
       vec2 rayBox(vec3 origin, vec3 direction) {
@@ -992,7 +1033,7 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
       }
 
       float normalStep() {
-        return max(uNormalEpsilon, uDomainExtent / float(uMaxSteps) * 0.35);
+        return clamp(max(uNormalEpsilon, uDomainExtent / float(uMaxSteps) * 0.18), 0.0005, 0.025);
       }
 
       vec3 fieldNormal(vec3 point) {
@@ -1001,12 +1042,14 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
         vec3 k2 = vec3(-1.0, -1.0, 1.0);
         vec3 k3 = vec3(-1.0, 1.0, -1.0);
         vec3 k4 = vec3(1.0, 1.0, 1.0);
-        return normalize(
+         vec3 gradient =
           k1 * distanceField(point + e * k1)
           + k2 * distanceField(point + e * k2)
           + k3 * distanceField(point + e * k3)
-          + k4 * distanceField(point + e * k4)
-        );
+           + k4 * distanceField(point + e * k4);
+         float gradientLength = length(gradient);
+         if (!(gradientLength == gradientLength) || gradientLength < 0.00001) return vec3(0.0, 0.0, 1.0);
+         return gradient / gradientLength;
       }
 
       void main() {
@@ -1026,33 +1069,44 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
         vec2 interval = rayBox(rayOrigin, rayDirection);
         if (interval.x > interval.y || interval.y < 0.0) discard;
 
-        float distanceAlongRay = max(interval.x, 0.0);
-        float previousField = distanceField(rayOrigin + rayDirection * distanceAlongRay);
-        float baseStep = (uDomainExtent * 2.0) / float(uMaxSteps);
+         float baseStep = (uDomainExtent * 2.0) / float(uMaxSteps);
+         float entryDistance = max(interval.x, 0.0);
+         float exitDistance = interval.y;
+         float boundaryEpsilon = max(baseStep * 1.25, uDomainExtent * 0.0015);
+         float distanceAlongRay = entryDistance + min(boundaryEpsilon, max(0.0, exitDistance - entryDistance) * 0.2);
+         float previousDistance = distanceAlongRay;
+         float previousField = distanceField(rayOrigin + rayDirection * distanceAlongRay);
+         bool previousUsable = abs(previousField) < FIELD_LIMIT * 0.999;
         vec3 hitPoint = vec3(0.0);
         bool hit = false;
 
         for (int stepIndex = 0; stepIndex < MAX_RAY_STEPS; stepIndex += 1) {
-          if (stepIndex >= uMaxSteps || distanceAlongRay > interval.y) break;
+           if (stepIndex >= uMaxSteps || distanceAlongRay > exitDistance) break;
           vec3 point = rayOrigin + rayDirection * distanceAlongRay;
           float field = distanceField(point);
-          float adaptiveStep = baseStep * 0.86;
+           bool fieldUsable = abs(field) < FIELD_LIMIT * 0.999;
+           float adaptiveStep = baseStep * 0.72;
           if (uInteractive == 0) {
             float gradientProbe = max(
-              abs(distanceField(point + vec3(baseStep, 0.0, 0.0)) - field),
+               abs(safeField(distanceField(point + vec3(baseStep, 0.0, 0.0)) - field)),
               max(
-                abs(distanceField(point + vec3(0.0, baseStep, 0.0)) - field),
-                abs(distanceField(point + vec3(0.0, 0.0, baseStep)) - field)
+                 abs(safeField(distanceField(point + vec3(0.0, baseStep, 0.0)) - field)),
+                 abs(safeField(distanceField(point + vec3(0.0, 0.0, baseStep)) - field))
               )
             );
-            float safeStep = abs(field) / max(gradientProbe / max(baseStep, 0.0001), 0.0001) * 0.72;
-            adaptiveStep = clamp(max(baseStep * 0.28, safeStep), baseStep * 0.28, baseStep * 1.8);
+             float safeStep = abs(field) / max(gradientProbe / max(baseStep, 0.0001), 0.0001) * 0.58;
+             adaptiveStep = clamp(max(baseStep * 0.16, safeStep), baseStep * 0.16, baseStep * 1.25);
           }
 
-          if (abs(field) < baseStep * 0.34 || (field < 0.0) != (previousField < 0.0)) {
-            float left = max(interval.x, distanceAlongRay - adaptiveStep);
+            bool insideBounds = distanceAlongRay > entryDistance + boundaryEpsilon
+              && distanceAlongRay < exitDistance - boundaryEpsilon;
+            bool crossed = fieldUsable && previousUsable && (field < 0.0) != (previousField < 0.0);
+            if (insideBounds && fieldUsable && (abs(field) < baseStep * 0.22 || crossed)) {
+             float left = crossed
+               ? previousDistance
+               : max(entryDistance + boundaryEpsilon, distanceAlongRay - adaptiveStep);
             float right = distanceAlongRay;
-            float leftField = distanceField(rayOrigin + rayDirection * left);
+             float leftField = crossed ? previousField : distanceField(rayOrigin + rayDirection * left);
             for (int refinement = 0; refinement < 6; refinement += 1) {
               float middle = (left + right) * 0.5;
               float middleField = distanceField(rayOrigin + rayDirection * middle);
@@ -1067,7 +1121,9 @@ function buildImplicitRaymarchShader(sources: string[]): RaymarchShader | null {
             hit = true;
             break;
           }
+           previousDistance = distanceAlongRay;
           previousField = field;
+           previousUsable = fieldUsable;
           distanceAlongRay += adaptiveStep;
         }
         if (!hit) discard;
@@ -1718,6 +1774,22 @@ function GraphCanvas({
       onRenderStatus('error', 'The hardware-accelerated WebGL renderer could not be initialized.');
       return;
     }
+    renderer.debug.checkShaderErrors = true;
+    renderer.debug.onShaderError = (
+      gl: WebGLRenderingContext | WebGL2RenderingContext,
+      program: WebGLProgram,
+      vertexShader: WebGLShader,
+      fragmentShader: WebGLShader,
+    ) => {
+      const details = [
+        gl.getProgramInfoLog(program),
+        gl.getShaderInfoLog(vertexShader),
+        gl.getShaderInfoLog(fragmentShader),
+      ].filter(Boolean).join(' | ');
+      const message = details || 'The 3D fragment shader could not be compiled on this device.';
+      onRuntimeWarning(message);
+      onRenderStatus('error', message);
+    };
     const getQualityPixelRatio = () => {
       if (renderQualityRef.current === 'low') return 0.75;
       if (renderQualityRef.current === 'medium') return 1;

@@ -1,1 +1,2 @@
 - [Vercel import porting](vercel-port.md) — nested imported exports may require an explicit client directory and API client regeneration.
+- [Implicit surface stability](implicit-surface-stability.md) — saturated scalar values must not drive sign crossings or boundary cells.
