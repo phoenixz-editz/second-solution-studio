@@ -3,7 +3,7 @@ import type { StudioMode } from '@/hooks/use-equation-validator';
 
 export type CompiledExpression = { evaluate: (scope: Record<string, any>) => unknown };
 export type GraphPoint = { x: number; y: number };
-export type ResolvedStudioMode = Exclude<StudioMode, 'auto'>;
+export type ResolvedStudioMode = Exclude<StudioMode, 'auto' | 'code2d' | 'code3d'>;
 export type CompiledPoint = { x: CompiledExpression; y: CompiledExpression };
 export type GraphEvaluator =
   | { kind: 'function'; expression: CompiledExpression }
@@ -1410,28 +1410,35 @@ export function evaluatePointSet(points: CompiledPoint[], time: number, speed = 
 
 export function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator {
   const input = normalizeForPreview(equation);
+  const resolvedMode: ResolvedStudioMode = mode === 'auto'
+    ? detectSmartMode(input)
+    : mode === 'code2d'
+      ? 'function'
+      : mode === 'code3d'
+        ? 'implicit3d'
+        : mode;
   try {
-    if (mode === 'points') {
+    if (resolvedMode === 'points') {
       const points = parseManualPoints(input);
       return points.length >= 2 ? { kind: 'points', points } : null;
     }
-    if (mode === 'parametric' || mode === 'parametric3d' || mode === 'vector') {
+    if (resolvedMode === 'parametric' || resolvedMode === 'parametric3d' || resolvedMode === 'vector') {
       const parts = splitPair(input);
       if (!parts) return null;
-      return mode === 'vector'
+      return resolvedMode === 'vector'
         ? { kind: 'vector', x: compileProgramPart(input, parts[0]), y: compileProgramPart(input, parts[1]), z: parts[2] ? compileProgramPart(input, parts[2]) : undefined }
         : { kind: 'parametric', x: compileProgramPart(input, parts[0]), y: compileProgramPart(input, parts[1]), z: parts[2] ? compileProgramPart(input, parts[2]) : undefined };
     }
-    if (mode === 'surface3d') {
+    if (resolvedMode === 'surface3d') {
       return { kind: 'surface', expression: compileProgramExpression(normalizeSurfaceEquation(input)) };
     }
-    if (mode === 'implicit' || mode === 'implicit3d') {
+    if (resolvedMode === 'implicit' || resolvedMode === 'implicit3d') {
       return {
         kind: 'implicit',
-        expression: compileProgramPart(input, normalizeImplicitField(input, mode)),
+        expression: compileProgramPart(input, normalizeImplicitField(input, resolvedMode)),
       };
     }
-    if (mode === 'polar') {
+    if (resolvedMode === 'polar') {
       const renderSource = splitProgramStatements(input).renderExpression;
       const expression = renderSource.match(/^\s*r\s*=\s*(.+)$/i)?.[1] ?? renderSource;
       return { kind: 'polar', expression: compileProgramExpression(expression) };
@@ -1458,7 +1465,13 @@ function extractVariables(input: string) {
 
 export function validateEquationLocally(equation: string, mode: StudioMode): LocalValidationResult {
   const normalized = normalizeForPreview(equation);
-  const resolvedMode = mode === 'auto' ? detectSmartMode(normalized) : mode;
+  const resolvedMode: ResolvedStudioMode = mode === 'auto'
+    ? detectSmartMode(normalized)
+    : mode === 'code2d'
+      ? 'function'
+      : mode === 'code3d'
+        ? 'implicit3d'
+        : mode;
   const hasTimeVariable = /\b(?:t|u|theta)\b/i.test(normalized);
   const variables = extractVariables(normalized);
   if (!normalized) {

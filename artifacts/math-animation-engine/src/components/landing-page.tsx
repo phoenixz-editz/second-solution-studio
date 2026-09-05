@@ -67,6 +67,8 @@ const examples: LandingExample[] = [
   { title: 'Polar bloom', equation: '4 * cos(3 * theta)', mode: 'polar', accent: '#d6a8ff' },
   { title: 'Orbiting points', equation: '(0, 0)\n(3*cos(t), 3*sin(t))\n(4*cos(t + 0.8), 4*sin(t + 0.8))', mode: 'points', accent: '#72d8ff' },
   { title: '3D quadric surface', equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1', mode: 'implicit3d', accent: '#8ce7cf' },
+  { title: 'Coded 2D wave', equation: 'function graph({ x, t }) {\n  return Math.sin(x + t) * 0.8;\n}', mode: 'code2d', accent: '#c7f36b' },
+  { title: 'Coded 3D field', equation: 'function field({ x, y, z, t }) {\n  return x * x + y * y + z * z - 4;\n}', mode: 'code3d', accent: '#72d8ff' },
 ];
 
 const insights: BlogInsight[] = [
@@ -291,7 +293,7 @@ function LiveExamplePreview({ example, motionSpeed = 1, amplitude = 1 }: { examp
               const orbitAngle = angle + time * (1.05 + orbit * 0.18) + orbit;
               x = Math.cos(orbitAngle) * radius;
               y = Math.sin(orbitAngle) * radius;
-            } else if (example.mode === 'implicit3d') {
+            } else if (example.mode === 'implicit3d' || example.mode === 'code3d') {
               const rotate = time * 0.42;
               const vertical = Math.cos(angle) * (0.52 + orbit * 0.11);
               const depth = Math.sin(angle) * (0.8 - orbit * 0.12);
@@ -313,7 +315,7 @@ function LiveExamplePreview({ example, motionSpeed = 1, amplitude = 1 }: { examp
           return points;
         };
 
-        if (example.mode === 'points' || example.mode === 'implicit3d') {
+        if (example.mode === 'points' || example.mode === 'implicit3d' || example.mode === 'code3d') {
           const count = example.mode === 'points' ? 3 : 3;
           for (let orbit = 0; orbit < count; orbit += 1) drawSeries(createSeries(orbit), 2.2);
         } else {
@@ -441,7 +443,7 @@ function LiveExamplePreview({ example, motionSpeed = 1, amplitude = 1 }: { examp
           context.arc(pointX, pointY, 4 + orbit, 0, Math.PI * 2);
           context.fill();
         }
-      } else if (example.mode === 'implicit3d') {
+      } else if (example.mode === 'implicit3d' || example.mode === 'code3d') {
         const rotate = time * 0.45;
         for (let ring = 0; ring < 3; ring += 1) {
           const points: Array<readonly [number, number]> = [];

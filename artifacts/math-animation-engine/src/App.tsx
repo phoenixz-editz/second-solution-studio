@@ -39,6 +39,7 @@ import { ErrorBoundary } from '@/components/error-boundary';
 import { LandingPage } from '@/components/landing-page';
 import { DEVELOPER_EMAIL, DEVELOPER_PASSWORD, DeveloperAccessSequence } from '@/components/developer-access-form';
 import { DeveloperTextEditor } from '@/components/developer-text-editor';
+import { CodingGraphEditor, type CodingCompileStatus } from '@/components/coding-graph-editor';
 import { DeveloperAiAssistant, type AssistantChatMessage, type AssistantPanel, type DiagnosticItem } from '@/components/developer-ai-assistant';
 import { AccountMenu, setStoredAccount, type AccountIdentity, useAccountIdentity } from '@/components/account-menu';
 import { Toaster } from '@/components/ui/toaster';
@@ -65,6 +66,7 @@ import {
   type GraphPoint,
 } from '@/lib/math-parser';
 import { clearStoredSession, loadEncryptedJson, saveEncryptedJson } from '@/lib/session-storage';
+import { compileCodingGraph } from '@/lib/coding-graph-compiler';
 
 const queryClient = new QueryClient();
 type DeveloperSessionContextValue = {
@@ -246,7 +248,12 @@ function easeInOutCubic(value: number) {
 }
 
 function detectSmartRange(equation: string, mode: StudioMode): GraphRange {
-  return resolveDynamicDomain(equation, mode === 'auto' ? detectSmartMode(equation) : mode);
+  const resolvedMode = mode === 'auto'
+    ? detectSmartMode(equation)
+    : isCodingMode(mode)
+      ? compileCodingGraph(equation, mode).renderMode
+      : mode;
+  return resolveDynamicDomain(equation, resolvedMode);
 }
 
 function rangeWorldExtent(range: GraphRange) {
@@ -556,8 +563,8 @@ function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator
   return parserBuildGraphEvaluator(equation, mode);
 }
 
-type HistoryItem = { equation: string; mode: ResolvedStudioMode; at: number; preview?: string };
-type EquationLayer = { id: number; equation: string; mode: ResolvedStudioMode; color: string; visible: boolean };
+type HistoryItem = { equation: string; mode: StudioMode; at: number; preview?: string };
+type EquationLayer = { id: number; equation: string; mode: StudioMode; color: string; visible: boolean };
 type CanvasEntry = {
   expression: string;
   color: string;
@@ -1128,7 +1135,11 @@ const SESSION_STORAGE_KEY = 'second-solution-studio-session-v1';
 const DEFAULT_EQUATION = 'sin(x + t) * exp(-0.08 * x^2)';
 
 function isStudioMode(value: unknown): value is StudioMode {
-  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'surface3d', 'polar', 'vector', 'piecewise', 'points'].includes(String(value));
+  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'surface3d', 'polar', 'vector', 'piecewise', 'points', 'code2d', 'code3d'].includes(String(value));
+}
+
+function isCodingMode(value: StudioMode): value is 'code2d' | 'code3d' {
+  return value === 'code2d' || value === 'code3d';
 }
 
 function isStudioTheme(value: unknown): value is StudioTheme {
@@ -1222,6 +1233,8 @@ const presets: Array<{ equation: string; label: string; mode: StudioMode; symbol
   { equation: '[16 * sin(t)^3, 13 * cos(t) - 5 * cos(2*t) - 2 * cos(3*t) - cos(4*t), v * sin(t)]', label: '3D Heart Curve', mode: 'parametric3d', symbol: '♥' },
   { equation: 'x^2 / 4 + y^2 / 9 + z^2 / 16 = 1', label: 'Quadric Surface', mode: 'implicit3d', symbol: '◉' },
   { equation: 'z = x^2 - y^2', label: 'Saddle Points', mode: 'implicit3d', symbol: '⌁' },
+  { equation: 'function graph({ x, t }) {\n  return Math.sin(x + t) * 0.8;\n}', label: 'Code wave', mode: 'code2d', symbol: '2D' },
+  { equation: 'function field({ x, y, z, t }) {\n  return x * x + y * y + z * z - 4;\n}', label: 'Code sphere', mode: 'code3d', symbol: '3D' },
 ];
 
 const modeDetails: Record<StudioMode, { title: string; helper: string; placeholder: string }> = {
@@ -1236,6 +1249,8 @@ const modeDetails: Record<StudioMode, { title: string; helper: string; placehold
   vector: { title: 'Vector field', helper: '(u, v)', placeholder: '(-y, x)' },
   piecewise: { title: 'Piecewise', helper: 'conditional f(x)', placeholder: 'x < 0 ? sin(x) : cos(x)' },
   points: { title: 'Points', helper: '(x, y) pairs', placeholder: '(1, 2)\n(2, 4)\n(3, 9)' },
+  code2d: { title: 'Coding 2D Graph', helper: 'JavaScript → Canvas 2D', placeholder: 'function graph({ x, t }) {\n  return Math.sin(x + t);\n}' },
+  code3d: { title: 'Coding 3D Graph', helper: 'JavaScript → GPU field', placeholder: 'function field({ x, y, z, t }) {\n  return x*x + y*y + z*z - 4;\n}' },
 };
 
 function AppIcon({ className = 'icon' }: { className?: string }) {
@@ -2854,12 +2869,22 @@ function MainStudio() {
   const launchEquation = launchParams.get('equation') || DEFAULT_EQUATION;
   const launchModeParam = launchParams.get('mode');
   const launchMode: StudioMode = isStudioMode(launchModeParam) ? launchModeParam : 'auto';
-  const launchResolvedMode: ResolvedStudioMode = launchMode === 'auto' ? detectSmartMode(launchEquation) : launchMode;
+  const launchResolvedMode: ResolvedStudioMode = launchMode === 'auto'
+    ? detectSmartMode(launchEquation)
+    : isCodingMode(launchMode)
+      ? compileCodingGraph(launchEquation, launchMode).renderMode
+      : launchMode;
   const launchRange = detectSmartRange(launchEquation, launchResolvedMode);
   const [equation, setEquation] = useState(launchEquation);
   const [mode, setMode] = useState<StudioMode>(launchMode);
   const [layers, setLayers] = useState<EquationLayer[]>([
-    { id: 1, equation: launchEquation, mode: launchResolvedMode, color: '#c7f36b', visible: true },
+    {
+      id: 1,
+      equation: launchEquation,
+      mode: launchMode === 'auto' ? launchResolvedMode : launchMode,
+      color: '#c7f36b',
+      visible: true,
+    },
   ]);
   const [activeLayerId, setActiveLayerId] = useState(1);
   const [theme, setTheme] = useState<StudioTheme>(() => {
@@ -3005,16 +3030,21 @@ function MainStudio() {
   const qualitySelectorRef = useRef<HTMLDivElement>(null);
   const equationInputRef = useRef<HTMLTextAreaElement>(null);
   const downloadPngRef = useRef<() => void>(() => undefined);
-  const validation = useEquationValidator(parsedEquation, mode);
+  const codingSource = isCodingMode(mode) ? compileCodingGraph(equation, mode) : null;
+  const validationEquation = codingSource?.equation ?? parsedEquation;
+  const validationMode: StudioMode = codingSource?.renderMode ?? mode;
+  const validation = useEquationValidator(validationEquation, validationMode);
   useEffect(() => {
     const timer = window.setTimeout(() => setParsedEquation(equation), 300);
     return () => window.clearTimeout(timer);
   }, [equation]);
-  const localResult = validation.validatedKey === `${mode}:${parsedEquation.trim()}` ? validation.data : undefined;
-  const renderEquation = parsedEquation;
-  const localDetectedMode = useMemo(() => detectSmartMode(parsedEquation), [parsedEquation]);
-  const resolvedMode: ResolvedStudioMode = mode === 'auto' ? (localResult?.valid ? localResult.mode : localDetectedMode) : mode;
-  const animationExpected = localResult?.valid ? localResult.animatable : /\b(?:t|u|theta)\b/i.test(parsedEquation);
+  const localResult = validation.validatedKey === `${validationMode}:${validationEquation.trim()}` ? validation.data : undefined;
+  const renderEquation = validationEquation;
+  const localDetectedMode = useMemo(() => detectSmartMode(renderEquation), [renderEquation]);
+  const resolvedMode: ResolvedStudioMode = mode === 'auto'
+    ? (localResult?.valid ? localResult.mode : localDetectedMode)
+    : validationMode as ResolvedStudioMode;
+  const animationExpected = localResult?.valid ? localResult.animatable : /\b(?:t|u|theta)\b/i.test(renderEquation);
   const details = modeDetails[mode];
   const runAssistantDiagnostics = useCallback(async () => {
     setAssistantDiagnosticsLoading(true);
@@ -3209,8 +3239,8 @@ function MainStudio() {
     setLayers((current) => current.map((layer) => layer.id === activeLayerId ? { ...layer, ...patch } : layer));
   }, [activeLayerId]);
   useEffect(() => {
-    updateActiveLayer({ equation: renderEquation, mode: resolvedMode });
-  }, [renderEquation, resolvedMode, updateActiveLayer]);
+    updateActiveLayer({ equation, mode: mode === 'auto' ? resolvedMode : mode });
+  }, [equation, mode, resolvedMode, updateActiveLayer]);
   const changeEquation = useCallback((value: string) => {
     setEquation(value);
     updateActiveLayer({ equation: value });
@@ -3265,7 +3295,7 @@ function MainStudio() {
         definitions.set(definition.name.toLowerCase(), definition.source);
       });
     };
-    layers.filter((layer) => layer.visible).forEach((layer) => collect(layer.equation));
+    layers.filter((layer) => layer.visible && !isCodingMode(layer.mode)).forEach((layer) => collect(layer.equation));
     collect(renderEquation);
     return [...definitions.entries()]
       .map(([name, source]) => `${name} = ${source}`)
@@ -3506,15 +3536,21 @@ function MainStudio() {
             range: activeRange,
           }));
         }
+        const compiledLayer = isCodingMode(layer.mode)
+          ? compileCodingGraph(layer.equation, layer.mode)
+          : {
+              equation: layer.equation,
+              renderMode: layer.mode === 'auto' ? detectSmartMode(layer.equation) : layer.mode,
+            };
         if (
-          !parserExtractEquationVariableDefinitions(layer.equation).renderExpression
-          || !buildGraphEvaluator(layer.equation, layer.mode)
+          !parserExtractEquationVariableDefinitions(compiledLayer.equation).renderExpression
+          || !buildGraphEvaluator(compiledLayer.equation, compiledLayer.renderMode)
         ) return [];
         return [{
-          expression: layer.mode === 'surface3d' ? parserNormalizeSurfaceEquation(layer.equation) : layer.equation,
+          expression: compiledLayer.renderMode === 'surface3d' ? parserNormalizeSurfaceEquation(compiledLayer.equation) : compiledLayer.equation,
           color: layer.color,
-          mode: layer.mode,
-          range: autoRange ? detectSmartRange(layer.equation, layer.mode) : activeRange,
+          mode: compiledLayer.renderMode,
+          range: autoRange ? detectSmartRange(compiledLayer.equation, compiledLayer.renderMode) : activeRange,
         }];
       });
     if (entries.length === 0) return [] as CanvasEntry[];
@@ -3862,10 +3898,10 @@ function MainStudio() {
   const applyPreset = (preset: (typeof presets)[number]) => {
     // Update only the selected input layer. Other layers keep their equations,
     // modes, visibility, and colors while the global editor follows the active one.
-    const presetMode: ResolvedStudioMode = preset.mode === 'auto'
+    const presetMode: StudioMode = preset.mode === 'auto'
       ? detectSmartMode(preset.equation)
       : preset.mode;
-    const nextMode: ResolvedStudioMode = presetMode === 'function' ? 'function' : presetMode;
+    const nextMode: StudioMode = presetMode === 'function' ? 'function' : presetMode;
     changeEquation(preset.equation);
     setParsedEquation(preset.equation);
     setMode(nextMode);
@@ -3885,7 +3921,7 @@ function MainStudio() {
   const addLayer = () => {
     const id = Math.max(...layers.map((layer) => layer.id), 0) + 1;
     const is3d = resolvedMode === 'implicit3d' || resolvedMode === 'surface3d';
-    const nextMode: ResolvedStudioMode = is3d
+    const nextMode: StudioMode = is3d
       ? resolvedMode
       : 'function';
     const nextLayer: EquationLayer = {
@@ -4165,6 +4201,13 @@ function MainStudio() {
   const validatorState = validation.isPending
     ? { label: 'Validating locally', className: 'state-pending' }
     : { label: 'Validator active', className: localResult?.valid === false ? 'state-error' : 'state-valid' };
+  const codeCompileStatus: CodingCompileStatus = codingSource?.error
+    ? 'error'
+    : validation.isPending
+      ? 'pending'
+      : localResult?.valid === false
+        ? 'error'
+        : 'ready';
   const autocompleteOptions = ['sin(', 'cos(', 'tan(', 'log(', 'sqrt('];
   const autocompleteSuggestions = autocompleteOptions.filter((item) => !equation.toLowerCase().includes(item.slice(0, -1))).slice(0, 5);
   const usingSafeFallback = Boolean(renderEquation.trim() && (validation.isError || (localResult && !localResult.valid)));
@@ -4301,20 +4344,40 @@ function MainStudio() {
                          <button className="icon-btn" type="button" onClick={() => removeLayer(layer.id)} disabled={layers.length === 1} aria-label={`Delete input ${index + 1}`} title={layers.length === 1 ? 'Keep one equation input' : 'Delete equation input'}><Trash2 className="icon" /></button>
                        </div>
                      </div>
-                     <textarea
-                       ref={isActive ? equationInputRef : undefined}
-                       className={`equation-input layer-equation-input ${layer.mode === 'points' ? 'points-input' : ''}`}
-                       value={layer.equation}
-                       onFocus={() => selectLayer(layer)}
-                       onChange={(event) => changeLayerEquation(layer.id, event.target.value)}
-                       placeholder={layerDetails.placeholder}
-                       rows={layer.mode === 'points' ? 5 : undefined}
-                       spellCheck={false}
-                       data-testid={`input-equation-layer-${index}`}
-                       aria-label={`Equation input ${index + 1}`}
-                     />
+                     {layer.mode === 'code2d' || layer.mode === 'code3d' ? (
+                       <CodingGraphEditor
+                         value={layer.equation}
+                         onChange={(value) => changeLayerEquation(layer.id, value)}
+                         onFocus={() => selectLayer(layer)}
+                         mode={layer.mode}
+                         status={isActive ? codeCompileStatus : 'ready'}
+                         statusLabel={isActive && codingSource?.error ? codingSource.error : isActive ? undefined : 'Standby'}
+                         testId={`input-equation-layer-${index}`}
+                       />
+                     ) : (
+                       <textarea
+                         ref={isActive ? equationInputRef : undefined}
+                         className={`equation-input layer-equation-input ${layer.mode === 'points' ? 'points-input' : ''}`}
+                         value={layer.equation}
+                         onFocus={() => selectLayer(layer)}
+                         onChange={(event) => changeLayerEquation(layer.id, event.target.value)}
+                         placeholder={layerDetails.placeholder}
+                         rows={layer.mode === 'points' ? 5 : undefined}
+                         spellCheck={false}
+                         data-testid={`input-equation-layer-${index}`}
+                         aria-label={`Equation input ${index + 1}`}
+                       />
+                     )}
                      <div className="input-footer">
-                       <span className="input-hint mono">{layer.mode === 'points' ? 'One (x, y) pair per line' : isActive && mode === 'auto' ? `Detected as ${layerDetails.title} · use t for time` : 'Use t for time'}</span>
+                       <span className="input-hint mono">
+                         {layer.mode === 'points'
+                           ? 'One (x, y) pair per line'
+                           : layer.mode === 'code2d' || layer.mode === 'code3d'
+                             ? 'Source is compiled locally before render'
+                             : isActive && mode === 'auto'
+                               ? `Detected as ${layerDetails.title} · use t for time`
+                               : 'Use t for time'}
+                       </span>
                        {isActive && <div className="input-edit-tools">
                          <div className="edit-history-buttons" aria-label="Equation edit history">
                            <button className="icon-btn" type="button" onClick={undoEquationEdit} disabled={editHistoryIndex === 0} aria-label="Undo equation edit" title="Undo (Ctrl/Cmd+Z)"><Undo2 className="icon" /></button>
@@ -4325,7 +4388,7 @@ function MainStudio() {
                          </span>
                        </div>}
                      </div>
-                     {isActive && layer.mode !== 'points' && autocompleteSuggestions.length > 0 && (
+                     {isActive && layer.mode !== 'points' && layer.mode !== 'code2d' && layer.mode !== 'code3d' && autocompleteSuggestions.length > 0 && (
                        <div className="autocomplete-row">
                          <span className="autocomplete-label">Function palette</span>
                          {autocompleteSuggestions.map((suggestion) => (
