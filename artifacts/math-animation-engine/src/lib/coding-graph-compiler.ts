@@ -177,7 +177,16 @@ function splitStatements(source: string) {
     if (character === ']') squareDepth = Math.max(0, squareDepth - 1);
     if (character === '{') curlyDepth += 1;
     if (character === '}') curlyDepth = Math.max(0, curlyDepth - 1);
-    if ((character === ';' || character === '\n') && parenDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
+    const candidate = source.slice(start, index).trim();
+    const nextLine = source.slice(index + 1).match(/^\s*([^\r\n]*)/)?.[1]?.trim() ?? '';
+    const continuesExpression = /(?:=|[+\-*/%^,]|&&|\|\||\()$/.test(candidate)
+      || /^[+\-*/%^,)]/.test(nextLine);
+    if (
+      (character === ';' || (character === '\n' && !continuesExpression))
+      && parenDepth === 0
+      && squareDepth === 0
+      && curlyDepth === 0
+    ) {
       const statement = source.slice(start, index).trim();
       if (statement) statements.push(statement);
       start = index + 1;
@@ -238,7 +247,10 @@ function compileFunctionBody(source: string) {
   const statements = splitStatements(body).map((statement) => (
     normalizeMathSource(statement.replace(/^\s*(?:const|let|var)\s+/, ''))
   )).filter(Boolean);
-  return [...statements, returnExpression].join('; ');
+  // Keep each assignment as one program statement. A multi-line expression
+  // such as `stem =` followed by balanced parenthesized terms would otherwise
+  // be split again by the math program parser at top-level newlines.
+  return [...statements, returnExpression].join('; ').replace(/\s*\n\s*/g, ' ').trim();
 }
 
 function extractExpression(source: string, mode: CodingGraphMode) {
