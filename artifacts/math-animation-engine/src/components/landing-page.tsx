@@ -543,6 +543,7 @@ function LiveExamplePreview({ example, motionSpeed = 1, amplitude = 1 }: { examp
 
 function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'polar'; equation: string; accent: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const useMobileFallback = typeof window !== 'undefined' && window.innerWidth < 700;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -749,7 +750,7 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
 
   return (
     <div className="hero-curve-card" style={{ '--hero-curve-accent': accent } as CSSProperties}>
-      <div className="hero-curve-heading"><span className="mono">LIVE WEBGL</span><strong>{equation}</strong></div>
+      <div className="hero-curve-heading"><span className="mono">{useMobileFallback ? 'LIVE GRAPH' : 'LIVE WEBGL'}</span><strong>{equation}</strong></div>
       <svg className="hero-plot hero-plot-fallback" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
         <path
           d={kind === 'polar'
@@ -757,7 +758,9 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
             : 'M2 50 C8 20 14 80 20 50 S32 20 38 50 S50 80 56 50 S68 20 74 50 S86 80 98 50'}
         />
       </svg>
-      <canvas ref={canvasRef} className="hero-plot hero-plot-canvas" aria-label={`Live WebGL plot of ${equation}`} />
+      {!useMobileFallback && (
+        <canvas ref={canvasRef} className="hero-plot hero-plot-canvas" aria-label={`Live WebGL plot of ${equation}`} />
+      )}
     </div>
   );
 }
