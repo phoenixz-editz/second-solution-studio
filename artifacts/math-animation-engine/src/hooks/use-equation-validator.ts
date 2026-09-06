@@ -3,6 +3,7 @@ import {
   validateEquationLocally,
   type LocalValidationResult,
 } from '@/lib/math-parser';
+import type { CodingGraphLanguage } from '@/lib/coding-graph-compiler';
 
 export type StudioMode =
   | 'auto'
@@ -16,10 +17,13 @@ export type StudioMode =
   | 'vector'
   | 'piecewise'
   | 'points'
+  | 'vectorfield'
+  | 'spherical3d'
+  | 'complex'
   | 'code2d'
   | 'code3d';
 
-export function useEquationValidator(equation: string, mode: StudioMode) {
+export function useEquationValidator(equation: string, mode: StudioMode, language: CodingGraphLanguage = 'javascript') {
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
   const [data, setData] = useState<LocalValidationResult>();
@@ -59,7 +63,7 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
       const worker = workerRef.current;
       if (!worker) {
         try {
-          setValidatedKey(`${mode}:${trimmed}`);
+          setValidatedKey(`${mode}:${language}:${trimmed}`);
           setData(validateEquationLocally(trimmed, mode));
         } catch {
           setData(undefined);
@@ -74,7 +78,7 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
         if (event.data.id !== requestId || requestId !== requestIdRef.current) return;
         worker.removeEventListener('message', handleMessage);
         worker.removeEventListener('error', handleError);
-        setValidatedKey(`${mode}:${trimmed}`);
+        setValidatedKey(`${mode}:${language}:${trimmed}`);
         setData(event.data.result);
         setIsPending(false);
       };
@@ -94,13 +98,13 @@ export function useEquationValidator(equation: string, mode: StudioMode) {
       worker.addEventListener('message', handleMessage);
       worker.addEventListener('error', handleError, { once: true });
       try {
-        worker.postMessage({ id: requestId, equation: trimmed, mode });
+        worker.postMessage({ id: requestId, equation: trimmed, mode, language });
       } catch {
         handleError();
       }
     }, 300);
     return () => window.clearTimeout(timer);
-  }, [equation, mode]);
+  }, [equation, language, mode]);
 
   return { data, isPending, isError, validatedKey };
 }

@@ -2,6 +2,7 @@ import type { StudioMode } from '@/hooks/use-equation-validator';
 import type { ResolvedStudioMode } from '@/lib/math-parser';
 
 export type CodingGraphMode = Extract<StudioMode, 'code2d' | 'code3d'>;
+export type CodingGraphLanguage = 'javascript' | 'python' | 'glsl';
 
 export type CodingGraphDiagnostic = {
   message: string;
@@ -19,6 +20,61 @@ export type CodingGraphCompileResult = {
 
 const DEFAULT_2D = 'sin(x + t) * exp(-0.08 * x^2)';
 const DEFAULT_3D = 'x^2 + y^2 + z^2 - 4 = 0';
+
+function normalizePythonSource(source: string) {
+  const functionMatch = source.match(/^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*:\s*([\s\S]*)$/m);
+  if (!functionMatch) {
+    return source
+      .replace(/\bmath\./gi, '')
+      .replace(/\*\*/g, '^')
+      .replace(/\band\b/gi, '&&')
+      .replace(/\bor\b/gi, '||')
+      .replace(/\bnot\b/gi, '!')
+      .replace(/\bTrue\b/g, 'true')
+      .replace(/\bFalse\b/g, 'false');
+  }
+  const [, name, parameters, rawBody] = functionMatch;
+  const body = rawBody
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^(?:if|elif)\s+(.+):$/i, 'if ($1) {').replace(/^else:$/i, '} else {'))
+    .join(' ');
+  return `function ${name}(${parameters}) { ${body} }`
+    .replace(/\bmath\./gi, '')
+    .replace(/\*\*/g, '^')
+    .replace(/\band\b/gi, '&&')
+    .replace(/\bor\b/gi, '||')
+    .replace(/\bnot\b/gi, '!')
+    .replace(/\bTrue\b/g, 'true')
+    .replace(/\bFalse\b/g, 'false');
+}
+
+function normalizeGlslSource(source: string) {
+  const functionMatch = source.match(
+    /(?:(?:float|double|vec[234]|void)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*\{([\s\S]*)\}/i,
+  );
+  if (!functionMatch) return source;
+  const [, name, rawParameters, body] = functionMatch;
+  const parameters = rawParameters
+    .split(',')
+    .map((parameter) => parameter.trim().replace(/^(?:const\s+)?(?:float|double|int|vec[234])\s+/, ''))
+    .filter(Boolean)
+    .join(', ');
+  const normalizedBody = body
+    .replace(/\b(?:float|double|int|bool)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=/g, '$1 =')
+    .replace(/\bvec[234]\s*\(([^()]*)\)/g, '[$1]')
+    .replace(/\b[A-Za-z_][A-Za-z0-9_]*\.(x|y|z)\b/g, '$1')
+    .replace(/\btrue\b/gi, 'true')
+    .replace(/\bfalse\b/gi, 'false');
+  return `function ${name}(${parameters}) { ${normalizedBody} }`;
+}
+
+function normalizeSourceLanguage(source: string, language: CodingGraphLanguage) {
+  if (language === 'python') return normalizePythonSource(source);
+  if (language === 'glsl') return normalizeGlslSource(source);
+  return source;
+}
 
 function normalizeMathSource(value: string) {
   return value
@@ -198,8 +254,13 @@ function extractExpression(source: string, mode: CodingGraphMode) {
   return normalizeMathSource(addPlot ?? explicitAssignment ?? returned ?? arrow ?? '');
 }
 
-export function compileCodingGraph(source: string, mode: CodingGraphMode): CodingGraphCompileResult {
-  const input = source.trim();
+export function compileCodingGraph(
+  source: string,
+  mode: CodingGraphMode,
+  language: CodingGraphLanguage = 'javascript',
+): CodingGraphCompileResult {
+  const input = normalizeSourceLanguage(source, language).trim();
+  const diagnosticSource = language === 'javascript' ? input : source.trim();
   if (!input) {
     const diagnostic = diagnosticAt(source, 'Add a return expression to compile this source.');
     return {
@@ -210,7 +271,7 @@ export function compileCodingGraph(source: string, mode: CodingGraphMode): Codin
     };
   }
 
-  const delimiterIssue = delimiterDiagnostic(input);
+  const delimiterIssue = delimiterDiagnostic(diagnosticSource);
   if (delimiterIssue) {
     return {
       equation: mode === 'code2d' ? DEFAULT_2D : DEFAULT_3D,
@@ -224,7 +285,7 @@ export function compileCodingGraph(source: string, mode: CodingGraphMode): Codin
   if (!expression) {
     const functionBodyIndex = functionBodyOpeningIndex(input);
     const diagnostic = diagnosticAt(
-      input,
+      diagnosticSource,
       /\bfunction\b|=>/i.test(input)
         ? 'No return expression found in this function.'
         : 'No graph expression found. Use return, y =, z =, or a PGFPlots addplot block.',
@@ -240,9 +301,9 @@ export function compileCodingGraph(source: string, mode: CodingGraphMode): Codin
 
   if (!/^[\w\s.+\-*/%^(),=[\]<>!?&|:'"πθ;]+$/i.test(expression)) {
     const invalidIndex = expression.search(/[^\w\s.+\-*/%^(),=[\]<>!?&|:'"πθ;]/);
-    const expressionIndex = input.indexOf(expression);
+    const expressionIndex = diagnosticSource.indexOf(expression);
     const diagnostic = diagnosticAt(
-      input,
+      diagnosticSource,
       'The source contains syntax the local graph adapter cannot compile yet.',
       expressionIndex >= 0 && invalidIndex >= 0 ? expressionIndex + invalidIndex : 0,
     );

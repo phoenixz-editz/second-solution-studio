@@ -3,12 +3,14 @@ import {
   type LocalValidationResult,
 } from '@/lib/math-parser';
 import type { StudioMode } from '@/hooks/use-equation-validator';
+import type { CodingGraphLanguage } from '@/lib/coding-graph-compiler';
 import { z } from 'zod';
 
 type ValidationRequest = {
   id: number;
   equation: string;
   mode: StudioMode;
+  language?: CodingGraphLanguage;
 };
 
 type ValidationResponse = {

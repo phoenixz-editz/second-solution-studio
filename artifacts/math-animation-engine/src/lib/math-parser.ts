@@ -15,6 +15,15 @@ export type GraphEvaluator =
   | { kind: 'points'; points: CompiledPoint[] }
   | null;
 
+function resolveExtendedMode(mode: StudioMode): ResolvedStudioMode {
+  if (mode === 'vectorfield') return 'vector';
+  if (mode === 'spherical3d') return 'parametric3d';
+  if (mode === 'complex') return 'vector';
+  if (mode === 'code2d') return 'function';
+  if (mode === 'code3d') return 'implicit3d';
+  return mode === 'auto' ? 'function' : mode;
+}
+
 export type DynamicDomain = {
   xMin: number;
   xMax: number;
@@ -1469,15 +1478,34 @@ export function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEv
   const input = normalizeForPreview(equation);
   const resolvedMode: ResolvedStudioMode = mode === 'auto'
     ? detectSmartMode(input)
-    : mode === 'code2d'
-      ? 'function'
-      : mode === 'code3d'
-        ? 'implicit3d'
-        : mode;
+    : resolveExtendedMode(mode);
   try {
     if (resolvedMode === 'points') {
       const points = parseManualPoints(input);
       return points.length >= 2 ? { kind: 'points', points } : null;
+    }
+    if (mode === 'spherical3d') {
+      const parts = splitPair(input);
+      const radius = parts?.[0] ?? '1';
+      const theta = parts?.[1] ?? 't';
+      const phi = parts?.[2] ?? '0.5 * t';
+      return {
+        kind: 'parametric',
+        x: compileProgramPart(input, `(${radius}) * sin(${phi}) * cos(${theta})`),
+        y: compileProgramPart(input, `(${radius}) * sin(${phi}) * sin(${theta})`),
+        z: compileProgramPart(input, `(${radius}) * cos(${phi})`),
+      };
+    }
+    if (mode === 'complex') {
+      const renderSource = splitProgramStatements(input).renderExpression;
+      const complexExpression = renderSource.match(/^\s*(?:z|w)\s*=\s*(.+)$/i)?.[1];
+      if (complexExpression) {
+        return {
+          kind: 'vector',
+          x: compileProgramPart(input, `re(${complexExpression})`),
+          y: compileProgramPart(input, `im(${complexExpression})`),
+        };
+      }
     }
     if (resolvedMode === 'parametric' || resolvedMode === 'parametric3d' || resolvedMode === 'vector') {
       const parts = splitPair(input);
@@ -1524,11 +1552,7 @@ export function validateEquationLocally(equation: string, mode: StudioMode): Loc
   const normalized = normalizeForPreview(equation);
   const resolvedMode: ResolvedStudioMode = mode === 'auto'
     ? detectSmartMode(normalized)
-    : mode === 'code2d'
-      ? 'function'
-      : mode === 'code3d'
-        ? 'implicit3d'
-        : mode;
+    : resolveExtendedMode(mode);
   const hasTimeVariable = /\b(?:t|u|theta)\b/i.test(normalized);
   const variables = extractVariables(normalized);
   if (!normalized) {

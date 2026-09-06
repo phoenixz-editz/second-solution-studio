@@ -1,9 +1,8 @@
 import { useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
-import type { CodingGraphDiagnostic } from '@/lib/coding-graph-compiler';
+import type { CodingGraphDiagnostic, CodingGraphLanguage } from '@/lib/coding-graph-compiler';
 
 export type CodingGraphMode = 'code2d' | 'code3d';
 export type CodingCompileStatus = 'ready' | 'pending' | 'error';
-
 type CodingGraphEditorProps = {
   value: string;
   onChange: (value: string) => void;
@@ -12,6 +11,8 @@ type CodingGraphEditorProps = {
   status: CodingCompileStatus;
   statusLabel?: string;
   diagnostic?: CodingGraphDiagnostic;
+  language?: CodingGraphLanguage;
+  onLanguageChange?: (language: CodingGraphLanguage) => void;
   testId?: string;
 };
 
@@ -35,6 +36,12 @@ const modeCopy: Record<CodingGraphMode, {
   },
 };
 
+const languageOptions: Array<{ value: CodingGraphLanguage; label: string; extension: string }> = [
+  { value: 'javascript', label: 'JavaScript', extension: 'js' },
+  { value: 'python', label: 'Python', extension: 'py' },
+  { value: 'glsl', label: 'GLSL', extension: 'glsl' },
+];
+
 export function CodingGraphEditor({
   value,
   onChange,
@@ -43,12 +50,15 @@ export function CodingGraphEditor({
   status,
   statusLabel,
   diagnostic,
+  language = 'javascript',
+  onLanguageChange,
   testId,
 }: CodingGraphEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
   const details = modeCopy[mode];
+  const selectedLanguage = languageOptions.find((option) => option.value === language) ?? languageOptions[0];
   const lineCount = useMemo(() => Math.max(1, value.split('\n').length), [value]);
   const lines = useMemo(
     () => Array.from({ length: lineCount }, (_, index) => String(index + 1).padStart(2, '0')),
@@ -108,8 +118,22 @@ export function CodingGraphEditor({
         </div>
       </div>
       <div className="coding-editor-meta">
-        <span className="coding-file-badge">graph.{mode === 'code2d' ? 'js' : 'js'}</span>
-        <span className="coding-runtime-badge">{details.language}</span>
+        <span className="coding-file-badge">graph.{selectedLanguage.extension}</span>
+        <span className="coding-runtime-badge">{selectedLanguage.label}</span>
+        <label className="coding-language-control" htmlFor={`coding-language-${testId ?? mode}`}>
+          <span className="coding-language-label">Language</span>
+          <select
+            id={`coding-language-${testId ?? mode}`}
+            className="coding-language-select"
+            value={language}
+            onChange={(event) => onLanguageChange?.(event.target.value as CodingGraphLanguage)}
+            aria-label={`${mode === 'code2d' ? 'Coding 2D Graph' : 'Coding 3D Graph'} language`}
+          >
+            {languageOptions.map((option) => (
+              <option value={option.value} key={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
         <span className="coding-meta-spacer" />
         <span className="coding-meta-hint">Tab inserts spaces</span>
       </div>

@@ -35,6 +35,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { all, create } from 'mathjs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { AnimatePresence, motion } from 'framer-motion';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { LandingPage } from '@/components/landing-page';
 import { DEVELOPER_EMAIL, DEVELOPER_PASSWORD, DeveloperAccessSequence } from '@/components/developer-access-form';
@@ -66,7 +67,7 @@ import {
   type GraphPoint,
 } from '@/lib/math-parser';
 import { clearStoredSession, loadEncryptedJson, saveEncryptedJson } from '@/lib/session-storage';
-import { compileCodingGraph } from '@/lib/coding-graph-compiler';
+import { compileCodingGraph, type CodingGraphLanguage } from '@/lib/coding-graph-compiler';
 
 const queryClient = new QueryClient();
 type DeveloperSessionContextValue = {
@@ -567,7 +568,7 @@ function buildGraphEvaluator(equation: string, mode: StudioMode): GraphEvaluator
 }
 
 type HistoryItem = { equation: string; mode: StudioMode; at: number; preview?: string };
-type EquationLayer = { id: number; equation: string; mode: StudioMode; color: string; visible: boolean };
+type EquationLayer = { id: number; equation: string; mode: StudioMode; color: string; visible: boolean; language?: CodingGraphLanguage };
 type CanvasEntry = {
   expression: string;
   color: string;
@@ -1191,11 +1192,18 @@ const SESSION_STORAGE_KEY = 'second-solution-studio-session-v1';
 const DEFAULT_EQUATION = 'sin(x + t) * exp(-0.08 * x^2)';
 
 function isStudioMode(value: unknown): value is StudioMode {
-  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'surface3d', 'polar', 'vector', 'piecewise', 'points', 'code2d', 'code3d'].includes(String(value));
+  return ['auto', 'function', 'parametric', 'parametric3d', 'implicit', 'implicit3d', 'surface3d', 'polar', 'vector', 'vectorfield', 'spherical3d', 'complex', 'piecewise', 'points', 'code2d', 'code3d'].includes(String(value));
 }
 
 function isCodingMode(value: StudioMode): value is 'code2d' | 'code3d' {
   return value === 'code2d' || value === 'code3d';
+}
+
+function renderModeForInput(mode: StudioMode): ResolvedStudioMode {
+  if (mode === 'vectorfield') return 'vector';
+  if (mode === 'spherical3d') return 'parametric3d';
+  if (mode === 'complex') return 'vector';
+  return mode === 'auto' || mode === 'code2d' || mode === 'code3d' ? 'function' : mode;
 }
 
 function isStudioTheme(value: unknown): value is StudioTheme {
@@ -1280,6 +1288,9 @@ const presets: Array<{ equation: string; label: string; mode: StudioMode; symbol
   { equation: 'x^2 + y^2 = 4', label: 'Circle field', mode: 'implicit', symbol: '◎' },
   { equation: '4 * cos(3 * theta)', label: 'Polar bloom', mode: 'polar', symbol: '✳' },
   { equation: '(-y, x)', label: 'Orbit field', mode: 'vector', symbol: '↗' },
+  { equation: '(-y / (1 + x^2 + y^2), x / (1 + x^2 + y^2))', label: 'Vector field', mode: 'vectorfield', symbol: '⇢' },
+  { equation: '[2, t, 0.35 * t]', label: 'Spherical coordinates', mode: 'spherical3d', symbol: '◉' },
+  { equation: 'z = exp(i * t)', label: 'Complex mapping', mode: 'complex', symbol: 'ℂ' },
   { equation: 'x < 0 ? sin(x) : cos(x)', label: 'Split wave', mode: 'piecewise', symbol: '⌁' },
   { equation: '(1, 1)\n(2, 4)\n(3, 9)\n(4, 16)', label: 'Point trail', mode: 'points', symbol: '⋮' },
   { equation: '[2 * cos(t)^3, 2 * sin(t)^3, 1.4 * sin(3 * t)]', label: '3D Rose Surface', mode: 'parametric3d', symbol: '✿' },
@@ -1303,6 +1314,9 @@ const modeDetails: Record<StudioMode, { title: string; helper: string; placehold
   surface3d: { title: '3D Surface', helper: 'z = f(x, y)', placeholder: 'z = sin(x) * cos(y)' },
   polar: { title: 'Polar', helper: 'r = f(θ, t)', placeholder: '4 * cos(3 * theta)' },
   vector: { title: 'Vector field', helper: '(u, v)', placeholder: '(-y, x)' },
+  vectorfield: { title: 'Vector field (dense)', helper: 'F(x, y) → (u, v)', placeholder: '(-y / (1 + x² + y²), x / (1 + x² + y²))' },
+  spherical3d: { title: 'Spherical coordinates', helper: 'r(θ, φ) → (x, y, z)', placeholder: '[2, t, 0.35 * t]' },
+  complex: { title: 'Complex mapping', helper: 'z(t) → (Re, Im)', placeholder: 'z = exp(i * t)' },
   piecewise: { title: 'Piecewise', helper: 'conditional f(x)', placeholder: 'x < 0 ? sin(x) : cos(x)' },
   points: { title: 'Points', helper: '(x, y) pairs', placeholder: '(1, 2)\n(2, 4)\n(3, 9)' },
   code2d: { title: 'Coding 2D Graph', helper: 'JavaScript → Canvas 2D', placeholder: 'function graph({ x, t }) {\n  return Math.sin(x + t);\n}' },
@@ -2945,7 +2959,7 @@ function MainStudio() {
     ? detectSmartMode(launchEquation)
     : isCodingMode(launchMode)
       ? compileCodingGraph(launchEquation, launchMode).renderMode
-      : launchMode;
+      : renderModeForInput(launchMode);
   const launchRange = detectSmartRange(launchEquation, launchResolvedMode);
   const [equation, setEquation] = useState(launchEquation);
   const [mode, setMode] = useState<StudioMode>(launchMode);
@@ -3102,15 +3116,17 @@ function MainStudio() {
   const qualitySelectorRef = useRef<HTMLDivElement>(null);
   const equationInputRef = useRef<HTMLTextAreaElement>(null);
   const downloadPngRef = useRef<() => void>(() => undefined);
-  const codingSource = isCodingMode(mode) ? compileCodingGraph(equation, mode) : null;
+  const activeLayer = layers.find((layer) => layer.id === activeLayerId);
+  const codingLanguage: CodingGraphLanguage = activeLayer?.language ?? 'javascript';
+  const codingSource = isCodingMode(mode) ? compileCodingGraph(equation, mode, codingLanguage) : null;
   const validationEquation = codingSource?.equation ?? parsedEquation;
-  const validationMode: StudioMode = codingSource?.renderMode ?? mode;
-  const validation = useEquationValidator(validationEquation, validationMode);
+  const validationMode: StudioMode = codingSource?.renderMode ?? renderModeForInput(mode);
+  const validation = useEquationValidator(validationEquation, validationMode, codingLanguage);
   useEffect(() => {
     const timer = window.setTimeout(() => setParsedEquation(equation), 300);
     return () => window.clearTimeout(timer);
   }, [equation]);
-  const localResult = validation.validatedKey === `${validationMode}:${validationEquation.trim()}` ? validation.data : undefined;
+  const localResult = validation.validatedKey === `${validationMode}:${codingLanguage}:${validationEquation.trim()}` ? validation.data : undefined;
   const renderEquation = validationEquation;
   const localDetectedMode = useMemo(() => detectSmartMode(renderEquation), [renderEquation]);
   const resolvedMode: ResolvedStudioMode = mode === 'auto'
@@ -3333,6 +3349,9 @@ function MainStudio() {
     }
     setLayers((current) => current.map((layer) => layer.id === id ? { ...layer, equation: value } : layer));
   }, [activeLayerId, changeEquation]);
+  const changeLayerLanguage = useCallback((id: number, language: CodingGraphLanguage) => {
+    setLayers((current) => current.map((layer) => layer.id === id ? { ...layer, language } : layer));
+  }, []);
   const changeMode = useCallback((value: StudioMode) => {
     setMode(value);
     updateActiveLayer({ mode: value === 'auto' ? detectSmartMode(equation) : value });
@@ -3614,10 +3633,10 @@ function MainStudio() {
           }));
         }
         const compiledLayer = isCodingMode(layer.mode)
-          ? compileCodingGraph(layer.equation, layer.mode)
+          ? compileCodingGraph(layer.equation, layer.mode, layer.language ?? 'javascript')
           : {
               equation: layer.equation,
-              renderMode: layer.mode === 'auto' ? detectSmartMode(layer.equation) : layer.mode,
+              renderMode: layer.mode === 'auto' ? detectSmartMode(layer.equation) : renderModeForInput(layer.mode),
             };
         if (
           !parserExtractEquationVariableDefinitions(compiledLayer.equation).renderExpression
@@ -4432,6 +4451,8 @@ function MainStudio() {
                            ? `Line ${codingSource.diagnostic.line} · Col ${codingSource.diagnostic.column}`
                            : isActive ? undefined : 'Standby'}
                          diagnostic={isActive ? codingSource?.diagnostic : undefined}
+                          language={layer.language ?? 'javascript'}
+                          onLanguageChange={(language) => changeLayerLanguage(layer.id, language)}
                          testId={`input-equation-layer-${index}`}
                        />
                      ) : (
@@ -5147,14 +5168,28 @@ function FreshAuthPage({ mode }: { mode: 'sign-in' | 'sign-up' }) {
 }
 
 function Router() {
+  const [location] = useLocation();
+  const direction = location === '/' ? -1 : 1;
   return (
-    <Switch>
-      <Route path="/" component={LandingRoute} />
-      <Route path="/sign-in/*?" component={SignInPage} />
-      <Route path="/sign-up/*?" component={SignUpPage} />
-      <Route path="/studio" component={MainStudio} />
-      <Route component={NotFound} />
-    </Switch>
+    <AnimatePresence mode="wait" initial={false} custom={direction}>
+      <motion.div
+        key={location}
+        className="page-transition-shell"
+        custom={direction}
+        initial={{ opacity: 0, x: direction * 18, y: direction < 0 ? 10 : 0 }}
+        animate={{ opacity: 1, x: 0, y: 0 }}
+        exit={{ opacity: 0, x: direction * -18, y: direction < 0 ? -10 : 0 }}
+        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+      >
+        <Switch>
+          <Route path="/" component={LandingRoute} />
+          <Route path="/sign-in/*?" component={SignInPage} />
+          <Route path="/sign-up/*?" component={SignUpPage} />
+          <Route path="/studio" component={MainStudio} />
+          <Route component={NotFound} />
+        </Switch>
+      </motion.div>
+    </AnimatePresence>
   );
 }
 
