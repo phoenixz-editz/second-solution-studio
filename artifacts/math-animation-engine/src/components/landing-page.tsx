@@ -750,6 +750,13 @@ function LiveHeroWebGL({ kind, equation, accent }: { kind: 'trigonometric' | 'po
   return (
     <div className="hero-curve-card" style={{ '--hero-curve-accent': accent } as CSSProperties}>
       <div className="hero-curve-heading"><span className="mono">LIVE WEBGL</span><strong>{equation}</strong></div>
+      <svg className="hero-plot hero-plot-fallback" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <path
+          d={kind === 'polar'
+            ? 'M50 12 C70 35 88 25 78 50 C88 75 70 65 50 88 C30 65 12 75 22 50 C12 25 30 35 50 12 Z'
+            : 'M2 50 C8 20 14 80 20 50 S32 20 38 50 S50 80 56 50 S68 20 74 50 S86 80 98 50'}
+        />
+      </svg>
       <canvas ref={canvasRef} className="hero-plot hero-plot-canvas" aria-label={`Live WebGL plot of ${equation}`} />
     </div>
   );
